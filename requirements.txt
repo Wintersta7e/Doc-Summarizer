@@ -1,6 +1,6 @@
 # DocSummarizer - Requirements
 # Core LLM
-llama-cpp-python>=0.2.50
+llama-cpp-python>=0.3.23
 
 # Document parsing
 pypdf>=4.0.0
