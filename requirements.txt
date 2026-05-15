@@ -12,6 +12,6 @@ chardet>=5.2.0
 customtkinter>=5.2.0
 
 # Utilities
-huggingface-hub>=0.20.0
+huggingface-hub>=1.15.0
 tqdm>=4.66.0
 psutil>=5.9.0
