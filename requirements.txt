@@ -9,7 +9,7 @@ striprtf>=0.0.26
 chardet>=5.2.0
 
 # GUI
-customtkinter>=5.2.0
+customtkinter>=5.2.2
 
 # Utilities
 huggingface-hub>=0.20.0
