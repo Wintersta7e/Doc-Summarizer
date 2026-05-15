@@ -13,5 +13,5 @@ customtkinter>=5.2.0
 
 # Utilities
 huggingface-hub>=0.20.0
-tqdm>=4.66.0
+tqdm>=4.67.3
 psutil>=5.9.0
