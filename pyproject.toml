@@ -32,7 +32,7 @@ dependencies = [
     # GUI. Held on the 5.x line: 6.0.0 (released 2026-06-24) is a brand-new
     # major and the GUI can't be validated in headless CI, so the upgrade is
     # deferred until it can be verified on a desktop.
-    "customtkinter>=5.2.2,<6",
+    "customtkinter>=5.2.2,<7",
     # Utilities. tqdm <4.66.3 has CVE-2024-34062.
     "huggingface-hub>=1.21,<2",
     "tqdm>=4.68,<5",
