@@ -67,8 +67,11 @@ jobs:
       # llama-cpp-python has no wheels for many python/OS combos at 0.3.x,
       # so we accept a source compile here (cmake + MSVC on Windows,
       # cmake + gcc on Linux). Slow but it's a once-per-release cost.
-      - name: Install package + runtime + PyInstaller
-        run: pip install -e ".[runtime]" pyinstaller
+      # The `gui` extra is REQUIRED: without PySide6 the build still succeeds
+      # but produces a binary that dies on `import PySide6` at startup. The
+      # v2.0.0 assets shipped that way (41 MB rather than ~190 MB).
+      - name: Install package + gui/runtime extras + PyInstaller
+        run: pip install -e ".[gui,runtime]" pyinstaller
 
       - name: Build executable
         run: pyinstaller --noconfirm DocSummarizer.spec
