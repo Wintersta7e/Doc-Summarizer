@@ -12,6 +12,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QSignalSpy
 
 from docsummarizer.model_manager import (
+    LANGUAGE_AUTO,
     SUMMARY_TYPE_DETAILED,
     StructuredSummary,
     SummarizationCancelledError,
@@ -31,10 +32,18 @@ def qapp() -> QGuiApplication:
 class _FakeSummarizer:
     def __init__(self) -> None:
         self.closed = False
+        # Last output language the bridge asked for, so tests can assert the
+        # saved setting actually reaches inference.
+        self.language: str | None = None
 
     def summarize_structured(
-        self, text: str, summary_type: str = SUMMARY_TYPE_DETAILED, should_cancel: object = None
+        self,
+        text: str,
+        summary_type: str = SUMMARY_TYPE_DETAILED,
+        should_cancel: object = None,
+        language: str = LANGUAGE_AUTO,
     ) -> StructuredSummary:
+        self.language = language
         return StructuredSummary(
             summary_type,
             "the lead",
@@ -43,7 +52,13 @@ class _FakeSummarizer:
             "rendered text",
         )
 
-    def summarize(self, text: str, summary_type: str = SUMMARY_TYPE_DETAILED) -> str:
+    def summarize(
+        self,
+        text: str,
+        summary_type: str = SUMMARY_TYPE_DETAILED,
+        language: str = LANGUAGE_AUTO,
+    ) -> str:
+        self.language = language
         return "FAKE PLAIN SUMMARY"
 
     def close(self) -> None:
@@ -131,10 +146,14 @@ class _CountingFake(_FakeSummarizer):
         self.calls = 0
 
     def summarize_structured(
-        self, text: str, summary_type: str = SUMMARY_TYPE_DETAILED, should_cancel: object = None
+        self,
+        text: str,
+        summary_type: str = SUMMARY_TYPE_DETAILED,
+        should_cancel: object = None,
+        language: str = LANGUAGE_AUTO,
     ) -> StructuredSummary:
         self.calls += 1
-        return super().summarize_structured(text, summary_type, should_cancel)
+        return super().summarize_structured(text, summary_type, should_cancel, language)
 
 
 def _loaded_bridge(monkeypatch, tmp_path, *, fake=None):
@@ -246,7 +265,11 @@ def test_async_load_document_completes_off_thread(qapp, monkeypatch, tmp_path) -
 
 class _CancelledFake(_FakeSummarizer):
     def summarize_structured(
-        self, text: str, summary_type: str = SUMMARY_TYPE_DETAILED, should_cancel: object = None
+        self,
+        text: str,
+        summary_type: str = SUMMARY_TYPE_DETAILED,
+        should_cancel: object = None,
+        language: str = LANGUAGE_AUTO,
     ) -> StructuredSummary:
         raise SummarizationCancelledError
 
@@ -360,6 +383,45 @@ def test_set_appearance_persists(qapp) -> None:
     bridge = _bridge()
     bridge.setAppearance("Dark")
     assert load_settings().appearance == "Dark"
+
+
+def test_set_output_language_persists_without_arming_reload(qapp) -> None:
+    """The language lives in the prompt, so the loaded model needs no reload."""
+    bridge = _bridge()
+    bridge.setOutputLanguage("Chinese")
+    assert load_settings().output_language == "Chinese"
+    assert bridge._get_output_language() == "Chinese"
+    assert bridge._get_reload_armed() is False
+
+
+def test_output_language_reaches_summarize(qapp, monkeypatch, tmp_path) -> None:
+    fake = _FakeSummarizer()
+    bridge, _ = _loaded_bridge(monkeypatch, tmp_path, fake=fake)
+    bridge.setOutputLanguage("Japanese")
+    bridge.summarize()
+    assert fake.language == "Japanese"
+
+
+def test_output_language_reaches_batch(qapp, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(bridge_mod, "is_model_downloaded", lambda: True)
+    fake = _FakeSummarizer()
+    bridge = ConsoleBridge(summarizer_factory=lambda *_: fake, synchronous=True)
+    bridge.checkModel()
+    bridge.setOutputLanguage("French")
+    (tmp_path / "a.txt").write_text("Document A content here.", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    bridge.batchProcess(str(tmp_path), str(out))
+
+    assert fake.language == "French"
+
+
+def test_output_language_defaults_to_auto_at_summarize(qapp, monkeypatch, tmp_path) -> None:
+    fake = _FakeSummarizer()
+    bridge, _ = _loaded_bridge(monkeypatch, tmp_path, fake=fake)
+    bridge.summarize()
+    assert fake.language == LANGUAGE_AUTO
 
 
 def test_reload_not_armed_without_loaded_model(qapp) -> None:

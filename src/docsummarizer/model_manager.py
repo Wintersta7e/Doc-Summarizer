@@ -80,8 +80,9 @@ DEFAULT_MODEL = ModelConfig(
 # context window without taking on a tokenizer dependency.
 _CHARS_PER_TOKEN = 3
 # Tokens reserved for everything in a request that isn't the document itself
-# (system prompt, instruction, chat-template overhead).
-_SCAFFOLD_TOKENS = 400
+# (system prompt, instruction, the language directive stated twice, chat-template
+# overhead).
+_SCAFFOLD_TOKENS = 550
 # Floor on the per-chunk token budget, so a tiny n_ctx can't yield degenerate
 # one-character chunks.
 _MIN_CHUNK_TOKENS = 512
@@ -115,6 +116,75 @@ _SUMMARY_INSTRUCTIONS = {
         "**Significance:** Why it matters."
     ),
 }
+
+
+# Output language ------------------------------------------------------------
+# Every prompt here is written in English, which biases a multilingual model
+# toward answering in English: a Chinese document carrying a few English
+# acronyms was reported coming back summarized entirely in English, while the
+# same document without them summarized in Chinese. Nothing previously told the
+# model what language to answer in, so it inferred one from the prompt plus the
+# document. Every request now states the language explicitly.
+LANGUAGE_AUTO = "auto"
+
+# Offered by the GUI picker and named in the CLI's --language help. Any other
+# non-empty name is still accepted and passed to the model verbatim, so a
+# language missing from this list is a one-word CLI flag away.
+OUTPUT_LANGUAGES = (
+    LANGUAGE_AUTO,
+    "English",
+    "Chinese",
+    "Spanish",
+    "French",
+    "German",
+    "Portuguese",
+    "Italian",
+    "Dutch",
+    "Polish",
+    "Russian",
+    "Ukrainian",
+    "Turkish",
+    "Arabic",
+    "Hindi",
+    "Japanese",
+    "Korean",
+    "Vietnamese",
+)
+
+# A language name is interpolated straight into the prompt, so it is collapsed
+# to one short line first — a pasted paragraph must not become instructions.
+_MAX_LANGUAGE_LEN = 40
+
+_AUTO_LANGUAGE_DIRECTIVE = (
+    "Write the summary in the same language as the document. Isolated "
+    "foreign-language names, acronyms, and technical terms do not change that: "
+    "follow the language the body of the document is written in."
+)
+
+
+def normalize_language(language: str | None) -> str:
+    """Coerce a user-supplied output language to a safe single-line value.
+
+    Returns ``LANGUAGE_AUTO`` for anything empty or unset, so every caller can
+    pass whatever it has (a CLI flag, a hand-edited settings file) without
+    pre-validating.
+    """
+    if not language:
+        return LANGUAGE_AUTO
+    cleaned = " ".join(language.split())[:_MAX_LANGUAGE_LEN].strip()
+    if not cleaned or cleaned.lower() == LANGUAGE_AUTO:
+        return LANGUAGE_AUTO
+    return cleaned
+
+
+def _language_directive(language: str) -> str:
+    """The sentence appended to a prompt to pin the summary's language."""
+    language = normalize_language(language)
+    if language == LANGUAGE_AUTO:
+        return _AUTO_LANGUAGE_DIRECTIVE
+    return (
+        f"Write the summary in {language}, even when the document is written in another language."
+    )
 
 
 def _split_into_chunks(text: str, max_chars: int) -> list[str]:
@@ -167,7 +237,7 @@ _STRUCTURED_SEED = 0
 _STRUCTURED_TEMPERATURE = 0.1
 # JSON output is denser than prose, so reserve more of the context window for
 # the response than the prose path's _SCAFFOLD_TOKENS does.
-_STRUCTURED_SCAFFOLD_TOKENS = 700
+_STRUCTURED_SCAFFOLD_TOKENS = 850
 _DETAILED_POINT_COUNT = 3
 # Structured-summary sections, in render order. CONCLUSIONS is a synthesis with
 # no single supporting sentence, so it carries no quote.
@@ -584,6 +654,9 @@ class Summarizer:
         log_debug(f"Memory after loading: {get_memory_usage_mb()} MB")
         # Set during summarize(); read per-token to interrupt generation on Stop.
         self._cancel_check: Callable[[], bool] | None = None
+        # Set during summarize(); read by every prompt builder. Instance state
+        # rather than a threaded-through argument, mirroring _cancel_check.
+        self._language: str = LANGUAGE_AUTO
         # ctypes callback objects must stay strongly referenced while llama.cpp
         # owns the callback pointer. These are cleared after each completion.
         self._llama_abort_callback: Any | None = None
@@ -720,6 +793,7 @@ class Summarizer:
         summary_type: str = SUMMARY_TYPE_DETAILED,
         max_tokens: int = 1024,
         should_cancel: Callable[[], bool] | None = None,
+        language: str = LANGUAGE_AUTO,
     ) -> str:
         """Generate a summary of the given text.
 
@@ -733,6 +807,9 @@ class Summarizer:
             summary_type: one of `SUMMARY_TYPES`. Unknown values fall back to
                 "detailed" to preserve the prior tolerant behavior.
             max_tokens: Maximum tokens in the response
+            language: Output language. ``LANGUAGE_AUTO`` (the default) tells the
+                model to match the document; any other name pins the summary to
+                that language.
 
         Returns:
             The generated summary
@@ -741,8 +818,12 @@ class Summarizer:
             raise RuntimeError(_CLOSED_MESSAGE)
 
         self._cancel_check = should_cancel
+        self._language = normalize_language(language)
         text = text.strip()
-        log_info(f"Starting summarization: type={summary_type}, input_chars={len(text)}")
+        log_info(
+            f"Starting summarization: type={summary_type}, "
+            f"language={self._language}, input_chars={len(text)}"
+        )
 
         budget_tokens = max(self.n_ctx - max_tokens - _SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
         budget_chars = budget_tokens * _CHARS_PER_TOKEN
@@ -770,7 +851,7 @@ class Summarizer:
         # text, so this terminates.
         if len(combined) > budget_chars:
             log_info("Combined section summaries still exceed budget; reducing again")
-            return self.summarize(combined, summary_type, max_tokens, should_cancel)
+            return self.summarize(combined, summary_type, max_tokens, should_cancel, language)
 
         summary = self._synthesize(combined, summary_type, max_tokens)
         self._log_speed(summary, time.time() - start_time)
@@ -782,6 +863,7 @@ class Summarizer:
         summary_type: str = SUMMARY_TYPE_DETAILED,
         max_tokens: int = 1024,
         should_cancel: Callable[[], bool] | None = None,
+        language: str = LANGUAGE_AUTO,
     ) -> StructuredSummary:
         """Summarize into discrete, source-grounded points for the GUI.
 
@@ -799,22 +881,27 @@ class Summarizer:
         # (extracted documents commonly start with whitespace). split_sentences
         # already ignores leading/trailing whitespace for grounding.
         if summary_type == SUMMARY_TYPE_BRIEF:
-            lead = self.summarize(text, SUMMARY_TYPE_BRIEF, max_tokens, should_cancel)
+            lead = self.summarize(text, SUMMARY_TYPE_BRIEF, max_tokens, should_cancel, language)
             return StructuredSummary(SUMMARY_TYPE_BRIEF, lead or None, [], None, lead)
 
         if summary_type not in (SUMMARY_TYPE_DETAILED, SUMMARY_TYPE_STRUCTURED):
             summary_type = SUMMARY_TYPE_DETAILED
 
-        log_info(f"Starting structured summarization: type={summary_type}, input_chars={len(text)}")
+        log_info(
+            f"Starting structured summarization: type={summary_type}, "
+            f"language={normalize_language(language)}, input_chars={len(text)}"
+        )
         try:
-            result = self._summarize_structured(text, summary_type, max_tokens, should_cancel)
+            result = self._summarize_structured(
+                text, summary_type, max_tokens, should_cancel, language
+            )
         except SummarizationCancelledError:
             raise  # a clean stop must not fall back to more inference
         except Exception as exc:
             log_warning(f"Structured summarization failed ({exc!s}); falling back to prose")
             result = None
         if result is None:
-            return self._fallback_structured(text, summary_type, max_tokens)
+            return self._fallback_structured(text, summary_type, max_tokens, language)
         return result
 
     def _summarize_structured(
@@ -823,9 +910,11 @@ class Summarizer:
         summary_type: str,
         max_tokens: int,
         should_cancel: Callable[[], bool] | None = None,
+        language: str = LANGUAGE_AUTO,
     ) -> StructuredSummary | None:
         """Run the structured path; ``None`` signals the caller to fall back."""
         self._cancel_check = should_cancel
+        self._language = normalize_language(language)
         budget_chars = (
             max(self.n_ctx - max_tokens - _STRUCTURED_SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
             * _CHARS_PER_TOKEN
@@ -886,10 +975,11 @@ class Summarizer:
 
     def _chat_json(self, user_content: str, max_tokens: int) -> str:
         """One chat completion constrained to a JSON object, low-temperature."""
+        directive = _language_directive(self._language)
         return self._complete(
             [
-                {"role": "system", "content": _STRUCTURED_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
+                {"role": "system", "content": f"{_STRUCTURED_SYSTEM_PROMPT} {directive}"},
+                {"role": "user", "content": f"{user_content}\n\n{directive}"},
             ],
             max_tokens=max_tokens,
             temperature=_STRUCTURED_TEMPERATURE,
@@ -899,10 +989,10 @@ class Summarizer:
         )
 
     def _fallback_structured(
-        self, text: str, summary_type: str, max_tokens: int
+        self, text: str, summary_type: str, max_tokens: int, language: str = LANGUAGE_AUTO
     ) -> StructuredSummary:
         """Degrade to a plain prose summary wrapped as a ``StructuredSummary``."""
-        summary = self.summarize(text, summary_type, max_tokens)
+        summary = self.summarize(text, summary_type, max_tokens, language=language)
         return StructuredSummary(summary_type, summary or None, [], None, summary)
 
     def _summarize_once(self, text: str, summary_type: str, max_tokens: int) -> str:
@@ -930,11 +1020,17 @@ class Summarizer:
         Using ``create_chat_completion`` (rather than a raw prompt string) lets
         llama.cpp wrap the message in whatever instruction format the loaded
         model expects, so swapping models doesn't require hand-editing prompts.
+
+        The language directive is stated twice — in the system turn and as the
+        last line of the user turn. A 4B model reliably honours the instruction
+        nearest the end of the prompt; the system copy survives a long document
+        pushing that line far from the start.
         """
+        directive = _language_directive(self._language)
         return self._complete(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
+                {"role": "system", "content": f"{_SYSTEM_PROMPT} {directive}"},
+                {"role": "user", "content": f"{user_content}\n\n{directive}"},
             ],
             max_tokens=max_tokens,
             temperature=0.3,

@@ -12,12 +12,15 @@ from .document_parser import extract_text, find_documents, get_document_info
 from .io_helpers import write_summary_txt
 from .model_manager import (
     DEFAULT_MODEL,
+    LANGUAGE_AUTO,
+    OUTPUT_LANGUAGES,
     SUMMARY_TYPE_DETAILED,
     SUMMARY_TYPES,
     Summarizer,
     download_model,
     get_model_path,
     is_model_downloaded,
+    normalize_language,
 )
 from .settings import Settings, load_settings
 
@@ -55,6 +58,7 @@ def summarize_file(
     summarizer: Summarizer,
     summary_type: str = SUMMARY_TYPE_DETAILED,
     output_path: str | None = None,
+    language: str = LANGUAGE_AUTO,
 ) -> bool:
     """Summarize a single file."""
     info = get_document_info(filepath)
@@ -69,7 +73,7 @@ def summarize_file(
 
     print("  Generating summary...")
     try:
-        summary = summarizer.summarize(text, summary_type=summary_type)
+        summary = summarizer.summarize(text, summary_type=summary_type, language=language)
     except Exception as e:
         print(f"  Error: {e!s}")
         return False
@@ -110,6 +114,7 @@ Examples:
   %(prog)s ./documents/ -o ./summaries/     Batch process a folder
   %(prog)s report.docx -o summary.txt       Save to specific file
   %(prog)s document.pdf --gpu               Offload to the GPU for this run
+  %(prog)s document.pdf -l English          Force the summary's language
         """,
     )
 
@@ -127,6 +132,16 @@ Examples:
     )
     parser.add_argument(
         "-o", "--output", help="Output file or directory (default: print to console)"
+    )
+    # Free-form rather than `choices=`: the model handles far more languages
+    # than the list the GUI offers, so any name is passed straight through.
+    parser.add_argument(
+        "-l",
+        "--language",
+        default=None,
+        metavar="LANG",
+        help=f"Language to write the summary in, e.g. {', '.join(OUTPUT_LANGUAGES[1:5])}. "
+        f"'{LANGUAGE_AUTO}' matches the document. Overrides the saved setting.",
     )
     parser.add_argument(
         "--gpu",
@@ -155,6 +170,11 @@ def _resolve_runtime(args: argparse.Namespace, settings: Settings) -> tuple[int 
     return n_threads, (-1 if use_gpu else 0)
 
 
+def _resolve_language(args: argparse.Namespace, settings: Settings) -> str:
+    """Resolve the output language — the ``--language`` flag beats the setting."""
+    return normalize_language(settings.output_language if args.language is None else args.language)
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -179,7 +199,9 @@ def main() -> None:
         print(f"Error: No supported documents found in: {args.input}")
         sys.exit(1)
 
-    n_threads, n_gpu_layers = _resolve_runtime(args, load_settings())
+    settings = load_settings()
+    n_threads, n_gpu_layers = _resolve_runtime(args, settings)
+    language = _resolve_language(args, settings)
 
     print(f"Loading model ({'GPU' if n_gpu_layers else 'CPU'})...")
     try:
@@ -188,12 +210,17 @@ def main() -> None:
         print(f"Error loading model: {e}")
         sys.exit(1)
 
-    print(f"Model loaded. Processing {len(files)} file(s)...\n")
+    print(f"Model loaded. Processing {len(files)} file(s)...")
+    print(
+        "Summary language: "
+        + ("matching each document" if language == LANGUAGE_AUTO else language)
+        + "\n"
+    )
 
     success_count = 0
     try:
         for filepath in files:
-            if summarize_file(str(filepath), summarizer, args.type, args.output):
+            if summarize_file(str(filepath), summarizer, args.type, args.output, language):
                 success_count += 1
             print()
     finally:

@@ -26,6 +26,7 @@ from docsummarizer.io_helpers import write_summary_docx, write_summary_txt
 from docsummarizer.logger import log_debug, log_error, log_info
 from docsummarizer.model_manager import (
     DEFAULT_MODEL,
+    OUTPUT_LANGUAGES,
     SUMMARY_TYPE_DETAILED,
     SUMMARY_TYPES,
     StructuredSummary,
@@ -35,6 +36,7 @@ from docsummarizer.model_manager import (
     get_model_path,
     gpu_offload_supported,
     is_model_downloaded,
+    normalize_language,
 )
 from docsummarizer.settings import Settings, load_settings, save_settings
 from docsummarizer.ui.workers import Worker
@@ -284,6 +286,16 @@ class ConsoleBridge(QObject):
 
     appearance = Property(str, _get_appearance, notify=settingsChanged)
 
+    def _get_output_language(self) -> str:
+        return self._settings.output_language
+
+    outputLanguage = Property(str, _get_output_language, notify=settingsChanged)
+
+    def _get_output_languages(self) -> list[str]:
+        return list(OUTPUT_LANGUAGES)
+
+    outputLanguages = Property(list, _get_output_languages, constant=True)
+
     def _get_reload_armed(self) -> bool:
         return self._reload_armed
 
@@ -508,6 +520,7 @@ class ConsoleBridge(QObject):
             return
         text = self._extracted_text
         summary_type = self._summary_type
+        language = self._settings.output_language
         self._cancel_requested = False
         self._set_busy(True)
         self._set_status("Generating summary…", "ok")
@@ -515,7 +528,10 @@ class ConsoleBridge(QObject):
         def work() -> StructuredSummary | None:
             try:
                 return summarizer.summarize_structured(
-                    text, summary_type, should_cancel=lambda: self._cancel_requested
+                    text,
+                    summary_type,
+                    should_cancel=lambda: self._cancel_requested,
+                    language=language,
                 )
             except SummarizationCancelledError:
                 return None
@@ -591,6 +607,21 @@ class ConsoleBridge(QObject):
         self.settingsChanged.emit()
         self.savedFlash.emit()
 
+    @Slot(str)
+    def setOutputLanguage(self, language: str) -> None:
+        """Set the summary's language. Applies to the next summary, not the model.
+
+        No reload is armed: the language lives in the prompt, so the loaded
+        model is unaffected and only the next run changes.
+        """
+        chosen = normalize_language(language)
+        if chosen == self._settings.output_language:
+            return
+        self._settings.output_language = chosen
+        save_settings(self._settings)  # language persists immediately
+        self.settingsChanged.emit()
+        self.savedFlash.emit()
+
     # -- batch -------------------------------------------------------------- #
     def _resolve_batch_inputs(self, folder: Path, out: Path) -> list[Path] | None:
         """Validate the batch folders and ensure the output dir exists.
@@ -642,6 +673,7 @@ class ConsoleBridge(QObject):
         if files is None:
             return
         summary_type = self._summary_type
+        language = self._settings.output_language
         total = len(files)
         self._batch_rows = [{"name": f.name, "status": "QUEUED", "tokens": 0} for f in files]
         self.batchRowsChanged.emit()
@@ -670,7 +702,7 @@ class ConsoleBridge(QObject):
                     failures.append({"name": path.name, "error": error})
                     continue
                 try:
-                    summary = summarizer.summarize(text, summary_type)
+                    summary = summarizer.summarize(text, summary_type, language=language)
                     write_summary_txt(
                         self._batch_output_path(out, path.stem, used_names),
                         source_name=path.name,

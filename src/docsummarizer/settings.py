@@ -1,4 +1,4 @@
-"""Persisted user settings (CPU threads, GPU offload, appearance).
+"""Persisted user settings (CPU threads, GPU offload, appearance, language).
 
 A tiny JSON file under the app-data ``config`` dir. Everything is
 optional and tolerant: a missing or corrupt file yields defaults rather
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .logger import log_debug, log_warning
+from .model_manager import LANGUAGE_AUTO, normalize_language
 from .paths import app_data_dir
 
 # llama.cpp uses -1 to mean "offload every layer to the GPU".
@@ -41,11 +42,14 @@ class Settings:
             on CPU-only llama-cpp builds — the flag is simply ignored there.
         appearance: GUI theme, one of ``System``/``Light``/``Dark``. Persisted
             so the chosen theme survives a restart.
+        output_language: Language the summary is written in. ``"auto"`` (the
+            default) matches the document; any other name pins it.
     """
 
     n_threads: int | None = None
     use_gpu: bool = False
     appearance: str = _DEFAULT_APPEARANCE
+    output_language: str = LANGUAGE_AUTO
 
     @property
     def n_gpu_layers(self) -> int:
@@ -79,10 +83,17 @@ def load_settings() -> Settings:
     if appearance not in _VALID_APPEARANCES:
         appearance = _DEFAULT_APPEARANCE
 
+    # Deliberately not restricted to the GUI's picker list: a hand-edited
+    # language the picker doesn't offer is still honoured, and anything
+    # unusable (empty, wrong type, a pasted paragraph) normalizes to "auto".
+    language = data.get("output_language")
+    language = normalize_language(language) if isinstance(language, str) else LANGUAGE_AUTO
+
     return Settings(
         n_threads=threads,
         use_gpu=bool(data.get("use_gpu", False)),
         appearance=appearance,
+        output_language=language,
     )
 
 
@@ -93,6 +104,7 @@ def save_settings(settings: Settings) -> None:
         "n_threads": settings.n_threads,
         "use_gpu": settings.use_gpu,
         "appearance": settings.appearance,
+        "output_language": settings.output_language,
     }
     try:
         # Write to a sibling temp file then atomically replace, so a crash

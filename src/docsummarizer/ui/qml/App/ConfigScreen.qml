@@ -325,6 +325,53 @@ Item {
                         }
                     }
                 }
+
+                // (5) SUMMARY LANGUAGE --------------------------------------- //
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.columnSpan: 2
+                    Layout.preferredHeight: languageCol.implicitHeight + 36
+                    radius: 4
+                    color: Theme.block
+                    border.width: 1
+                    border.color: Theme.line
+                    ColumnLayout {
+                        id: languageCol
+                        x: 18
+                        y: 18
+                        width: parent.width - 36
+                        spacing: 10
+                        Text {
+                            text: "SUMMARY LANGUAGE"
+                            color: Theme.label
+                            font.family: Theme.ui
+                            font.pixelSize: 10
+                            font.letterSpacing: 2.2
+                        }
+                        ComboBox {
+                            id: languageBox
+                            Layout.preferredWidth: 280
+                            // "auto" is the stored value; only its label is dressed up.
+                            readonly property var labels: bridge.outputLanguages.map(function (name) {
+                                return name === "auto" ? "Auto — match the document" : name;
+                            })
+                            model: labels
+                            currentIndex: bridge.outputLanguages.indexOf(bridge.outputLanguage)
+                            // A language hand-edited into settings.json need not be
+                            // on the list; show it rather than a blank box.
+                            displayText: currentIndex >= 0 ? labels[currentIndex] : bridge.outputLanguage
+                            onActivated: index => bridge.setOutputLanguage(bridge.outputLanguages[index])
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: bridge.outputLanguage === "auto" ? "Summaries follow the document's own language. Applies to the next summary." : "Summaries are written in " + bridge.outputLanguage + " whatever the document's language. Applies to the next summary."
+                            color: Theme.faint
+                            font.family: Theme.body
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
             }
         }
     }

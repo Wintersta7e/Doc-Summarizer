@@ -50,7 +50,12 @@ def test_save_then_load_roundtrip() -> None:
 def test_save_writes_expected_json() -> None:
     save_settings(Settings(n_threads=4, use_gpu=False))
     data = json.loads(settings_path().read_text(encoding="utf-8"))
-    assert data == {"n_threads": 4, "use_gpu": False, "appearance": "System"}
+    assert data == {
+        "n_threads": 4,
+        "use_gpu": False,
+        "appearance": "System",
+        "output_language": "auto",
+    }
 
 
 def test_corrupt_file_falls_back_to_defaults() -> None:
@@ -78,3 +83,27 @@ def test_garbage_threads_coerced_to_none() -> None:
 def test_unknown_keys_ignored() -> None:
     settings_path().write_text(json.dumps({"surprise": 1, "use_gpu": True}), encoding="utf-8")
     assert load_settings().use_gpu is True
+
+
+def test_output_language_round_trips() -> None:
+    save_settings(Settings(output_language="Chinese"))
+    assert load_settings().output_language == "Chinese"
+
+
+def test_output_language_defaults_to_auto() -> None:
+    assert load_settings().output_language == "auto"
+    settings_path().write_text(json.dumps({"use_gpu": True}), encoding="utf-8")
+    assert load_settings().output_language == "auto"
+
+
+def test_unusable_output_language_falls_back_to_auto() -> None:
+    """A hand-edited file must never put junk into the prompt."""
+    for junk in ("", "   ", 42, None, ["English"]):
+        settings_path().write_text(json.dumps({"output_language": junk}), encoding="utf-8")
+        assert load_settings().output_language == "auto"
+
+
+def test_unlisted_output_language_is_kept() -> None:
+    """The GUI's picker list is not a whitelist — a hand-edited name survives."""
+    settings_path().write_text(json.dumps({"output_language": "Swahili"}), encoding="utf-8")
+    assert load_settings().output_language == "Swahili"

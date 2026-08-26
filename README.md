@@ -116,6 +116,7 @@ docsummarizer-cli document.pdf -o summary.txt     # write to a file
 docsummarizer-cli ./papers/ -o ./summaries/       # batch a folder
 docsummarizer-cli --download-only                 # fetch the model, then exit
 docsummarizer-cli document.pdf --threads 8        # override CPU threads for this run
+docsummarizer-cli document.pdf -l Chinese         # write the summary in a given language
 ```
 
 ### Summary modes
@@ -135,6 +136,9 @@ Settings persist in the app-data `config/` directory and survive restarts.
 - **GPU offload** — disabled in the prebuilt (CPU-only) build; the toggle reflects this. Available only
   in a CUDA build from source.
 - **Appearance** — System / Light / Dark, restored on launch.
+- **Summary language** — `Auto` (the default) writes the summary in the document's own language;
+  pick a language to pin it instead. The CLI's `-l/--language` overrides the setting for one run and
+  accepts any language name, not only those the picker lists.
 
 Model and logs are stored under the platform app-data directory
 (`%LOCALAPPDATA%\DocSummarizer\` on Windows, `~/Library/Application Support/DocSummarizer/` on macOS,
