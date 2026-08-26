@@ -42,7 +42,7 @@ Rectangle {
                 font.weight: Font.DemiBold
             }
             Text {
-                text: "ABSTRACT CONSOLE · v2.0.0"
+                text: "ABSTRACT CONSOLE · v2.0.1"
                 color: Theme.faint
                 font.family: Theme.mono
                 font.pixelSize: 9

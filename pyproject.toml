@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docsummarizer"
-version = "2.0.0"
+version = "2.0.1"
 description = "Offline document summarization powered by a local LLM"
 readme = "README.md"
 license = { file = "LICENSE" }
