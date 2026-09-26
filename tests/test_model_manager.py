@@ -10,6 +10,7 @@ instance with ``object.__new__`` to bypass it.
 from __future__ import annotations
 
 import io
+import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -214,10 +215,36 @@ class _FakeLLM:
         self.calls: list[dict] = []
         self._content = content
 
+    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+        # ~3 UTF-8 bytes per token: ~3 chars/token for Latin text and one token
+        # per CJK character, roughly what the real tokenizer measures.
+        return [0] * (len(text) // 3)
+
     def create_chat_completion(self, *, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
         text = self._content if self._content is not None else f"summary-{len(self.calls)}"
         return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+class _ContextLLM(_FakeLLM):
+    """A fake that enforces the context window the way llama.cpp does.
+
+    llama-cpp-python raises when the prompt alone fills ``n_ctx`` and silently
+    truncates the reply when prompt + max_tokens overflows it; every prompt's
+    token count is recorded so a test can assert neither happened.
+    """
+
+    def __init__(self, n_ctx: int, content: str | None = None):
+        super().__init__(content)
+        self.n_ctx = n_ctx
+        self.prompt_tokens: list[int] = []
+
+    def create_chat_completion(self, *, messages, **kwargs):
+        tokens = sum(len(self.tokenize(m["content"].encode("utf-8"))) for m in messages)
+        self.prompt_tokens.append(tokens)
+        if tokens >= self.n_ctx:
+            raise ValueError(f"Requested tokens ({tokens}) exceed context window of {self.n_ctx}")
+        return super().create_chat_completion(messages=messages, **kwargs)
 
 
 def _shell(fake_llm, n_ctx: int = 8192) -> Summarizer:
@@ -279,6 +306,58 @@ def test_summarize_long_document_maps_and_reduces() -> None:
     assert result == f"summary-{len(fake.calls)}"
 
 
+# --------------------------------------------------------------------------- #
+# Context budgeting: measured in the model's tokens, never guessed from chars
+# --------------------------------------------------------------------------- #
+def _cjk_document(paragraphs: int = 12) -> str:
+    """~500 CJK characters per paragraph, each tagged so its arrival is checkable."""
+    return "\n\n".join(f"第{i}段。" + "这是关于模型的内容。" * 50 for i in range(paragraphs))
+
+
+def test_summarize_budgets_cjk_text_in_tokens() -> None:
+    # CJK text costs ~1 token per character, not the ~3 of Latin text: a Chinese
+    # document that "fit" a chars-per-token estimate overflowed the real window.
+    fake = _ContextLLM(n_ctx=4096)
+    s = _shell(fake, n_ctx=4096)
+
+    s.summarize(_cjk_document(), SUMMARY_TYPE_DETAILED)
+
+    assert max(fake.prompt_tokens) + 1024 <= 4096  # 1024 = summarize's default max_tokens
+    map_calls = [c for c in fake.calls if "Document:" in c["messages"][1]["content"]]
+    assert len(map_calls) > 1
+    sent = "".join(c["messages"][1]["content"] for c in map_calls)
+    assert all(f"第{i}段" in sent for i in range(12))
+
+
+def test_summarize_structured_budgets_cjk_text_in_tokens() -> None:
+    payload = json.dumps(
+        {"lead": "概述", "points": [{"text": "要点", "quote": "这是关于模型的内容。"}]}
+    )
+    fake = _ContextLLM(n_ctx=4096, content=payload)
+    s = _shell(fake, n_ctx=4096)
+
+    result = s.summarize_structured(_cjk_document(), SUMMARY_TYPE_DETAILED)
+
+    assert max(fake.prompt_tokens) + 1024 <= 4096
+    assert result.points  # the prose fallback carries no points
+
+
+def test_chunks_within_recuts_dense_regions_and_keeps_offsets() -> None:
+    # The Latin half sets a ~2 chars/token average, so the first cut is too
+    # coarse for the CJK half; those pieces must be cut again, offsets intact.
+    latin = " ".join(f"Sentence {i} is plain English prose." for i in range(300))
+    cjk = "".join(f"第{i}句是中文。" for i in range(600))
+    text = f"{latin}\n\n{cjk}"
+    s = _shell(_FakeLLM())
+
+    pieces = s._chunks_within(text, 300, model_manager._split_into_chunks_with_offsets)
+
+    assert len(pieces) > 1
+    for chunk, base in pieces:
+        assert text[base : base + len(chunk)] == chunk
+        assert s._count_tokens(chunk) <= 300
+
+
 def test_summarize_raises_after_close() -> None:
     s = _shell(_FakeLLM())
     s.llm = None
@@ -287,7 +366,7 @@ def test_summarize_raises_after_close() -> None:
 
 
 def test_summarize_handles_empty_content() -> None:
-    class _NoneLLM:
+    class _NoneLLM(_FakeLLM):
         def create_chat_completion(self, *, messages, **kwargs):
             return {"choices": [{"message": {"content": None}}]}
 

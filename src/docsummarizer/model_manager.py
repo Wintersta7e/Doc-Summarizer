@@ -76,9 +76,11 @@ DEFAULT_MODEL = ModelConfig(
 )
 
 # Summarization tuning -------------------------------------------------------
-# Conservative chars-per-token estimate, used to keep prompts within the
-# context window without taking on a tokenizer dependency.
-_CHARS_PER_TOKEN = 3
+# Chunks are cut by characters at the document's own measured chars-per-token
+# (~3.4 for English, ~1.3 for Chinese, on the model's real tokenizer); this
+# headroom absorbs density varying within a document, so few pieces need a
+# second cut.
+_CHUNK_HEADROOM = 0.9
 # Tokens reserved for everything in a request that isn't the document itself
 # (system prompt, instruction, the language directive stated twice, chat-template
 # overhead).
@@ -217,6 +219,14 @@ def _split_into_chunks(text: str, max_chars: int) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def _paragraph_chunks(text: str, max_chars: int) -> list[tuple[str, int]]:
+    """``_split_into_chunks`` in ``Summarizer._chunks_within``'s pair shape.
+
+    The prose path never reads the offsets, so they are all 0.
+    """
+    return [(chunk, 0) for chunk in _split_into_chunks(text, max_chars)]
 
 
 # Structured, source-grounded summaries -------------------------------------- #
@@ -787,6 +797,38 @@ class Summarizer:
             raise
         return content.strip()
 
+    def _count_tokens(self, text: str) -> int:
+        """Tokens ``text`` occupies in this model's context window."""
+        if self.llm is None:
+            raise RuntimeError(_CLOSED_MESSAGE)
+        return len(self.llm.tokenize(text.encode("utf-8"), add_bos=False))
+
+    def _chunks_within(
+        self,
+        text: str,
+        budget_tokens: int,
+        split: Callable[[str, int], list[tuple[str, int]]],
+    ) -> list[tuple[str, int]]:
+        """Cut ``text`` into ``(chunk, offset)`` pieces of at most ``budget_tokens`` each.
+
+        Characters per token vary ~2.6x between English and Chinese, so no
+        fixed ratio fits both: the character budget handed to ``split`` comes
+        from this text's measured density, and any piece still over budget is
+        cut again at its own density. Each cut is below ``len(text)``, so this
+        terminates.
+        """
+        tokens = self._count_tokens(text)
+        if tokens <= budget_tokens:
+            return [(text, 0)]
+        max_chars = max(int(len(text) * budget_tokens / tokens * _CHUNK_HEADROOM), 1)
+        pieces: list[tuple[str, int]] = []
+        for chunk, base in split(text, max_chars):
+            pieces.extend(
+                (piece, base + offset)
+                for piece, offset in self._chunks_within(chunk, budget_tokens, split)
+            )
+        return pieces
+
     def summarize(
         self,
         text: str,
@@ -826,16 +868,15 @@ class Summarizer:
         )
 
         budget_tokens = max(self.n_ctx - max_tokens - _SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
-        budget_chars = budget_tokens * _CHARS_PER_TOKEN
+        chunks = [chunk for chunk, _ in self._chunks_within(text, budget_tokens, _paragraph_chunks)]
 
-        if len(text) <= budget_chars:
+        if len(chunks) == 1:
             start_time = time.time()
             summary = self._summarize_once(text, summary_type, max_tokens)
             self._log_speed(summary, time.time() - start_time)
             return summary
 
         # Document exceeds the context budget: map-reduce.
-        chunks = _split_into_chunks(text, budget_chars)
         log_info(f"Document exceeds context budget; summarizing in {len(chunks)} chunks")
         start_time = time.time()
 
@@ -849,7 +890,7 @@ class Summarizer:
         # Reduce. If the combined partials still overflow (a very long
         # document with many chunks), recurse — each pass strictly shrinks the
         # text, so this terminates.
-        if len(combined) > budget_chars:
+        if self._count_tokens(combined) > budget_tokens:
             log_info("Combined section summaries still exceed budget; reducing again")
             return self.summarize(combined, summary_type, max_tokens, should_cancel, language)
 
@@ -915,17 +956,17 @@ class Summarizer:
         """Run the structured path; ``None`` signals the caller to fall back."""
         self._cancel_check = should_cancel
         self._language = normalize_language(language)
-        budget_chars = (
-            max(self.n_ctx - max_tokens - _STRUCTURED_SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
-            * _CHARS_PER_TOKEN
+        budget_tokens = max(
+            self.n_ctx - max_tokens - _STRUCTURED_SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS
         )
+        chunks = self._chunks_within(text, budget_tokens, _split_into_chunks_with_offsets)
         instruction = (
             _DETAILED_JSON_INSTRUCTION
             if summary_type == SUMMARY_TYPE_DETAILED
             else _STRUCTURED_JSON_INSTRUCTION
         )
 
-        if len(text) <= budget_chars:
+        if len(chunks) == 1:
             parsed = _parse_structured_json(
                 self._chat_json(f"{instruction}\n\nDocument:\n{text}", max_tokens)
             )
@@ -942,7 +983,7 @@ class Summarizer:
         section_groups: dict[str, list[list[SummaryPoint]]] = {
             name: [] for name in _STRUCTURED_SECTIONS
         }
-        for chunk_text, base in _split_into_chunks_with_offsets(text, budget_chars):
+        for chunk_text, base in chunks:
             _raise_if_cancelled(should_cancel)
             parsed = _parse_structured_json(
                 self._chat_json(f"{instruction}\n\nDocument:\n{chunk_text}", max_tokens)

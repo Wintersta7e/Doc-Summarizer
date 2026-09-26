@@ -37,6 +37,9 @@ class _JsonLLM:
         self.payloads = list(payloads)
         self.calls: list[dict] = []
 
+    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+        return [0] * (len(text) // 3)  # ~3 UTF-8 bytes per token, like the real one
+
     def create_chat_completion(self, *, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
         idx = min(len(self.calls) - 1, len(self.payloads) - 1)
@@ -298,7 +301,7 @@ def test_detailed_map_reduce_covers_multiple_chunks() -> None:
     marker = "The central claim recurs verbatim across every part of the body."
     text = _multi_chunk_text(marker)
 
-    class _IndexedLLM:
+    class _IndexedLLM(_JsonLLM):
         def __init__(self) -> None:
             self.calls: list[int] = []
 
