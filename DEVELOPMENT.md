@@ -8,8 +8,8 @@ Technical documentation for developers and advanced users.
 ┌─────────────────────────────────────────────────────────────┐
 │                     User Interface                          │
 │  ┌─────────────────────┐    ┌─────────────────────────┐     │
-│  │   GUI (gui.py)      │    │    CLI (cli.py)         │     │
-│  │   CustomTkinter     │    │    argparse             │     │
+│  │   GUI (ui/)         │    │    CLI (cli.py)         │     │
+│  │   PySide6 + QML     │    │    argparse             │     │
 │  └──────────┬──────────┘    └───────────┬─────────────┘     │
 │             │                           │                   │
 │             └─────────────┬─────────────┘                   │
@@ -39,10 +39,10 @@ source venv/bin/activate  # Linux/macOS
 # or: venv\Scripts\activate  # Windows
 
 # Install the package (and dev tools) in editable mode.
-# Use `.[dev,runtime]` if you also want the heavy llama-cpp-python
-# backend installed locally for end-to-end work; `.[dev]` alone is
-# enough for running ruff, mypy and pytest.
-pip install -e ".[dev]"
+# `gui` (PySide6) is needed to launch the desktop app and to type-check and
+# test the ui package — without it the UI tests are skipped. Add `runtime`
+# for the heavy llama-cpp-python backend when working end to end.
+pip install -e ".[dev,gui]"
 
 # Quick smoke tests
 python -c "from docsummarizer.document_parser import extract_text; print('Parser OK')"
@@ -122,31 +122,34 @@ Handles LLM model downloading and inference.
 **Summarizer Methods:**
 - `__init__(model_path, n_ctx=8192, n_threads=None, n_gpu_layers=0)` - Load model.
   `n_gpu_layers=0` keeps inference on the CPU; `-1` offloads all layers to the GPU.
-- `summarize(text, summary_type, max_tokens) -> str` - Generate a summary. Documents
-  longer than the context budget are summarized with map-reduce chunking rather than
-  truncated. Generation goes through `create_chat_completion`, so the model's own chat
-  template is applied automatically.
+- `summarize(text, summary_type, max_tokens, should_cancel, language) -> str` - Generate
+  a prose summary (the CLI path). Documents longer than the context budget are
+  summarized with map-reduce chunking rather than truncated; the budget is measured
+  with the model's own tokenizer, since characters per token differ widely by script.
+  Generation goes through `create_chat_completion`, so the model's own chat template is
+  applied automatically. `language` is `"auto"` (match the document) or a language name.
+- `summarize_structured(...) -> StructuredSummary` - Discrete points, each grounded in a
+  quote located in the source (the GUI path, which powers trace-to-source). Falls back
+  to the prose summary if the model's JSON can't be parsed.
 
 ### settings.py
 
 Persisted user settings (`Settings` dataclass) stored as JSON under the app-data
-`config/` dir. Holds the CPU thread count and the GPU toggle; load/save are tolerant
-of a missing or corrupt file (they fall back to defaults).
+`config/` dir: CPU thread count, GPU toggle, appearance and output language. Load/save
+are tolerant of a missing or corrupt file (they fall back to defaults).
 
-### gui.py
+### ui/
 
-CustomTkinter-based graphical interface.
+PySide6 + QML desktop interface ("Abstract Console").
 
-**Classes:**
-- `DocSummarizerApp(ctk.CTk)` - Main application window
+- `ui/app.py` - Entry point: builds the `QQmlApplicationEngine`, exposes the bridge to
+  QML, installs an excepthook that logs uncaught errors
+- `ui/bridge.py` - `ConsoleBridge`, the QML controller: document and summary state,
+  settings, and a thread pool that runs model work off the UI thread
+- `ui/qml/App/` - Screens (Summary, Extract, Batch, Config), the first-run overlay and
+  the `Theme` singleton; bundled fonts live in `fonts/`
 
-**Features:**
-- File selection dialog
-- Batch folder processing
-- Summary type selection
-- Progress indication
-- Save to file (TXT, MD, DOCX)
-- Settings tab (CPU threads, GPU toggle, appearance, model info)
+Screens can be rendered headless for review with `scripts/render_qml.py`.
 
 ### cli.py
 
@@ -154,7 +157,7 @@ Command-line interface for terminal usage.
 
 **Usage:**
 ```bash
-docsummarizer-cli <input> [-t TYPE] [-o OUTPUT] [--gpu|--no-gpu] [--threads N] [--download-only]
+docsummarizer-cli <input> [-t TYPE] [-o OUTPUT] [-l LANG] [--gpu|--no-gpu] [--threads N] [--download-only]
 ```
 
 Flags override the saved settings for that run.
@@ -162,9 +165,9 @@ Flags override the saved settings for that run.
 ## GPU Acceleration (Optional)
 
 Inference runs on the CPU by default. To use a GPU, install a GPU-capable build of
-`llama-cpp-python`, then turn it on in **Settings → GPU Acceleration** (or pass `--gpu`
-on the CLI). The app offloads all layers (`n_gpu_layers=-1`); a CPU-only build simply
-ignores the flag.
+`llama-cpp-python`, then turn it on in **Config → GPU Offload** (or pass `--gpu`
+on the CLI). The app offloads all layers (`n_gpu_layers=-1`); a CPU-only build ignores
+the flag, and the Config screen says so rather than offering a toggle that does nothing.
 
 ### NVIDIA GPU (CUDA)
 
@@ -217,8 +220,12 @@ CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --no-cache-dir
 ### Prerequisites
 
 ```bash
-pip install pyinstaller
+pip install -e ".[gui,runtime]" pyinstaller
 ```
+
+Both extras are required. Without `gui`, PyInstaller still exits successfully but
+bundles no Qt, and the binary dies on start with
+`ModuleNotFoundError: No module named 'PySide6'`.
 
 ### Build Commands
 
@@ -230,7 +237,8 @@ The executable will be in `dist/DocSummarizer` (or `dist/DocSummarizer.exe` on W
 
 ### Build Size
 
-- Executable: ~50-100 MB
+- Executable: ~200 MB (Windows) / ~240 MB (Linux). A much smaller file means an extra
+  was missing from the build environment.
 - Model (separate download): ~2.5 GB
 
 **Note:** The model is NOT bundled in the executable. Users download it on first run.
