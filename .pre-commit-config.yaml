@@ -3,7 +3,7 @@
 # CI remains the source of truth; these just catch issues before a commit.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: v0.16.9
     hooks:
       - id: ruff
         args: [--fix]
