@@ -364,6 +364,36 @@ def test_verdict_reports_insufficient_n() -> None:
     assert gated.regressions == [metrics.Flip(case, 0, "M2")]
 
 
+def test_verdict_hard_metric_absent_from_a_cell_is_not_a_pass() -> None:
+    """A cell whose runs never measured a hard metric prints n/a for it.
+
+    Catches an absent metric counted as a pass, so a cell without any
+    reproducibility re-run reads as reproducible.
+    """
+    other = ("de", "prose", "single")
+
+    def without_m12a(score: metrics.CaseScore) -> metrics.CaseScore:
+        hard = {metric: value for metric, value in score.hard.items() if metric != "M12a"}
+        return metrics.CaseScore(score.case, score.seed, score.cell, hard, score.proportion)
+
+    runs = [
+        without_m12a(_score("de-lit-s/detailed/auto", 0)),
+        without_m12a(_score("de-cred-s/detailed/auto", 0)),
+        _score("de-lit-s/brief/auto", 0, cell=other),
+        without_m12a(_score("de-cred-s/brief/auto", 0, cell=other)),
+    ]
+    result = metrics.verdict(runs, runs)
+    rows = {row.scope: row for row in result.rows if row.metric == "M12a"}
+    for row in rows.values():
+        print(f"M12a row: {row}")
+    absent = rows["de/json/single"]
+    assert (absent.p_b, absent.n_b, absent.p_c, absent.n_c) == (None, 0, None, 0)
+    assert absent.status == "n/a"
+    partial = rows["de/prose/single"]
+    assert (partial.p_b, partial.n_b, partial.p_c, partial.n_c) == (1.0, 1, 1.0, 1)
+    assert partial.status == "ok"
+
+
 def test_verdict_within_delta_is_not_a_regression() -> None:
     case = "de-lit-s/detailed/auto"
 

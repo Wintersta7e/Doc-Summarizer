@@ -448,8 +448,9 @@ class Flip:
 class VerdictRow:
     """One line of a verdict: a metric over a cell, the aggregate or one case run.
 
-    ``status`` is ``ok``, ``regression``, ``improvement`` or ``insufficient n``;
-    a case run present in one arm only reads ``only in B`` or ``only in C``.
+    ``status`` is ``ok``, ``regression``, ``improvement`` or ``insufficient n``,
+    or ``n/a`` for a hard metric no paired run in the cell measured; a case
+    run present in one arm only reads ``only in B`` or ``only in C``.
     """
 
     scope: str
@@ -545,15 +546,19 @@ def verdict(b: Sequence[CaseScore], c: Sequence[CaseScore]) -> Verdict:
         cells.setdefault(pair[0].cell, []).append(pair)
     for metric in HARD_METRICS:
         for cell, cell_pairs in cells.items():
-            in_cell = {score.case for score, _ in cell_pairs}
-            n = len(cell_pairs)
+            measured = [(b, c) for b, c in cell_pairs if metric in b.hard and metric in c.hard]
+            n = len(measured)
+            if n == 0:
+                rows.append(VerdictRow(_scope(cell), metric, None, 0, None, 0, None, "n/a"))
+                continue
+            in_cell = {score.case for score, _ in measured}
             status = "ok"
             if any(flip.metric == metric and flip.case in in_cell for flip in regressions):
                 status = "regression"
             elif any(flip.metric == metric and flip.case in in_cell for flip in improvements):
                 status = "improvement"
-            passed_b = sum(1 for score, _ in cell_pairs if score.hard.get(metric, 0) == 0)
-            passed_c = sum(1 for _, score in cell_pairs if score.hard.get(metric, 0) == 0)
+            passed_b = sum(1 for score, _ in measured if score.hard[metric] == 0)
+            passed_c = sum(1 for _, score in measured if score.hard[metric] == 0)
             rows.append(
                 VerdictRow(_scope(cell), metric, passed_b / n, n, passed_c / n, n, None, status)
             )
