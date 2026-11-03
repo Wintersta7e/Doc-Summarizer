@@ -142,8 +142,9 @@ are tolerant of a missing or corrupt file (they fall back to defaults).
 
 PySide6 + QML desktop interface ("Abstract Console").
 
-- `ui/app.py` - Entry point: builds the `QQmlApplicationEngine`, exposes the bridge to
-  QML, installs an excepthook that logs uncaught errors
+- `ui/app.py` - Entry point: builds the `QQmlApplicationEngine` (its network access
+  refuses every non-local URL, so rendered text never fetches anything), exposes the
+  bridge to QML, installs an excepthook that logs uncaught errors
 - `ui/bridge.py` - `ConsoleBridge`, the QML controller: document and summary state,
   settings, and a thread pool that runs model work off the UI thread
 - `ui/qml/App/` - Screens (Summary, Extract, Batch, Config), the first-run overlay and

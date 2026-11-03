@@ -38,6 +38,7 @@ Rectangle {
         }
         Text {
             text: toast.message
+            textFormat: Text.PlainText
             color: Theme.ink
             font.family: Theme.body
             font.pixelSize: 13

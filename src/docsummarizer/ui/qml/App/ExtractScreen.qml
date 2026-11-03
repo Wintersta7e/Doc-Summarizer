@@ -96,6 +96,7 @@ Item {
                 }
                 Text {
                     text: bridge.currentFileName !== "" ? bridge.currentFileName : "No document loaded"
+                    textFormat: Text.PlainText
                     color: Theme.ink
                     font.family: Theme.serif
                     font.pixelSize: 30
@@ -221,6 +222,7 @@ Item {
 
     TextEdit {
         id: copyHelper
+        textFormat: TextEdit.PlainText
         visible: false
     }
 }

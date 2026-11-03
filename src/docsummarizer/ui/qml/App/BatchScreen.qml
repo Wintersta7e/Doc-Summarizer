@@ -62,6 +62,7 @@ Item {
                 }
                 Text {
                     text: bridge.batchRows.length + " DOCUMENTS · OUTPUT → " + (screen.outDir !== "" ? screen.outDir : "—") + " · " + bridge.summaryType.toUpperCase()
+                    textFormat: Text.PlainText
                     color: Theme.faint
                     font.family: Theme.mono
                     font.pixelSize: 9
@@ -173,6 +174,7 @@ Item {
                         Text {
                             Layout.fillWidth: true
                             text: modelData.name
+                            textFormat: Text.PlainText
                             color: Theme.inkSoft
                             font.family: Theme.body
                             font.pixelSize: 13
