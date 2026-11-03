@@ -531,6 +531,32 @@ def _build_structured(
     return _make_structured(SUMMARY_TYPE_STRUCTURED, None, [], sections)
 
 
+def _log_run_stats(stats: RunStats) -> None:
+    """Log one request's counts and times on a single line, never its content."""
+
+    def count(value: int | None) -> str:
+        return "n/a" if value is None else str(value)
+
+    def seconds(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.3f}"
+
+    def rate(tokens: int | None, elapsed: float | None) -> str:
+        return "n/a" if tokens is None or not elapsed else f"{tokens / elapsed:.1f}"
+
+    log_info(
+        f"run_stats calls={stats.calls} truncated={stats.truncated_calls} "
+        f"prompt_tokens={count(stats.prompt_tokens)} "
+        f"prompt_evaluated={count(stats.prompt_evaluated)} "
+        f"prompt_s={seconds(stats.prompt_seconds)} "
+        f"prompt_tok_s={rate(stats.prompt_evaluated, stats.prompt_seconds)} "
+        f"generated={stats.generated_tokens} "
+        f"generation_s={seconds(stats.generation_seconds)} "
+        f"gen_tok_s={rate(stats.generated_tokens, stats.generation_seconds)} "
+        f"wall_s={stats.wall_seconds:.3f}"
+    )
+    log_debug(f"Memory usage: {get_memory_usage_mb()} MB")
+
+
 def _render_structured(
     summary_type: str,
     lead: str | None,
@@ -931,6 +957,7 @@ class Summarizer:
             yield stats
         finally:
             self._run_stats = None
+            _log_run_stats(stats.finish())
 
     def _perf_snapshot(self) -> _PerfSnapshot | None:
         """llama.cpp's perf counters now, or ``None`` when the backend has none."""
@@ -1054,14 +1081,10 @@ class Summarizer:
             ]
 
             if len(chunks) == 1:
-                start_time = time.time()
-                summary = self._summarize_once(text, summary_type, max_tokens)
-                self._log_speed(summary, time.time() - start_time)
-                return summary
+                return self._summarize_once(text, summary_type, max_tokens)
 
             # Document exceeds the context budget: map-reduce.
             log_info(f"Document exceeds context budget; summarizing in {len(chunks)} chunks")
-            start_time = time.time()
 
             partials = []
             for i, chunk in enumerate(chunks, 1):
@@ -1077,9 +1100,7 @@ class Summarizer:
                 log_info("Combined section summaries still exceed budget; reducing again")
                 return self.summarize(combined, summary_type, max_tokens, should_cancel, language)
 
-            summary = self._synthesize(combined, summary_type, max_tokens)
-            self._log_speed(summary, time.time() - start_time)
-            return summary
+            return self._synthesize(combined, summary_type, max_tokens)
 
     def summarize_structured(
         self,
@@ -1263,15 +1284,6 @@ class Summarizer:
             temperature=0.3,
             top_p=0.9,
         )
-
-    def _log_speed(self, summary: str, elapsed: float) -> None:
-        approx_tokens = max(len(summary) // 4, 1)
-        tokens_per_sec = approx_tokens / elapsed if elapsed > 0 else 0
-        log_info(
-            f"Summary generated in {elapsed:.2f}s "
-            f"(~{approx_tokens} tokens, {tokens_per_sec:.1f} tok/s)"
-        )
-        log_debug(f"Memory usage: {get_memory_usage_mb()} MB")
 
     def close(self) -> None:
         """Release the underlying llama.cpp model.
