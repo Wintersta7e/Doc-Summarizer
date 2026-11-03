@@ -18,10 +18,10 @@ from typing import Any
 
 import psutil
 import pytest
-from eval import cases, run
+from eval import cases, metrics, run
 
 import docsummarizer
-from docsummarizer import model_manager, paths
+from docsummarizer import model_manager, paths, provenance
 from docsummarizer.model_manager import (
     SUMMARY_TYPE_BRIEF,
     SUMMARY_TYPE_DETAILED,
@@ -452,3 +452,259 @@ def test_git_state_distinguishes_missing_git(
     print(f"no git: {no_git}")
     assert no_git.commit is None
     assert no_git.error == "git not found"
+
+
+# --------------------------------------------------------------------------- #
+# The case loop, against a fake model
+# --------------------------------------------------------------------------- #
+
+_DOC_MARKER = "Document:\n"
+_SINGLE_TEXT = (
+    "The river ferry leaves the wooden pier at six every morning. "
+    "Its captain checks the ropes and the engine before anyone boards. "
+    "Students ride it to the school on the far bank."
+)
+_MULTI_TEXT = " ".join(
+    f"In week {i} the school garden grew beans, carrots and tall yellow sunflowers."
+    for i in range(120)
+)
+_LONG_RESPONSE = "\n  " + ("The ferry crosses the river twice an hour. " * 120)[:5000] + "  \n"
+_PROSE = "The village bakery opens early every morning and sells fresh bread to everyone."
+
+
+def _document_of(messages: list[dict[str, str]]) -> str:
+    user = messages[-1]["content"]
+    body = user.split(_DOC_MARKER, 1)[-1]
+    return body.rsplit("\n\n", 1)[0]
+
+
+def _default_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
+    """Valid Detailed/Structured JSON when asked for JSON, else prose."""
+    if "response_format" in kwargs:
+        sentences = provenance.split_sentences(_document_of(messages))
+        doc = _document_of(messages)
+        quote = doc[sentences[0][0] : sentences[0][1]] if sentences else ""
+        point = {"text": "The ferry runs every morning across the river.", "quote": quote}
+        sections = {name: [point] for name in model_manager._STRUCTURED_SECTIONS}
+        lead = "A ferry serves the village and its school every single day."
+        return json.dumps({"lead": lead, "points": [point], "sections": sections})
+    if _SINGLE_TEXT in messages[-1]["content"]:
+        return _LONG_RESPONSE
+    return _PROSE
+
+
+class _EvalLLM:
+    """A model stand-in: records ``reset`` / ``set_seed`` and every completion in ``events``."""
+
+    def __init__(self, respond: Any = None) -> None:
+        self.events: list[tuple[Any, ...]] = []
+        self.completions = 0
+        self.respond = respond or _default_respond
+
+    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+        return [0] * (len(text) // 3)
+
+    def reset(self) -> None:
+        self.events.append(("reset",))
+
+    def set_seed(self, seed: int) -> None:
+        self.events.append(("set_seed", seed))
+
+    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+        self.completions += 1
+        self.events.append(("call",))
+        text = self.respond(messages, kwargs)
+        if stream:
+            return self._stream(text)
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+            ]
+        }
+
+    def _stream(self, text: str):
+        half = len(text) // 2
+        for piece in (text[:half], text[half:]):
+            yield {"choices": [{"delta": {"content": piece}, "finish_reason": None}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+
+def _shell(fake: Any, n_ctx: int) -> Summarizer:
+    """A Summarizer around ``fake`` without running ``__init__`` (no llama-cpp needed)."""
+    s = object.__new__(Summarizer)
+    s.llm = fake
+    s.n_ctx = n_ctx
+    return s
+
+
+@pytest.fixture
+def eval_llm(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Every ``build_summarizer`` returns a shell around one shared fake, at the asked context."""
+    fake = _EvalLLM()
+    built: list[int] = []
+
+    def build(model: Path, *, n_ctx: int, n_threads: int | None, n_gpu_layers: int) -> Summarizer:
+        built.append(n_ctx)
+        return _shell(fake, n_ctx)
+
+    monkeypatch.setattr(run, "build_summarizer", build)
+    fake.built = built
+    return fake
+
+
+def _empty_snapshot() -> Any:
+    return run.ContentionSnapshot({}, 0, None, "n/a")
+
+
+def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every completion of every case run is kept in full, before any clean-up.
+
+    Catches capturing the post-processed return of ``_complete``, or only the
+    final call.
+    """
+    import socket
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("socket")
+
+    monkeypatch.setattr(socket, "socket", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    snapshots: list[int] = []
+
+    def counted() -> Any:
+        snapshots.append(1)
+        return _empty_snapshot()
+
+    monkeypatch.setattr(run, "snapshot_now", counted)
+
+    fake = _EvalLLM()
+    summarizer = _shell(fake, 2048)
+    specs = [
+        run.RunSpec(cases.Case(doc, summary_type, "auto"), 0)
+        for doc in ("single", "multi")
+        for summary_type in SUMMARY_TYPES
+    ]
+    texts = {"single": _SINGLE_TEXT, "multi": _MULTI_TEXT}
+    targets = {spec.case.id: metrics.Target("en", None) for spec in specs}
+    runs = run.run_cases(summarizer, specs, texts, targets)
+
+    segments: list[list[tuple[Any, ...]]] = []
+    for event in fake.events:
+        if event == ("reset",):
+            segments.append([])
+        segments[-1].append(event)
+    assert len(segments) == len(specs)
+    for case_run, segment in zip(runs, segments, strict=True):
+        made = sum(1 for event in segment if event == ("call",))
+        print(
+            f"{case_run.case}: captured {len(case_run.calls)}, made {made}, parts {case_run.parts}"
+        )
+        assert segment[:2] == [("reset",), ("set_seed", 0)]
+        assert len(case_run.calls) == made
+        assert case_run.error is None
+        assert case_run.repetition == 0
+        assert case_run.contention["contended"] is False
+        assert case_run.contended is False
+    total = sum(len(case_run.calls) for case_run in runs)
+    print(f"captured {total} calls, the fake made {fake.completions}")
+    assert total == fake.completions
+    assert len(snapshots) == 2 * len(specs)
+
+    contents = [call.content for case_run in runs for call in case_run.calls]
+    assert _LONG_RESPONSE in contents
+    assert all(case_run.parts > 1 for case_run in runs if case_run.case.startswith("multi/"))
+    assert all(case_run.parts == 1 for case_run in runs if case_run.case.startswith("single/"))
+
+    sources = sorted((_REPO / "scripts" / "eval").glob("*.py"))
+    sites = sum(len(re.findall(r"\bSummarizer\(", p.read_text(encoding="utf-8"))) for p in sources)
+    print(f"Summarizer construction sites in scripts/eval: {sites}")
+    assert sites == 1
+
+
+_EN_UNITS = (
+    "The village bakery opens every morning at five o'clock. "
+    "The baker first heats the oven and then kneads the dough."
+)
+_DE_UNITS = (
+    "Die Bäckerei im Dorf öffnet jeden Morgen um fünf Uhr. "
+    "Der Bäcker heizt zuerst den Ofen und knetet dann den Teig."
+)
+
+
+def _call(seq: int, content: str, finish: str = "stop", json_call: bool = False) -> Any:
+    kwargs = {"response_format": {"type": "json_object"}} if json_call else {}
+    return run.CallRecord(seq, [], kwargs, False, content, finish, None, None, None)
+
+
+def test_score_case_run_scores_every_call() -> None:
+    brief = cases.Case("de-lit-s", SUMMARY_TYPE_BRIEF, "auto")
+    result = model_manager.StructuredSummary(SUMMARY_TYPE_BRIEF, _DE_UNITS, [], None, _DE_UNITS)
+    calls = [_call(0, _EN_UNITS), _call(1, _DE_UNITS, finish="length"), _call(2, "")]
+    scored = run.score_case_run(
+        brief, result, calls, _DE_UNITS, metrics.Target("de", None), parts=2
+    )
+    print(f"brief: {scored}")
+    assert scored["M2"]["passed"] is False
+    assert {off["call"] for off in scored["M2"]["off_target"]} == {0}
+    assert scored["M1"]["violations"] == 1
+    assert scored["M1"]["failed_calls"] == [2]
+    assert scored["M4"]["violations"] == 1
+    assert scored["M4"]["truncated_calls"] == [1]
+    assert scored["M7"] is None
+    assert scored["cell"] == ["de", "prose", "multi"]
+
+    document = "Die Fähre fährt jeden Morgen um sechs Uhr über den Fluss. Sie ist sehr alt."
+    quote = "Die Fähre fährt jeden Morgen um sechs Uhr über den Fluss."
+    point_text = "Die Fähre fährt jeden Morgen früh über den breiten Fluss."
+    payload = {"lead": _DE_UNITS, "points": [{"text": point_text, "quote": quote}]}
+    span = provenance.SourceSpan(0, len(quote), quote, 1.0)
+    detailed_result = model_manager.StructuredSummary(
+        SUMMARY_TYPE_DETAILED,
+        _DE_UNITS,
+        [model_manager.SummaryPoint(point_text, span)],
+        None,
+        "rendered text is never scored",
+    )
+    detailed = cases.Case("de-lit-s", SUMMARY_TYPE_DETAILED, "auto")
+    json_calls = [
+        _call(0, "not json", json_call=True),
+        _call(1, json.dumps(payload), json_call=True),
+    ]
+    scored = run.score_case_run(
+        detailed, detailed_result, json_calls, document, metrics.Target("de", None), parts=1
+    )
+    print(f"detailed: {scored}")
+    assert scored["M2"]["unparsed_calls"] == 1
+    assert scored["M2"]["passed"] is True
+    assert scored["M7"]["points"] == 1
+    assert scored["M7"]["cited"] == 1
+    assert scored["M7"]["verbatim"] == 1
+    assert scored["cell"] == ["de", "json", "single"]
+
+
+def test_m12a_rerun_compares_with_the_first_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run, "snapshot_now", _empty_snapshot)
+    first = cases.Case("zh-lit-s", SUMMARY_TYPE_BRIEF, "auto")
+    rerun = cases.Case("zh-lit-s", SUMMARY_TYPE_BRIEF, "auto", m12a=True)
+    specs = [run.RunSpec(first, 0), run.RunSpec(rerun, 0)]
+    texts = {"zh-lit-s": "村里的面包店每天清晨五点开门。店主会先把炉子烧热。然后开始揉面。"}
+    targets = {case.id: metrics.Target("zh", None) for case in (first, rerun)}
+
+    same = run.run_cases(_shell(_EvalLLM(), 8192), specs, texts, targets)
+    print(f"identical: {same[1].metrics['M12a']}")
+    assert same[1].metrics["M12a"]["identical"] is True
+    assert same[1].metrics["M12a"]["violations"] == 0
+    assert same[0].metrics["M12a"] is None
+
+    answers: list[str] = []
+
+    def drifting(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
+        answers.append(_PROSE if not answers else _PROSE.replace("early", "earlz"))
+        return answers[-1]
+
+    drifted = run.run_cases(_shell(_EvalLLM(drifting), 8192), specs, texts, targets)
+    m12a = drifted[1].metrics["M12a"]
+    print(f"first_diff: {m12a['first_diff']}")
+    assert m12a["identical"] is False
+    assert m12a["first_diff"] == _PROSE.index("early") + 4
+    assert m12a["violations"] == 1

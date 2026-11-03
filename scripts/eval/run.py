@@ -18,10 +18,15 @@ import platform
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from docsummarizer.model_manager import StructuredSummary, Summarizer
+    from eval.cases import Case
+    from eval.metrics import Target
 
 _REPO = Path(__file__).resolve().parents[2]
 _PACKAGE = "docsummarizer"
@@ -413,3 +418,356 @@ def count_contention(start: ContentionSnapshot, end: ContentionSnapshot) -> Cont
     if start.host is None or end.host is None:
         return Contention(local, SideCount(None, 0, (), ()))
     return Contention(local, _side(start.host, end.host, 0))
+
+
+# --------------------------------------------------------------------------- #
+# Capture and the case loop
+# --------------------------------------------------------------------------- #
+
+_PERF_FIELDS = ("n_p_eval", "n_eval", "t_p_eval_ms", "t_eval_ms")
+
+
+@dataclass
+class CallRecord:
+    """One completion as the model returned it, before any clean-up."""
+
+    seq: int
+    messages: list[dict[str, Any]]
+    kwargs: dict[str, Any]
+    stream: bool
+    content: str
+    finish_reason: str | None
+    usage: dict[str, Any] | None
+    perf: dict[str, float] | None  # the call's counter deltas; None without counters
+    error: str | None
+
+
+def _jsonable(value: Any) -> Any:
+    """``value`` when it serializes to JSON, else its type name."""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return type(value).__name__
+    return value
+
+
+class CapturingLlama:
+    """Wraps the model and records every completion and every tokenize length.
+
+    Every other attribute is the wrapped model's, so the pipeline sees the
+    same context pointer and counters.
+    """
+
+    def __init__(self, real: Any, snapshot: Callable[[], Any]) -> None:
+        self._real = real
+        self._snapshot = snapshot
+        self.calls: list[CallRecord] = []
+        self.tokenized: dict[str, int] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def _perf_since(self, before: Any) -> dict[str, float] | None:
+        after = self._snapshot() if before is not None else None
+        if before is None or after is None:
+            return None
+        return {name: getattr(after, name) - getattr(before, name) for name in _PERF_FIELDS}
+
+    def create_chat_completion(self, **kwargs: Any) -> Any:
+        before = self._snapshot()
+        messages = kwargs.pop("messages")
+        stream = bool(kwargs.pop("stream", False))
+        record = CallRecord(
+            seq=len(self.calls),
+            messages=[dict(message) for message in messages],
+            kwargs={key: _jsonable(value) for key, value in kwargs.items()},
+            stream=stream,
+            content="",
+            finish_reason=None,
+            usage=None,
+            perf=None,
+            error=None,
+        )
+        self.calls.append(record)
+        if stream:
+            chunks = self._real.create_chat_completion(messages=messages, stream=True, **kwargs)
+            return self._stream(record, before, chunks)
+        try:
+            response = self._real.create_chat_completion(messages=messages, **kwargs)
+            choice = response["choices"][0]
+            record.content = str(choice["message"].get("content") or "")
+            record.finish_reason = choice.get("finish_reason")
+            record.usage = response.get("usage")
+        except Exception as exc:
+            record.error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            record.perf = self._perf_since(before)
+        return response
+
+    def _stream(self, record: CallRecord, before: Any, chunks: Iterable[Any]) -> Iterator[Any]:
+        try:
+            for chunk in chunks:
+                choice = chunk["choices"][0]
+                delta = (choice.get("delta") or {}).get("content")
+                if delta:
+                    record.content += delta
+                record.finish_reason = choice.get("finish_reason") or record.finish_reason
+                yield chunk
+        except Exception as exc:
+            record.error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            # An aborted stream is recorded too: this runs when the consumer stops.
+            record.perf = self._perf_since(before)
+
+    def tokenize(self, text: bytes, add_bos: bool = True) -> Any:
+        result = self._real.tokenize(text, add_bos=add_bos)
+        self.tokenized[hashlib.sha256(text).hexdigest()] = len(result)
+        return result
+
+    def reset(self) -> None:
+        self._real.reset()
+
+    def set_seed(self, seed: int) -> None:
+        self._real.set_seed(seed)
+
+
+def build_summarizer(
+    model: Path, *, n_ctx: int, n_threads: int | None, n_gpu_layers: int
+) -> Summarizer:
+    """Load the model: the runner's one construction site."""
+    from docsummarizer.model_manager import Summarizer
+
+    return Summarizer(model, n_ctx=n_ctx, n_threads=n_threads, n_gpu_layers=n_gpu_layers)
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    """One case run to make."""
+
+    case: Case
+    seed: int
+    repetition: int = 0
+
+
+@dataclass
+class CaseRun:
+    """One case run's outcome, its calls and its scores."""
+
+    case: str
+    seed: int
+    repetition: int
+    n_ctx: int
+    parts: int
+    result: dict[str, Any] | None
+    run_stats: dict[str, Any] | None
+    calls: list[CallRecord]
+    tokenized: dict[str, int]
+    contention: dict[str, Any]
+    contended: bool
+    error: str | None
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+
+def _json_units(content: str) -> list[str] | None:
+    """The lead and point texts the app's parser reads from one JSON call."""
+    from docsummarizer.model_manager import _parse_structured_json
+    from eval import metrics
+
+    parsed = _parse_structured_json(content)
+    if parsed is None:
+        return None
+    texts = [str(parsed.get("lead") or ""), *(text for text, _ in _json_points(parsed))]
+    return [unit for text in texts for unit in metrics.split_units(text)]
+
+
+def _json_points(parsed: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(text, quote)`` pair of a parsed call: Detailed points and each section."""
+    from docsummarizer.model_manager import _read_raw_points
+
+    pairs = _read_raw_points(parsed.get("points"))
+    sections = parsed.get("sections")
+    if isinstance(sections, dict):
+        for value in sections.values():
+            pairs.extend(_read_raw_points(value))
+    return pairs
+
+
+def _result_points(result: StructuredSummary) -> list[Any]:
+    points = list(result.points)
+    for section in (result.sections or {}).values():
+        points.extend(section)
+    return points
+
+
+def score_case_run(
+    case: Case,
+    result: StructuredSummary | None,
+    calls: Sequence[CallRecord],
+    text: str,
+    target: Target,
+    *,
+    parts: int,
+) -> dict[str, Any]:
+    """Score one case run: every call's raw content and the returned result.
+
+    The one scoring path a run and a rescore share. The rendered ``text`` of a
+    result is never scored.
+    """
+    from docsummarizer.model_manager import SUMMARY_TYPE_BRIEF, _parse_structured_json
+    from eval import metrics
+
+    is_json = ["response_format" in call.kwargs for call in calls]
+    call_units = [
+        _json_units(call.content) if json_call else metrics.split_units(call.content)
+        for call, json_call in zip(calls, is_json, strict=True)
+    ]
+    result_units: list[str] = []
+    m7: dict[str, Any] | None = None
+    if result is not None:
+        points = _result_points(result)
+        texts = [result.lead or "", *(point.text for point in points)]
+        result_units = [unit for t in texts for unit in metrics.split_units(t)]
+        if case.summary_type != SUMMARY_TYPE_BRIEF:
+            quotes: dict[str, str] = {}
+            for call, json_call in zip(calls, is_json, strict=True):
+                parsed = _parse_structured_json(call.content) if json_call else None
+                if parsed is not None:
+                    quotes.update(_json_points(parsed))
+            scored = metrics.m7(metrics.point_records(points, quotes), text)
+            m7 = {**asdict(scored), "hit_rate": scored.hit_rate}
+    m1 = [metrics.m1(call.content).passed for call in calls]
+    m4 = [metrics.m4(call.finish_reason) for call in calls]
+    m2 = metrics.m2(call_units, result_units, target)
+    script = f"-{target.script}" if target.script else ""
+    path = "prose" if case.summary_type == SUMMARY_TYPE_BRIEF else "json"
+    return {
+        "cell": [target.code + script, path, "single" if parts == 1 else "multi"],
+        "M1": {
+            "violations": m1.count(False),
+            "calls": len(calls),
+            "failed_calls": [call.seq for call, ok in zip(calls, m1, strict=True) if not ok],
+        },
+        "M2": {
+            "violations": len(m2.off_target),
+            "passed": m2.passed,
+            "scored": m2.scored,
+            "unparsed_calls": m2.unparsed_calls,
+            "off_target": [asdict(off) for off in m2.off_target],
+        },
+        "M4": {
+            "violations": sum(m4),
+            "calls": len(calls),
+            "truncated_calls": [call.seq for call, cut in zip(calls, m4, strict=True) if cut],
+        },
+        "M7": m7,
+        "M12a": None,
+    }
+
+
+def _first_run_of(rerun: Case, seed: int, done: Sequence[CaseRun]) -> CaseRun | None:
+    first_id = replace(rerun, m12a=False).id
+    return next(
+        (r for r in done if r.case == first_id and r.seed == seed and r.repetition == 0), None
+    )
+
+
+def _m12a(first: CaseRun | None, rerun: CaseRun) -> dict[str, Any] | None:
+    from eval import metrics
+
+    if first is None or first.result is None or rerun.result is None:
+        return None
+    outcome = metrics.m12a(first.result["text"], rerun.result["text"])
+    return {**asdict(outcome), "violations": 0 if outcome.identical else 1, "first": first.case}
+
+
+def _counting_chunks(summarizer: Summarizer, observed: list[int]) -> Callable[..., Any]:
+    """``_chunks_within``, recording the piece count of each top-level call."""
+    original = summarizer._chunks_within
+    depth = 0
+
+    def counting(text: str, budget_tokens: int, split: Any) -> list[tuple[str, int]]:
+        nonlocal depth
+        depth += 1
+        try:
+            pieces = original(text, budget_tokens, split)
+        finally:
+            depth -= 1
+        if depth == 0:
+            observed.append(len(pieces))
+        return pieces
+
+    return counting
+
+
+def _run_one(
+    summarizer: Summarizer, capture: CapturingLlama, spec: RunSpec, text: str
+) -> tuple[StructuredSummary | None, str | None, int, Contention]:
+    capture.calls = []
+    capture.tokenized = {}
+    capture.reset()
+    capture.set_seed(spec.seed)
+    observed: list[int] = []
+    summarizer._chunks_within = _counting_chunks(summarizer, observed)  # type: ignore[method-assign]
+    result: StructuredSummary | None = None
+    error: str | None = None
+    start = snapshot_now()
+    try:
+        result = summarizer.summarize_structured(
+            text,
+            spec.case.summary_type,
+            should_cancel=lambda: False,
+            language=spec.case.language,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"  # recorded in the results file, never logged
+    finally:
+        end = snapshot_now()
+        del summarizer._chunks_within
+    parts = getattr(result, "parts_total", None) or (observed[0] if observed else 0)
+    return result, error, parts, count_contention(start, end)
+
+
+def run_cases(
+    summarizer: Summarizer,
+    runs: Sequence[RunSpec],
+    texts: Mapping[str, str],
+    targets: Mapping[str, Target],
+) -> list[CaseRun]:
+    """Run each spec in order from a reset model and its seed, capturing every call.
+
+    ``texts`` is keyed by document id and ``targets`` by case id. A case flagged
+    ``m12a`` is compared with repetition 0 of the same case without the flag.
+    """
+    capture = summarizer.llm
+    if not isinstance(capture, CapturingLlama):
+        capture = CapturingLlama(summarizer.llm, summarizer._perf_snapshot)
+        summarizer.llm = capture
+    done: list[CaseRun] = []
+    for spec in runs:
+        case, text = spec.case, texts[spec.case.doc]
+        result, error, parts, contention = _run_one(summarizer, capture, spec, text)
+        result_dict = asdict(result) if result is not None else None
+        stats = result_dict.pop("run_stats", None) if result_dict is not None else None
+        case_run = CaseRun(
+            case=case.id,
+            seed=spec.seed,
+            repetition=spec.repetition,
+            n_ctx=summarizer.n_ctx,
+            parts=parts,
+            result=result_dict,
+            run_stats=stats,
+            calls=capture.calls,
+            tokenized=capture.tokenized,
+            contention={**asdict(contention), "contended": contention.contended},
+            contended=contention.contended,
+            error=error,
+        )
+        case_run.metrics = score_case_run(
+            case, result, case_run.calls, text, targets[case.id], parts=parts
+        )
+        if case.m12a:
+            case_run.metrics["M12a"] = _m12a(_first_run_of(case, spec.seed, done), case_run)
+        done.append(case_run)
+    return done
