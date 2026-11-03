@@ -62,3 +62,30 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           QT_QUICK_BACKEND: software
         run: pytest -ra --cov=docsummarizer --cov-report=term-missing
+
+  windows-tests:
+    name: Windows filesystem tests
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install package + dev/gui extras
+        run: pip install -e ".[dev,gui]"
+
+      # Only the tests marked `windows`; no coverage (a subset would trip the
+      # floor). pytest exits 5 when nothing is selected, which fails this job.
+      - name: Tests marked windows
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+        run: pytest -m windows -ra
