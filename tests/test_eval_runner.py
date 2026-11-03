@@ -10,7 +10,9 @@ import ast
 import hashlib
 import inspect
 import json
+import os
 import re
+import subprocess
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -948,3 +950,271 @@ def test_lang_tier_runs_the_split_pass(
     for case_id in expected:
         assert f"not split: {case_id}" in out
     assert all(line["parts"] > 1 for line in split_runs if line["case"].startswith("de-cred-s"))
+
+
+# --------------------------------------------------------------------------- #
+# Rescore by replay
+# --------------------------------------------------------------------------- #
+
+
+def _source(eval_dir: Path, model: Path, *extra: str) -> Path:
+    """Run the smoke tier at ``--n-ctx 2048`` and return its results file."""
+    argv = ["--eval-dir", str(eval_dir), "--model", str(model), "--tier", "smoke"]
+    assert run.main([*argv, "--n-ctx", "2048", *extra]) == 0
+    files = sorted((eval_dir / "results").glob("*.jsonl"))
+    assert len(files) == 1, files
+    return files[0]
+
+
+def _rescored(eval_dir: Path) -> Path:
+    files = sorted((eval_dir / "results").glob("*-rescore.jsonl"))
+    assert len(files) == 1, files
+    return files[0]
+
+
+def _rescore(eval_dir: Path, source: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    code = run.main(["--eval-dir", str(eval_dir), "--rescore", str(source)])
+    out = capsys.readouterr().out
+    print(out)
+    return code, out
+
+
+def test_rescore_reproduces_every_metric(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Replaying a file through the tree that wrote it reproduces every metric and result.
+
+    Catches a rescore that scores differently from the run: a lost call, another
+    ``n_ctx`` or parts count, or M12a compared with the wrong run.
+    """
+    eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
+    source = _source(eval_dir, _gguf(tmp_path))
+    capsys.readouterr()
+    code, out = _rescore(eval_dir, source, capsys)
+    assert code == 0
+
+    before = run.read_results(source)
+    after = run.read_results(_rescored(eval_dir))
+    assert len(after.case_runs) == len(before.case_runs) == 17
+    assert any(line["parts"] > 1 for line in before.case_runs)
+    assert any(line["metrics"]["M12a"] for line in before.case_runs)
+    for old, new in zip(before.case_runs, after.case_runs, strict=True):
+        assert new["case"] == old["case"]
+        assert new["metrics"] == old["metrics"], old["case"]
+        assert new["result"] == old["result"], old["case"]
+        assert new["run_stats"] == old["run_stats"]
+        assert new["repetition"] == old["repetition"]
+    assert after.calls == before.calls
+
+    header = after.header
+    for name in run.HEADER_FIELDS:
+        assert header[name] == before.header[name], name
+    git = run.git_state(run._REPO)
+    assert set(header["scored_by"]) == {"commit", "dirty", "gated_hash"}
+    assert header["scored_by"]["commit"] == git.commit
+    assert header["rescored_from"] == str(source)
+    assert header["arms"] == list(run.RESCORE_ARMS)
+    assert f"replayed case_runs=17 calls={len(before.calls)}" in out
+
+
+_ARMS_SENTENCES = (
+    "The village bakery opens at five every morning.",
+    "The baker heats the old stone oven long before dawn.",
+)
+_ARMS_LONG = (
+    "On the first warm day of spring the children of the school garden planted long rows "
+    "of beans, carrots, onions and tall yellow sunflowers beside the old stone wall."
+)
+_ARMS_UNRELATED = "The ferry leaves the wooden pier at noon."
+_ARMS_DOC = " ".join((*_ARMS_SENTENCES, _ARMS_LONG, _ARMS_UNRELATED))
+_ARMS_DROPPED = " ".join(_ARMS_LONG.split()[::2])  # every second word dropped
+_ARMS_POINTS = (
+    ("The bakery opens at five.", _ARMS_SENTENCES[0]),
+    ("The oven is heated before dawn.", _ARMS_SENTENCES[1]),
+    ("Children planted a spring garden by the wall.", _ARMS_DROPPED),
+)
+_ARMS_CASE = "en-lit-s/detailed/auto"
+
+
+def _arms_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
+    if "response_format" in kwargs:
+        points = [{"text": text, "quote": quote} for text, quote in _ARMS_POINTS]
+        lead = "A village bakery, its oven and a school garden in spring."
+        return json.dumps({"lead": lead, "points": points})
+    return _PROSE
+
+
+def _arms_corpus(eval_dir: Path) -> Path:
+    _write_manifest(eval_dir, [_manifest_entry(eval_dir, "en-lit-s", _ARMS_DOC)])
+    return eval_dir
+
+
+def _arms_source(eval_llm: Any, tmp_path: Path) -> Path:
+    """A one-case run whose three points cite two verbatim quotes and one loose one."""
+    eval_llm.respond = _arms_respond
+    return _source(_arms_corpus(tmp_path / "eval"), _gguf(tmp_path), "--case", _ARMS_CASE)
+
+
+def test_rescore_prints_coverage_only_and_production_arms(
+    eval_llm: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both arms print per cell and in the aggregate, with the cited share the strict check costs.
+
+    Acceptance: the coverage-only arm is the located set before the strict check,
+    the production arm the set after it. Mutation caught: the coverage-only arm
+    replayed without its patch, so before and after print the same share.
+    """
+    assert provenance.is_verified_match(_ARMS_DROPPED, _ARMS_LONG) is False
+    assert provenance.locate_quote(_ARMS_DROPPED, _ARMS_DOC) is None
+    with run.accept_every_match():
+        located = provenance.locate_quote(_ARMS_DROPPED, _ARMS_DOC)
+    print(f"located under accept_every_match: {located}")
+    assert located is not None
+    assert located.quote == _ARMS_LONG
+
+    source = _arms_source(eval_llm, tmp_path)
+    capsys.readouterr()
+
+    def arms(eval_dir: Path) -> tuple[str, dict[str, Any]]:
+        code, out = _rescore(eval_dir, source, capsys)
+        assert code == 0
+        lines = run.read_results(_rescored(eval_dir)).case_runs
+        assert all("m7_coverage_only" in line for line in lines)
+        return out, next(line for line in lines if line["case"] == _ARMS_CASE)
+
+    out, line = arms(tmp_path / "eval")
+    cited = (line["m7_coverage_only"]["cited"], line["metrics"]["M7"]["cited"])
+    print(f"cited (coverage_only, production): {cited}")
+    assert line["metrics"]["M7"]["points"] == 3
+    assert cited == (3, 2)
+    for scope in ("en/json/single", "aggregate"):
+        assert f"M7 {scope} coverage_only cited=3/3 tight=3/3 whole_document=0/3" in out
+        assert f"M7 {scope} production cited=2/3 tight=2/3 whole_document=0/3" in out
+        assert f"verbatim=2/3\nM7 {scope} drop cited=1/3" in out
+
+    monkeypatch.setattr(provenance, "is_verified_match", lambda quote, span_text: False)
+    out, line = arms(_arms_corpus(tmp_path / "rejecting"))
+    cited = (line["m7_coverage_only"]["cited"], line["metrics"]["M7"]["cited"])
+    print(f"rejecting everything, cited (coverage_only, production): {cited}")
+    assert cited == (3, 0)
+    assert "M7 aggregate drop cited=3/3" in out
+
+
+def test_rescore_refuses_a_different_request_sequence(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Replay stops when this tree would ask the model something the stored run did not.
+
+    Catches a replay that hands out the stored answers without comparing requests.
+    """
+    eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
+    source = _source(eval_dir, _gguf(tmp_path), "--case", "zh-lit-m")
+    capsys.readouterr()
+    records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
+    calls = [i for i, record in enumerate(records) if record["kind"] == "call"]
+
+    def rewritten(name: str, kept: list[dict[str, Any]]) -> Path:
+        path = tmp_path / name
+        path.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+        return path
+
+    edited = json.loads(json.dumps(records))
+    target = edited[calls[1]]
+    target["messages"][0]["content"] += " Answer in verse."
+    code, out = _rescore(eval_dir, rewritten("edited.jsonl", edited), capsys)
+    assert code == 2
+    assert f"replay mismatch: seq {target['seq']} field messages" in out
+
+    dropped = [record for i, record in enumerate(records) if i != calls[-1]]
+    code, out = _rescore(eval_dir, rewritten("dropped.jsonl", dropped), capsys)
+    assert code == 2
+    assert f"replay mismatch: seq {records[calls[-1]]['seq']} field call count" in out
+
+
+class _ImportRecorder:
+    """A ``sys.meta_path`` finder that records imports of ``llama_cpp`` and finds nothing."""
+
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+        if name.partition(".")[0] == "llama_cpp":
+            self.names.append(name)
+
+
+def test_rescore_loads_no_model(
+    eval_llm: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
+    source = _source(eval_dir, _gguf(tmp_path), "--case", "zh-lit-m")
+    capsys.readouterr()
+
+    def no_model(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a rescore built a model")
+
+    recorder = _ImportRecorder()
+    monkeypatch.setattr(run, "build_summarizer", no_model)
+    monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [recorder, *sys.meta_path])
+    code, _ = _rescore(eval_dir, source, capsys)
+    print(f"llama_cpp imports: {recorder.names}")
+    assert code == 0
+    assert recorder.names == []
+
+
+def test_rescore_audits_every_citation(
+    eval_llm: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every production citation must verifiably hold its quote and be the document's text.
+
+    Catches grounding that attaches a span the quote is not in.
+    """
+    source = _arms_source(eval_llm, tmp_path)
+    capsys.readouterr()
+    code, out = _rescore(tmp_path / "eval", source, capsys)
+    assert code == 0
+    assert "audit: 2 citations, 0 failed" in out  # the production arm's two, not the three
+
+    start = _ARMS_DOC.index(_ARMS_UNRELATED)
+    unrelated = provenance.SourceSpan(start, start + len(_ARMS_UNRELATED), _ARMS_UNRELATED, 1.0)
+    # The grounding step reads the name it imported from provenance.
+    monkeypatch.setattr(model_manager, "locate_quote", lambda *args, **kwargs: unrelated)
+    code, out = _rescore(_arms_corpus(tmp_path / "misplaced"), source, capsys)
+    assert code == 1
+    for index in range(3):
+        assert f"audit: {_ARMS_CASE} point {index}" in out
+    assert "audit: 3 citations, 3 failed" in out
+
+
+def test_runner_logs_stay_in_the_eval_dir(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = _source(_corpus(tmp_path / "eval", _SMOKE_DOCS), _gguf(tmp_path), "--case", "zh-lit-m")
+    eval_dir = _corpus(tmp_path / "sub", _SMOKE_DOCS)
+    inherited = tmp_path / "inherited"
+    env = {**os.environ, "XDG_DATA_HOME": str(inherited), "LOCALAPPDATA": str(inherited)}
+    argv = ["scripts/eval/run.py", "--eval-dir", str(eval_dir), "--rescore", str(source)]
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, "-I", *argv],
+        cwd=_REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    print(done.stdout, done.stderr)
+    assert done.returncode == 0
+    logs = list((eval_dir / "appdata").rglob("docsummarizer_*.log"))
+    print(f"logs: {logs}")
+    assert logs
+    assert not inherited.exists() or not any(inherited.rglob("*"))

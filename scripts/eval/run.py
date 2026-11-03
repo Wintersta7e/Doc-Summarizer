@@ -21,7 +21,8 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, TYPE_CHECKING, Any, Literal
@@ -597,6 +598,18 @@ def _json_points(parsed: Mapping[str, Any]) -> list[tuple[str, str]]:
     return pairs
 
 
+def _model_quotes(calls: Sequence[CallRecord]) -> dict[str, str]:
+    """Each point text's quote as the model wrote it, over every parsed JSON call."""
+    from docsummarizer.model_manager import _parse_structured_json
+
+    quotes: dict[str, str] = {}
+    for call in calls:
+        parsed = _parse_structured_json(call.content) if "response_format" in call.kwargs else None
+        if parsed is not None:
+            quotes.update(_json_points(parsed))
+    return quotes
+
+
 def _result_points(result: StructuredSummary) -> list[Any]:
     points = list(result.points)
     for section in (result.sections or {}).values():
@@ -618,7 +631,7 @@ def score_case_run(
     The one scoring path a run and a rescore share. The rendered ``text`` of a
     result is never scored.
     """
-    from docsummarizer.model_manager import SUMMARY_TYPE_BRIEF, _parse_structured_json
+    from docsummarizer.model_manager import SUMMARY_TYPE_BRIEF
     from eval import metrics
 
     is_json = ["response_format" in call.kwargs for call in calls]
@@ -633,12 +646,7 @@ def score_case_run(
         texts = [result.lead or "", *(point.text for point in points)]
         result_units = [unit for t in texts for unit in metrics.split_units(t)]
         if case.summary_type != SUMMARY_TYPE_BRIEF:
-            quotes: dict[str, str] = {}
-            for call, json_call in zip(calls, is_json, strict=True):
-                parsed = _parse_structured_json(call.content) if json_call else None
-                if parsed is not None:
-                    quotes.update(_json_points(parsed))
-            scored = metrics.m7(metrics.point_records(points, quotes), text)
+            scored = metrics.m7(metrics.point_records(points, _model_quotes(calls)), text)
             m7 = {**asdict(scored), "hit_rate": scored.hit_rate}
     m1 = [metrics.m1(call.content).passed for call in calls]
     m4 = [metrics.m4(call.finish_reason) for call in calls]
@@ -847,6 +855,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--tier", choices=RUNNABLE_TIERS, help="run a tier's cases")
+    mode.add_argument(
+        "--rescore", type=Path, metavar="R", help="replay results file R and score it again"
+    )
     parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
     parser.add_argument("--model", type=Path, help="the GGUF model file")
     parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
@@ -1191,9 +1202,348 @@ def _run_tier(args: argparse.Namespace) -> int:
     return 2 if not lines or calls == 0 else 0
 
 
+# --------------------------------------------------------------------------- #
+# Rescore: the stored completions replayed through this tree, with no model
+# --------------------------------------------------------------------------- #
+
+# Coverage-only locates a quote by the coverage pre-filter alone; production
+# also applies the strict citation check. The drop between them is its cost.
+RESCORE_ARMS = ("coverage_only", "production")
+
+
+class ReplayMismatch(Exception):  # noqa: N818 - a refusal, named for what it found
+    """This tree asked the model something the stored run did not."""
+
+    def __init__(self, seq: int, field: str) -> None:
+        super().__init__(f"seq {seq} field {field}")
+        self.seq = seq
+        self.field = field
+
+
+def _normalized(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+class ReplayLlama:
+    """Answers each completion with the stored one, once the request matches it.
+
+    It has no ``ctx``, so the pipeline reads no counters and installs no abort
+    callback. The first mismatch is kept: the pipeline may swallow the raise and
+    fall back, and the replay must still report the first difference.
+    """
+
+    def __init__(self, calls: Sequence[Mapping[str, Any]], tokenized: Mapping[str, int]) -> None:
+        self._calls = list(calls)
+        self._tokenized = dict(tokenized)
+        self.consumed = 0
+        self.mismatch: ReplayMismatch | None = None
+
+    def _refuse(self, field: str) -> ReplayMismatch:
+        if self.mismatch is None:
+            self.mismatch = ReplayMismatch(self.consumed, field)
+        return self.mismatch
+
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        kwargs.pop("stream", None)
+        if self.mismatch is not None:
+            raise self.mismatch
+        if self.consumed >= len(self._calls):
+            raise self._refuse("call count")
+        stored = self._calls[self.consumed]
+        if _normalized([dict(message) for message in messages]) != stored["messages"]:
+            raise self._refuse("messages")
+        asked = _normalized({key: _jsonable(value) for key, value in kwargs.items()})
+        for key in sorted(set(asked) | set(stored["kwargs"])):
+            if asked.get(key) != stored["kwargs"].get(key):
+                raise self._refuse(key)
+        self.consumed += 1
+        if stored["error"]:
+            raise RuntimeError(stored["error"])  # the stored call failed: fail the same way
+        message = {"role": "assistant", "content": stored["content"]}
+        choice = {"message": message, "finish_reason": stored["finish_reason"]}
+        return {"choices": [choice], "usage": stored["usage"]}
+
+    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+        # Message equality still guards an unknown text: any chunking difference
+        # changes the next request.
+        return [0] * self._tokenized.get(hashlib.sha256(text).hexdigest(), len(text) // 3)
+
+
+def replay_summarizer(llm: ReplayLlama, n_ctx: int) -> Summarizer:
+    """A summarizer around ``llm`` with no model loaded: the replay's construction site."""
+    from docsummarizer.model_manager import Summarizer
+
+    summarizer = object.__new__(Summarizer)
+    summarizer.llm = llm
+    summarizer.n_ctx = n_ctx
+    return summarizer
+
+
+@contextmanager
+def accept_every_match() -> Iterator[None]:
+    """Accept every candidate sentence the coverage pre-filter keeps, then restore."""
+    from docsummarizer import provenance
+
+    original = provenance.is_verified_match
+    provenance.is_verified_match = lambda quote, span_text: True
+    try:
+        yield
+    finally:
+        provenance.is_verified_match = original
+
+
+def _cited_points(result: Mapping[str, Any]) -> list[tuple[int, Mapping[str, Any]]]:
+    """``(index, point)`` for each cited point: the Detailed points, then each section."""
+    sections = result.get("sections") or {}
+    points = [*(result.get("points") or []), *(p for s in sections.values() for p in s)]
+    return [(i, point) for i, point in enumerate(points) if point.get("citation") is not None]
+
+
+def audit_citations(
+    result: Mapping[str, Any], quotes: Mapping[str, str], document: str
+) -> list[str]:
+    """Each cited point whose span does not verifiably hold the model's quote, or is not
+    the document's own text at its offsets.
+    """
+    from docsummarizer import provenance
+
+    failures: list[str] = []
+    for index, point in _cited_points(result):
+        span = point["citation"]
+        if not provenance.is_verified_match(quotes.get(point["text"], ""), span["quote"]):
+            failures.append(f"point {index}: the span does not hold the quote")
+        elif document[span["start"] : span["end"]] != span["quote"]:
+            failures.append(f"point {index}: the span is not the document's text")
+    return failures
+
+
+def _case_of(case_id: str) -> Case:
+    """The case a results line names: ``<doc>/<type>/<language>[@split][#m12a]``."""
+    from eval import cases
+
+    m12a = case_id.endswith("#m12a")
+    body = case_id.removesuffix("#m12a")
+    split = body.endswith("@split")
+    doc, summary_type, language = body.removesuffix("@split").split("/", 2)
+    return cases.Case(doc, summary_type, language, split=split, m12a=m12a)
+
+
+def _call_record(line: Mapping[str, Any]) -> CallRecord:
+    return CallRecord(**{f.name: line[f.name] for f in fields(CallRecord)})
+
+
+def _replay(
+    case: Case, text: str, n_ctx: int, line: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]
+) -> tuple[StructuredSummary | None, str | None]:
+    """One arm's replay of a case run: its result or the error it raised.
+
+    Raises ``ReplayMismatch`` when this tree asks anything the stored run did
+    not, or fewer calls than it made.
+    """
+    llm = ReplayLlama(calls, line["tokenized"])
+    summarizer = replay_summarizer(llm, n_ctx)
+    result: StructuredSummary | None = None
+    error: str | None = None
+    try:
+        result = summarizer.summarize_structured(text, case.summary_type, language=case.language)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    if llm.mismatch is not None:
+        raise llm.mismatch
+    if llm.consumed != len(calls):
+        raise ReplayMismatch(llm.consumed, "call count")
+    return result, error
+
+
+def _rescore_documents(eval_dir: Path, header: Mapping[str, Any]) -> dict[str, ManifestDocument]:
+    manifest = load_manifest(eval_dir)
+    documents: dict[str, ManifestDocument] = {}
+    for doc_id, recorded in header["documents"].items():
+        doc = manifest.get(doc_id)
+        if doc is None:
+            raise _RefusedError(f"{doc_id}: not in the manifest (ad-hoc runs are not rescored)")
+        if doc.sha256 != recorded["sha256"]:
+            raise _RefusedError(f"{doc_id}: the manifest's sha256 differs from the run's")
+        documents[doc_id] = doc
+    verify_documents(documents.values())
+    return documents
+
+
+def _arm_sums(m7s: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    keys = ("points", "cited", "tight", "whole_document", "quotes", "verbatim")
+    return {key: sum(m7[key] for m7 in m7s) for key in keys}
+
+
+def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
+    """M7 per cell and aggregate in both arms, and the cited share the strict check costs."""
+    scored = [
+        run
+        for run in case_runs
+        if run.get("repetition", 0) == 0 and run["metrics"]["M7"] is not None
+    ]
+    if not scored:
+        return
+    cells: dict[str, list[Mapping[str, Any]]] = {}
+    for run in scored:
+        cells.setdefault("/".join(run["metrics"]["cell"]), []).append(run)
+    for scope, runs in [*sorted(cells.items()), ("aggregate", scored)]:
+        production = _arm_sums([run["metrics"]["M7"] for run in runs])
+        covered = [run["m7_coverage_only"] for run in runs]
+        coverage = None if None in covered else _arm_sums(covered)
+        for arm, sums in zip(RESCORE_ARMS, (coverage, production), strict=True):
+            if sums is None:
+                print(f"M7 {scope} {arm} n/a")
+                continue
+            n = sums["points"]
+            print(
+                f"M7 {scope} {arm} cited={sums['cited']}/{n} tight={sums['tight']}/{n} "
+                f"whole_document={sums['whole_document']}/{n} "
+                f"verbatim={sums['verbatim']}/{sums['quotes']}"
+            )
+        drop = "n/a" if coverage is None else f"{coverage['cited'] - production['cited']}"
+        print(f"M7 {scope} drop cited={drop}/{production['points']}")
+
+
+def _rescore_one(
+    line: Mapping[str, Any],
+    stored: Sequence[Mapping[str, Any]],
+    doc: ManifestDocument,
+    text: str,
+    done: Sequence[CaseRun],
+) -> tuple[CaseRun, dict[str, Any] | None]:
+    """Replay one case run in both arms: the production case run and the coverage-only M7.
+
+    A production-arm mismatch raises ``ReplayMismatch``; a coverage-only one is
+    printed and leaves that arm's M7 ``None``.
+    """
+    from eval import metrics
+
+    case = _case_of(line["case"])
+    try:
+        target = metrics.target_for(case.language, doc.label, doc.script)
+    except ValueError as exc:
+        raise _RefusedError(f"{case.id}: {exc}") from exc
+    records = [_call_record(call) for call in stored]
+    result, error = _replay(case, text, line["n_ctx"], line, stored)
+    coverage_m7: dict[str, Any] | None = None
+    try:
+        with accept_every_match():
+            covered, _ = _replay(case, text, line["n_ctx"], line, stored)
+    except ReplayMismatch as exc:
+        print(f"coverage-only arm: replay mismatch: {exc} ({case.id})")
+    else:
+        coverage_m7 = score_case_run(case, covered, records, text, target, parts=line["parts"])[
+            "M7"
+        ]
+    result_dict = asdict(result) if result is not None else None
+    if result_dict is not None:
+        result_dict.pop("run_stats", None)
+    case_run = CaseRun(
+        case=case.id,
+        seed=line["seed"],
+        repetition=line["repetition"],
+        n_ctx=line["n_ctx"],
+        parts=line["parts"],
+        result=result_dict,
+        run_stats=line["run_stats"],
+        calls=records,
+        tokenized=line["tokenized"],
+        contention=line["contention"],
+        contended=line["contended"],
+        error=error,
+    )
+    case_run.metrics = score_case_run(case, result, records, text, target, parts=line["parts"])
+    if case.m12a:
+        case_run.metrics["M12a"] = _m12a(_first_run_of(case, case_run.seed, done), case_run)
+    return case_run, coverage_m7
+
+
+def _rescore_header(source: Path, header: Mapping[str, Any]) -> dict[str, Any]:
+    """The generating run's header, plus the tree that scored it again."""
+    from eval import metrics
+
+    git = git_state(_REPO)
+    package = _REPO / "src" / _PACKAGE
+    scored_by = {
+        "commit": git.commit,
+        "dirty": git.dirty,
+        "gated_hash": gated_hash(package, derive_gated(package).files),
+    }
+    return {
+        **header,
+        "metric_version": metrics.METRIC_VERSION,
+        "scored_by": scored_by,
+        "rescored_from": str(source),
+        "arms": list(RESCORE_ARMS),
+    }
+
+
+def rescore(eval_dir: Path, source: Path) -> int:
+    """Replay ``source``'s completions through this tree in both arms and score them again.
+
+    The production arm's scores become each line's ``metrics``; the
+    coverage-only arm's M7 is kept beside them as ``m7_coverage_only``.
+    """
+    try:
+        results = read_results(source)
+    except (OSError, ValueError) as exc:
+        raise _RefusedError(f"--rescore {source}: {exc}") from exc
+    if not results.case_runs:
+        raise _RefusedError(f"--rescore {source}: zero case runs")
+    documents = _rescore_documents(eval_dir, results.header)
+    texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
+    calls_of: dict[int, list[dict[str, Any]]] = {}
+    for call in results.calls:
+        calls_of.setdefault(call["run"], []).append(call)
+
+    done: list[CaseRun] = []
+    lines: list[dict[str, Any]] = []
+    citations = 0
+    failures: list[str] = []
+    for line in results.case_runs:
+        doc_id = _case_of(line["case"]).doc
+        stored, text = calls_of.get(line["run"], []), texts[doc_id]
+        try:
+            case_run, coverage_m7 = _rescore_one(line, stored, documents[doc_id], text, done)
+        except ReplayMismatch as exc:
+            print(f"replay mismatch: {exc} ({line['case']})")
+            return 2
+        done.append(case_run)
+        if case_run.result is not None:
+            citations += len(_cited_points(case_run.result))
+            audit = audit_citations(case_run.result, _model_quotes(case_run.calls), text)
+            failures += [f"{case_run.case} {failure}" for failure in audit]
+        lines.append({**_case_run_line(line["run"], case_run), "m7_coverage_only": coverage_m7})
+
+    header = _rescore_header(source, results.header)
+    commit = header["scored_by"]["commit"] or "unknown"
+    plain = results_path(eval_dir, str(header["tier"]), commit[:12], datetime.now(timezone.utc))
+    final = plain.with_name(f"{plain.stem}-rescore.jsonl")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    with final.open("x", encoding="utf-8") as out:
+        write_line(out, header)
+        for line in lines:
+            for call in calls_of.get(line["run"], []):
+                write_line(out, call)
+            write_line(out, line)
+    print(f"results: {final}")
+    print_table(lines)
+    print_arms(lines)
+    print(f"replayed case_runs={len(lines)} calls={len(results.calls)}")
+    for failure in failures:
+        print(f"audit: {failure}")
+    print(f"audit: {citations} citations, {len(failures)} failed")
+    return 1 if failures else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, bootstrap app data, then run the chosen mode."""
     args = build_parser().parse_args(argv)
+    if args.rescore is not None and args.eval_dir is None:
+        print("refused: --rescore needs --eval-dir")
+        return 2
     if args.eval_dir is not None:
         app_data = args.eval_dir / "appdata"
     else:
@@ -1201,6 +1551,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"app data: {app_data}")
     bootstrap(app_data)
     try:
+        if args.rescore is not None:
+            return rescore(args.eval_dir, args.rescore)
         return _run_tier(args)
     except (_RefusedError, ManifestError) as exc:
         print(f"refused: {exc}")
