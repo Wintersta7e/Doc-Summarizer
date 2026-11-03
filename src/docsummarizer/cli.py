@@ -89,6 +89,7 @@ def summarize_file(
             summary=summary,
             summary_type=summary_type,
             separator_width=60,
+            replace=True,
         )
 
         print(f"  Saved to: {out_file}")

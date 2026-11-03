@@ -573,10 +573,15 @@ class ConsoleBridge(QObject):
 
         def work() -> None:
             if as_docx:
-                write_summary_docx(path, source_name=source, summary=summary.text)
+                # The save dialog already confirmed replacing an existing file.
+                write_summary_docx(path, source_name=source, summary=summary.text, replace=True)
             else:
                 write_summary_txt(
-                    path, source_name=source, summary=summary.text, summary_type=summary_type
+                    path,
+                    source_name=source,
+                    summary=summary.text,
+                    summary_type=summary_type,
+                    replace=True,
                 )
 
         def done(_result: Any) -> None:
@@ -708,6 +713,7 @@ class ConsoleBridge(QObject):
                         source_name=path.name,
                         summary=summary,
                         summary_type=summary_type,
+                        replace=True,
                     )
                     set_row(index, "DONE", max(len(summary) // 4, 1))
                     done_count += 1

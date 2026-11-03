@@ -185,6 +185,7 @@ follow_imports = "skip"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = ["windows: also run by the windows-latest CI job (Windows filesystem semantics)"]
 
 [tool.coverage.run]
 source = ["docsummarizer"]
