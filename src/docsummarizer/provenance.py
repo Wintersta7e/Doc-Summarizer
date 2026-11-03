@@ -3,8 +3,9 @@
 Pure, dependency-free (stdlib only) so it is fully unit-testable without the
 LLM. The model emits a ``quote`` alongside each summary point; we re-locate
 that quote in the *full* source document by fuzzy-matching it against the
-document's sentences, and record the matched sentence's char offsets. A match
-below the confidence threshold yields ``None`` — we never fabricate an offset.
+document's sentences, and record the char offsets of the best sentence that
+verifiably contains the quote (:func:`is_verified_match`). A quote no sentence
+verifiably contains yields ``None`` — we never fabricate an offset.
 """
 
 from __future__ import annotations
@@ -13,14 +14,28 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-# Minimum similarity (0..1) for a model quote to count as grounded in a source
-# sentence. Scoring is by *quote coverage* (how much of the quote is present in
-# the sentence), so a short verbatim phrase inside a long sentence still grounds.
+# Minimum *quote coverage* (0..1): how much of the quote is present in a source
+# sentence, so a short verbatim phrase inside a long sentence still grounds.
+# Coverage is one of three conditions; contiguity (below) is the second, and a
+# minimum quote length the third.
 DEFAULT_THRESHOLD = 0.6
 
 # Quotes shorter than this (after normalization) are rejected: a 1-2 char quote
 # would match almost any sentence and produce meaningless provenance.
 _MIN_QUOTE_CHARS = 6
+
+# Coverage sums disjoint matching blocks, so a paraphrase that shares scattered
+# words reaches it too; one contiguous run must also cover this much of a quote.
+VERIFIED_LONGEST_FRACTION = 0.5
+
+# The longest span, in characters, a citation should cover.
+MAX_SPAN_CHARS = 1000
+
+# Whitespace next to CJK text is ignored: a model copying it drops wrap spaces.
+# Han, kana, Hangul, CJK symbols and punctuation, fullwidth forms (escaped, so
+# Unicode normalization of this file cannot fold a range endpoint).
+_CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f\uac00-\ud7af"
+_SPACE_BY_CJK = re.compile(rf"(?<=[{_CJK}])\s+|\s+(?=[{_CJK}])")
 
 # Split on whitespace that follows sentence-terminal punctuation. Keeps the
 # terminator with the sentence it ends. Newlines count as whitespace, so this
@@ -120,8 +135,24 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
 
 
 def _normalize(s: str) -> str:
-    """Lowercase and collapse runs of whitespace, for fuzzy comparison."""
-    return " ".join(s.lower().split())
+    """Lowercase, collapse whitespace runs, drop whitespace touching CJK text."""
+    return _SPACE_BY_CJK.sub("", " ".join(s.lower().split()))
+
+
+def is_verified_match(quote: str, span_text: str) -> bool:
+    """True if ``span_text`` verifiably contains ``quote``.
+
+    After normalization the quote must be at least ``_MIN_QUOTE_CHARS`` long,
+    at least ``DEFAULT_THRESHOLD`` of it must be present in ``span_text``, and
+    one contiguous run must cover at least ``VERIFIED_LONGEST_FRACTION`` of it.
+    """
+    q = _normalize(quote)
+    if len(q) < _MIN_QUOTE_CHARS:
+        return False
+    matcher = SequenceMatcher(None, q, _normalize(span_text), autojunk=False)
+    sizes = [block.size for block in matcher.get_matching_blocks()]
+    coverage = sum(sizes) / len(q)
+    return coverage >= DEFAULT_THRESHOLD and max(sizes) >= VERIFIED_LONGEST_FRACTION * len(q)
 
 
 def locate_quote(
@@ -131,36 +162,39 @@ def locate_quote(
     *,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> SourceSpan | None:
-    """Find the source sentence in ``text`` best matching ``quote``.
+    """Find the best source sentence in ``text`` that verifiably contains ``quote``.
 
-    Scored by *quote coverage* — the fraction of the quote present in the
-    sentence — so a short verbatim phrase grounds to its (longer) source
-    sentence rather than being lost to a length-mismatch penalty. Returns a
-    :class:`SourceSpan` (offsets into ``text``) when the best coverage is at
-    least ``threshold``, otherwise ``None``. Pass precomputed ``sentences`` to
-    avoid re-splitting when locating many quotes against the same source.
+    Sentences whose *quote coverage* (the fraction of the quote present in the
+    sentence) reaches ``threshold`` are ranked by coverage, then by how tightly
+    they fit; the earlier sentence wins a full tie. The first one that
+    :func:`is_verified_match` accepts is returned as a :class:`SourceSpan`
+    (offsets into ``text``), otherwise ``None``. ``threshold`` can only raise
+    the coverage bar: below ``DEFAULT_THRESHOLD`` it raises ``ValueError``.
+    Pass precomputed ``sentences`` to avoid re-splitting when locating many
+    quotes against the same source.
     """
+    if threshold < DEFAULT_THRESHOLD:
+        raise ValueError(f"threshold must be at least {DEFAULT_THRESHOLD}, got {threshold}")
     normalized_quote = _normalize(quote)
     if len(normalized_quote) < _MIN_QUOTE_CHARS:
         return None
     if sentences is None:
         sentences = split_sentences(text)
 
-    best: tuple[int, int] | None = None
-    best_coverage = 0.0
-    best_ratio = 0.0
+    candidates: list[tuple[float, float, int, int]] = []
     matcher = SequenceMatcher(autojunk=False)
     matcher.set_seq1(normalized_quote)
     for start, end in sentences:
         matcher.set_seq2(_normalize(text[start:end]))
         matched = sum(block.size for block in matcher.get_matching_blocks())
         coverage = matched / len(normalized_quote)
-        ratio = matcher.ratio()
-        # Prefer higher coverage; tie-break toward the tighter-fitting sentence.
-        if coverage > best_coverage or (coverage == best_coverage and ratio > best_ratio):
-            best, best_coverage, best_ratio = (start, end), coverage, ratio
+        if coverage >= threshold:
+            candidates.append((coverage, matcher.ratio(), start, end))
 
-    if best is None or best_coverage < threshold:
-        return None
-    start, end = best
-    return SourceSpan(start=start, end=end, quote=text[start:end], score=round(best_coverage, 4))
+    # Prefer higher coverage; tie-break toward the tighter-fitting sentence. The
+    # sort is stable, so the earlier sentence wins a full tie.
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    for coverage, _ratio, start, end in candidates:
+        if is_verified_match(quote, text[start:end]):
+            return SourceSpan(start=start, end=end, quote=text[start:end], score=round(coverage, 4))
+    return None
