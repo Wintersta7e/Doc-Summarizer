@@ -1323,3 +1323,219 @@ def test_compare_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
         assert "B 17 case runs, C 17 case runs" in out
         assert "aggregate" in out
         assert "blocks a merge" in out
+
+
+# --------------------------------------------------------------------------- #
+# Checks, the language self-test and the contention count
+# --------------------------------------------------------------------------- #
+
+
+class _CountedLLM(_EvalLLM):
+    """An ``_EvalLLM`` with llama.cpp's cumulative counters, ``n_tokens`` and blocking ``usage``.
+
+    Each call charges its whole prompt to ``n_p_eval``, except an exact repeat
+    of the previous call's messages, which evaluates one token (a prefix hit).
+    """
+
+    def __init__(self, completion_offset: int = 0) -> None:
+        super().__init__()
+        self.ctx = object()
+        self.n_tokens = 0
+        self.perf = {"n_p_eval": 0, "n_eval": 0, "t_p_eval_ms": 0.0, "t_eval_ms": 0.0}
+        self.completion_offset = completion_offset
+        self._previous: Any = None
+
+    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+        prompt = sum(len(self.tokenize(m["content"].encode())) for m in messages)
+        evaluated = 1 if messages == self._previous else prompt
+        self._previous = messages
+        text = self.respond(messages, kwargs)
+        out = len(self.tokenize(text.encode()))
+        self.perf["n_p_eval"] += evaluated
+        self.perf["n_eval"] += out
+        self.perf["t_p_eval_ms"] += 10.0 * evaluated
+        self.perf["t_eval_ms"] += 50.0 * out
+        self.n_tokens = prompt + out
+        response = super().create_chat_completion(messages=messages, stream=stream, **kwargs)
+        if stream:
+            return response
+        usage = {"prompt_tokens": prompt, "completion_tokens": out + self.completion_offset}
+        return {**response, "usage": usage}
+
+
+def _counted(monkeypatch: pytest.MonkeyPatch, fake: _CountedLLM) -> None:
+    """Serve ``fake`` from ``build_summarizer`` behind a ``llama_cpp`` module reading its counters."""
+    import types
+
+    pkg = types.ModuleType("llama_cpp")
+    low = types.ModuleType("llama_cpp.llama_cpp")
+    low.llama_perf_context = lambda _ctx: types.SimpleNamespace(**fake.perf)
+    pkg.llama_cpp = low
+    monkeypatch.setitem(sys.modules, "llama_cpp", pkg)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_cpp", low)
+
+    def build(model: Path, *, n_ctx: int, n_threads: int | None, n_gpu_layers: int) -> Summarizer:
+        return _shell(fake, n_ctx)
+
+    monkeypatch.setattr(run, "build_summarizer", build)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+
+def _checked(tmp_path: Path, capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
+    code = run.main(["--eval-dir", str(tmp_path), *argv])
+    out = capsys.readouterr().out
+    print(f"{argv} -> {code}\n{out}")
+    return code, out
+
+
+def test_checks_runstats_passes_on_matching_counters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The request's counts equal the summed per-call counters and the library's usage.
+
+    Catches a prefix hit counted as a full prompt, and counts that drift from
+    the counters they are summed from.
+    """
+    fake = _CountedLLM()
+    _counted(monkeypatch, fake)
+    code, out = _checked(tmp_path, capsys, "--checks", "runstats", "--model", str(_gguf(tmp_path)))
+    assert code == 0
+    for leg in ("blocking", "streamed", "prefix repeat"):
+        assert f"leg {leg}: calls=" in out
+        assert f"leg {leg}: pass" in out
+    assert "deltas n_p_eval=" in out
+    assert "run_stats prompt_tokens=" in out
+    assert "usage=" in out
+    assert "runstats: 3 legs, 3 passed" in out
+
+
+def test_checks_runstats_fails_on_a_counter_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _counted(monkeypatch, _CountedLLM(completion_offset=5))
+    code, out = _checked(tmp_path, capsys, "--checks", "runstats", "--model", str(_gguf(tmp_path)))
+    assert code == 1
+    assert "leg blocking: fail completion_tokens" in out
+    assert "runstats: 3 legs, 2 passed" in out
+
+
+def test_checks_unknown_name_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _checked(tmp_path, capsys, "--checks", "nope")
+    assert code == 2
+    assert "nope" in out
+    assert all(name in out for name in run.CHECKS)
+    code, out = _checked(tmp_path, capsys, "--checks", "")
+    assert code == 2
+
+
+def _snapshots(
+    local: tuple[int, ...], host: tuple[str, str] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``snapshot_now`` returns a start, then an end snapshot of the invented fixtures."""
+    taken: list[Any] = []
+    for at_end in (False, True):
+        tasklist = None if host is None else (lambda cpu=host[at_end]: _tasklist(cpu))
+        taken.append(run.take_snapshot(_processes(at_end, local), _OWN_PID, tasklist))
+    monkeypatch.setattr(run, "snapshot_now", lambda: taken.pop(0))
+
+
+def test_contention_mode_exits_1_on_either_side(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A busy model process on either side fails the check; an idle or unreadable one does not.
+
+    Catches the mutation "exit 0 whenever the local side is clear", so a busy
+    host process passes.
+    """
+    import time
+
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+    busy, idle = ("0:00:02", "0:00:07"), ("0:00:02", "0:00:02")
+
+    _snapshots((101, 103), idle, monkeypatch)
+    code, out = _checked(tmp_path, capsys, "--contention")
+    assert code == 1
+    assert "contention local=1 unknown=0 idle=tallow-idle host=0 idle=orchard-llama-host.exe" in out
+
+    _snapshots((103,), busy, monkeypatch)
+    code, out = _checked(tmp_path, capsys, "--contention")
+    assert code == 1
+    assert "host=1" in out
+
+    _snapshots((103,), idle, monkeypatch)
+    assert _checked(tmp_path, capsys, "--contention")[0] == 0
+
+    taken = [
+        run.take_snapshot(_processes(at_end, (103, 104)), _OWN_PID, lambda: None)
+        for at_end in (False, True)
+    ]
+    monkeypatch.setattr(run, "snapshot_now", lambda: taken.pop(0))
+    code, out = _checked(tmp_path, capsys, "--contention")
+    assert code == 0
+    assert "unknown=1" in out
+    assert "host=unknown" in out
+
+    _snapshots((103,), None, monkeypatch)
+    code, out = _checked(tmp_path, capsys, "--contention", "3")
+    assert code == 0
+    assert "host=n/a" in out
+    assert slept == [run.CONTENTION_WINDOW_S] * 4 + [3.0]
+
+    code, out = _checked(tmp_path, capsys, "--contention", "0")
+    assert code == 2
+    assert slept[-1] == 3.0
+
+
+_LABELLED = {
+    "zh": (
+        "村里的面包店每天清晨五点开门并把炉子烧热。",
+        "学校的菜园里种着豆子、胡萝卜和高高的向日葵。",
+    ),
+    "de": (
+        "Die Fähre fährt jeden Morgen um sechs Uhr über den breiten Fluss.",
+        "Im Schulgarten wachsen Bohnen, Karotten und hohe gelbe Sonnenblumen.",
+    ),
+    "en": (
+        "The river ferry leaves the wooden pier at six every morning.",
+        "The school garden grows beans, carrots and tall yellow sunflowers.",
+    ),
+    "fr": (
+        "Le bac quitte le ponton en bois chaque matin à six heures.",
+        "Le jardin de l'école donne des haricots, des carottes et de grands tournesols.",
+    ),
+    "es": (
+        "El transbordador sale del muelle de madera cada mañana a las seis.",
+        "El huerto de la escuela da judías, zanahorias y altos girasoles amarillos.",
+    ),
+    "ru": (
+        "Паром каждое утро отходит от деревянной пристани в шесть часов.",
+        "Школьный сад даёт бобы, морковь и высокие жёлтые подсолнухи.",
+    ),
+}
+
+
+def test_self_test_language_computes_three_rates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [{"text": text, "label": label} for label, texts in _LABELLED.items() for text in texts]
+    rows.append({"text": "a row without its label"})
+    labelled = tmp_path / "labelled.jsonl"
+    labelled.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    code, out = _checked(tmp_path, capsys, "--self-test", "language", str(labelled))
+    assert code == 2
+    assert "12 sentences" in out
+    assert "6 languages" in out
+
+    monkeypatch.setattr(run, "SELF_TEST_MIN_SENTENCES", 12)
+    monkeypatch.setattr(run, "SELF_TEST_MIN_LANGUAGES", 6)
+    code, out = _checked(tmp_path, capsys, "--self-test", "language", str(labelled))
+    assert code in (0, 1)
+    assert "skipped 1 row without text or label" in out
+    assert re.search(r"sentence error \d+/12 \(\d+\.\d%\), bar 1\.5%", out)
+    assert re.search(r"false fail \d+/1000 \(\d+\.\d%\), bar 3\.0%", out)
+    assert re.search(r"missed drift \d+/1000 \(\d+\.\d%\), bar 1\.0%", out)
+
+    code, out = _checked(tmp_path, capsys, "--self-test", "nope", str(labelled))
+    assert code == 2

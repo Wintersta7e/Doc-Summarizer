@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -861,6 +862,18 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--compare", type=Path, nargs=2, metavar=("B", "C"), help="candidate C against baseline B"
     )
+    mode.add_argument("--checks", metavar="LIST", help="comma-separated checks to run")
+    mode.add_argument(
+        "--self-test", nargs="+", metavar=("KIND", "ARG"), help="language <labelled set>"
+    )
+    mode.add_argument(
+        "--contention",
+        type=float,
+        nargs="?",
+        const=CONTENTION_WINDOW_S,
+        metavar="SECONDS",
+        help="count busy model processes over a window (default 10 s)",
+    )
     parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
     parser.add_argument("--model", type=Path, help="the GGUF model file")
     parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
@@ -1624,6 +1637,281 @@ def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
     return 1 if outcome.regressed else 0
 
 
+# --------------------------------------------------------------------------- #
+# Checks, the language self-test and the standalone contention count
+# --------------------------------------------------------------------------- #
+
+# The fixed input of every check: project-written, about invented places.
+CHECK_TEXT = (
+    "Every morning at six the small ferry leaves the wooden pier on the north bank of the "
+    "river. Its captain has worked the crossing for twenty years, and she checks the ropes, "
+    "the engine and the life jackets before anyone is allowed to board. The first passengers "
+    "are usually the bakers from the village, who carry baskets of bread to the market on "
+    "the far side. Behind them come farmers with crates of eggs and early vegetables, and "
+    "a few office workers who prefer the quiet water to the crowded bridge further "
+    "downstream.\n\n"
+    "At half past seven the ferry fills with children. The village has no secondary school "
+    "of its own, so more than forty students cross the river twice a day. The school pays "
+    "for their tickets, and the captain keeps a list of every child who should be on board. "
+    "When the river floods in spring, the crossing is cancelled, and the students study at "
+    "home with lessons sent by their teachers. Last year the river closed the crossing for "
+    "eleven days, the longest stop anyone could remember.\n\n"
+    "The school itself sits on a low hill above the market square. Its garden was planted "
+    "five years ago by a group of parents who wanted the children to learn where food comes "
+    "from. Each class looks after one bed. The youngest children grow beans and radishes, "
+    "which come up quickly, while the older ones manage potatoes, onions and a long row of "
+    "tall yellow sunflowers along the fence. In autumn the harvest is sold at a stall in the "
+    "market, and the money buys seeds and tools for the next season.\n\n"
+    "The bakery that supplies the school kitchen opens at five. Its owner bakes rye loaves, "
+    "white rolls and, on Fridays, a sweet bread with raisins that the students queue for at "
+    "lunch. She buys her flour from a mill two villages away and sends her delivery van "
+    "across on the ferry, because the bridge adds half an hour to the journey. When the "
+    "crossing is closed she bakes less, since the market on the far side cannot be reached "
+    "in time.\n\n"
+    "The village council has discussed building a second, larger ferry. Supporters say it "
+    "would carry the delivery vans and a school bus at once. Others worry about the cost and "
+    "about the old pier, which would need to be rebuilt. A decision is expected next year, "
+    "after the council has counted how many people use the crossing in each season."
+)
+
+
+def _perf_sums(calls: Sequence[CallRecord]) -> dict[str, float]:
+    return {name: sum((call.perf or {}).get(name, 0) for call in calls) for name in _PERF_FIELDS}
+
+
+def _runstats_leg(
+    name: str, summarizer: Summarizer, capture: CapturingLlama, *, reset: bool, stream: bool
+) -> list[str] | None:
+    """Run one leg and print its figures; the failed fields, or ``None`` when no call was made."""
+    capture.calls = []
+    if reset:
+        capture.reset()
+    cancel = (lambda: False) if stream else None
+    result = summarizer.summarize_structured(CHECK_TEXT, "brief", should_cancel=cancel)
+    if not capture.calls:
+        return None
+    stats, sums, last = result.run_stats, _perf_sums(capture.calls), capture.calls[-1]
+    usage = last.usage or {}
+    n_tokens = getattr(capture, "n_tokens", None)
+    print(
+        f"leg {name}: calls={len(capture.calls)} deltas "
+        + " ".join(f"{key}={sums[key]:g}" for key in _PERF_FIELDS)
+        + " | run_stats "
+        + (
+            "none"
+            if stats is None
+            else " ".join(
+                f"{key}={getattr(stats, key)}"
+                for key in (
+                    "prompt_tokens",
+                    "prompt_evaluated",
+                    "generated_tokens",
+                    "prompt_seconds",
+                    "generation_seconds",
+                )
+            )
+        )
+        + f" | usage={last.usage} n_tokens={n_tokens}"
+    )
+    if stats is None:
+        return ["run_stats"]
+    failed = [
+        key
+        for key, got, want in (
+            ("prompt_evaluated", stats.prompt_evaluated, sums["n_p_eval"]),
+            ("generated_tokens", stats.generated_tokens, sums["n_eval"]),
+        )
+        if got != want
+    ]
+    for key, got, want_ms in (
+        ("prompt_seconds", stats.prompt_seconds, sums["t_p_eval_ms"]),
+        ("generation_seconds", stats.generation_seconds, sums["t_eval_ms"]),
+    ):
+        if got is None or abs(got - want_ms / 1000) > 1e-6:
+            failed.append(key)
+    if name == "blocking":
+        n_eval = (last.perf or {}).get("n_eval", 0)
+        if not isinstance(n_tokens, int) or "prompt_tokens" not in usage:
+            failed.append("usage")
+        else:
+            if abs((n_tokens - n_eval) - usage["prompt_tokens"]) > 1:
+                failed.append(
+                    f"prompt_tokens (usage {usage['prompt_tokens']}, n_tokens - n_eval {n_tokens - n_eval:g})"
+                )
+            if abs(n_eval - usage.get("completion_tokens", -10)) > 1:
+                failed.append(
+                    f"completion_tokens (usage {usage.get('completion_tokens')}, n_eval {n_eval:g})"
+                )
+    if name == "prefix repeat" and not (
+        stats.prompt_evaluated is not None
+        and stats.prompt_tokens is not None
+        and stats.prompt_evaluated < stats.prompt_tokens
+    ):
+        failed.append(
+            f"prefix (prompt_evaluated {stats.prompt_evaluated}, prompt_tokens {stats.prompt_tokens})"
+        )
+    return failed
+
+
+def check_runstats(args: argparse.Namespace) -> int:
+    """The request counters against llama.cpp's own: blocking, streamed, and a prefix repeat."""
+    if args.model is None or not args.model.is_file():
+        print("runstats: needs --model <gguf>")
+        return 2
+    summarizer = build_summarizer(
+        args.model,
+        n_ctx=args.n_ctx or _default_n_ctx(),
+        n_threads=args.threads,
+        n_gpu_layers=args.n_gpu_layers,
+    )
+    try:
+        capture = CapturingLlama(summarizer.llm, summarizer._perf_snapshot)
+        summarizer.llm = capture
+        if summarizer._perf_snapshot() is None:
+            print("Counters unavailable: llama_perf_context missing")
+            return 2
+        passed = 0
+        legs = (("blocking", True, False), ("streamed", True, True), ("prefix repeat", False, True))
+        for name, reset, stream in legs:
+            failed = _runstats_leg(name, summarizer, capture, reset=reset, stream=stream)
+            if failed is None:
+                print(f"runstats: leg {name} made no call")
+                return 2
+            for reason in failed:
+                print(f"leg {name}: fail {reason}")
+            if not failed:
+                print(f"leg {name}: pass")
+                passed += 1
+    finally:
+        summarizer.close()
+    print(f"runstats: {len(legs)} legs, {passed} passed")
+    return 0 if passed == len(legs) else 1
+
+
+CHECKS: dict[str, Callable[[argparse.Namespace], int]] = {"runstats": check_runstats}
+
+
+def run_checks(args: argparse.Namespace) -> int:
+    """Run each named check; 2 for an unknown or empty list, else the worst exit code."""
+    names = [name.strip() for name in args.checks.split(",") if name.strip()]
+    unknown = [name for name in names if name not in CHECKS]
+    if not names or unknown:
+        print(f"refused: --checks {args.checks!r}: known checks are {', '.join(CHECKS)}")
+        return 2
+    return max(CHECKS[name](args) for name in names)
+
+
+SELF_TEST_MIN_SENTENCES = 1000
+SELF_TEST_MIN_LANGUAGES = 10
+_SELF_TEST_OUTPUTS = 1000
+_DRIFT_LANGUAGES = ("zh", "de", "en", "es", "fr")
+# Bars: sentence error, run-level false fail, missed drift.
+_SELF_TEST_BARS = (0.015, 0.03, 0.01)
+
+
+def _rate_line(name: str, num: int, den: int, bar: float) -> bool:
+    rate = num / den if den else 1.0
+    ok = rate <= bar
+    print(f"{name} {num}/{den} ({rate:.1%}), bar {bar:.1%}: {'ok' if ok else 'MISSED'}")
+    return ok
+
+
+def self_test_language(path: Path) -> int:
+    """The M2 classifier's three error rates over a labelled set of sentences."""
+    import random
+
+    from eval import metrics
+
+    by_label: dict[str, list[str]] = {}
+    skipped = 0
+    try:
+        raw = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"refused: --self-test language {path}: {exc}")
+        return 2
+    for text_line in raw:
+        try:
+            row = json.loads(text_line) if text_line.strip() else None
+        except ValueError:
+            row = None
+        text = row.get("text") if isinstance(row, dict) else None
+        label = row.get("label") if isinstance(row, dict) else None
+        if not isinstance(text, str) or not isinstance(label, str) or not text or not label:
+            skipped += 1 if text_line.strip() else 0
+            continue
+        by_label.setdefault(label, []).append(text)
+    sentences = sum(len(texts) for texts in by_label.values())
+    print(f"self-test language: {sentences} sentences, {len(by_label)} languages")
+    if skipped:
+        print(f"skipped {skipped} row{'s' if skipped != 1 else ''} without text or label")
+    if sentences < SELF_TEST_MIN_SENTENCES or len(by_label) < SELF_TEST_MIN_LANGUAGES:
+        print(
+            f"refused: needs at least {SELF_TEST_MIN_SENTENCES} sentences in "
+            f"{SELF_TEST_MIN_LANGUAGES} languages"
+        )
+        return 2
+
+    scored = [
+        (t, label) for label, texts in by_label.items() for t in texts if metrics.is_scored(t)
+    ]
+    wrong = sum(1 for text, label in scored if metrics.classify_unit(text) != label)
+    rng = random.Random(0)  # noqa: S311 - a reproducible sample, not a secret
+    labels = sorted(by_label)
+    false_fail = missed = 0
+    for _ in range(_SELF_TEST_OUTPUTS):
+        label = rng.choice(labels)
+        target = metrics.Target(label, None)
+        clean = [rng.choice(by_label[label]) for _ in range(4)]
+        false_fail += not metrics.m2([clean], [], target).passed
+        others = [code for code in _DRIFT_LANGUAGES if code != label and code in by_label]
+        drift = [*clean[:3], rng.choice(by_label[rng.choice(others)])] if others else clean
+        missed += metrics.m2([drift], [], target).passed
+    results = (
+        _rate_line("sentence error", wrong, len(scored), _SELF_TEST_BARS[0]),
+        _rate_line("false fail", false_fail, _SELF_TEST_OUTPUTS, _SELF_TEST_BARS[1]),
+        _rate_line("missed drift", missed, _SELF_TEST_OUTPUTS, _SELF_TEST_BARS[2]),
+    )
+    return 0 if all(results) else 1
+
+
+def run_self_test(kind_and_arg: Sequence[str]) -> int:
+    """``--self-test KIND [ARG]``; the only kind so far is ``language <set>``."""
+    if len(kind_and_arg) != 2 or kind_and_arg[0] != "language":
+        print("refused: --self-test takes: language <labelled set>")
+        return 2
+    return self_test_language(Path(kind_and_arg[1]))
+
+
+# The default window of a standalone contention count, in seconds.
+CONTENTION_WINDOW_S: float = 10.0
+
+
+def _idle_names(side: SideCount) -> str:
+    return ",".join(side.idle) or "-"
+
+
+def contention_report(seconds: float) -> int:
+    """Count model processes using the CPU over ``seconds``, on both sides of a WSL run."""
+    if seconds <= 0:
+        print(f"refused: --contention {seconds:g}: the window must be above 0 seconds")
+        return 2
+    start = snapshot_now()
+    time.sleep(seconds)
+    outcome = count_contention(start, snapshot_now())
+    local, host = outcome.local, outcome.host
+    if host is None:
+        host_text = "n/a"
+    elif host.count is None:
+        host_text = "unknown"
+    else:
+        host_text = f"{host.count} idle={_idle_names(host)}"
+    print(
+        f"contention local={local.count} unknown={local.unknown} idle={_idle_names(local)} "
+        f"host={host_text}"
+    )
+    return 1 if outcome.contended else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, bootstrap app data, then run the chosen mode."""
     args = build_parser().parse_args(argv)
@@ -1636,12 +1924,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         app_data = Path(tempfile.mkdtemp(prefix="docsummarizer-eval-"))
         print(f"app data: {app_data}")
     bootstrap(app_data)
+    modes: list[tuple[object, Callable[[], int]]] = [
+        (args.rescore, lambda: rescore(args.eval_dir, args.rescore)),
+        (args.compare, lambda: compare(args.eval_dir, *args.compare)),
+        (args.checks, lambda: run_checks(args)),
+        (args.self_test, lambda: run_self_test(args.self_test)),
+        (args.contention, lambda: contention_report(args.contention)),
+    ]
+    chosen = next((mode for value, mode in modes if value is not None), lambda: _run_tier(args))
     try:
-        if args.rescore is not None:
-            return rescore(args.eval_dir, args.rescore)
-        if args.compare is not None:
-            return compare(args.eval_dir, *args.compare)
-        return _run_tier(args)
+        return chosen()
     except (_RefusedError, ManifestError) as exc:
         print(f"refused: {exc}")
         return 2
