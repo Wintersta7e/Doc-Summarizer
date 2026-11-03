@@ -7,6 +7,7 @@ locate the source sentence it came from, by char offsets into the full text.
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+from pathlib import Path
 
 import pytest
 
@@ -218,6 +219,29 @@ def test_normalize_drops_only_whitespace_touching_cjk() -> None:
     # Fullwidth "ABC", an ideographic space, then ASCII "def".
     assert _normalize("\uff21\uff22\uff23\u3000def") == "\uff41\uff42\uff43def"
     assert _normalize("ひらがな と カタカナ") == "ひらがなとカタカナ"
+
+
+def test_non_verbatim_quotes_are_never_located() -> None:
+    """Sentences restating a same-subject document in fresh words are never cited.
+
+    Catches admitting or ranking by summed matching blocks alone. Admitted at
+    authoring: ``63653fd``'s ``locate_quote`` located 42 of 48.
+    """
+    fixtures = Path(__file__).parent / "fixtures"
+    reference = (fixtures / "provenance_reference.txt").read_text(encoding="utf-8")
+    guide = (fixtures / "provenance_guide.txt").read_text(encoding="utf-8")
+    quotes = [guide[s:e] for s, e in split_sentences(guide)]
+    collapsed_reference = " ".join(reference.lower().split())
+    for quote in quotes:
+        assert " ".join(quote.lower().split()) not in collapsed_reference, quote
+    located: list[str] = []
+    for quote in quotes:
+        print(f"tried: {quote}")
+        if locate_quote(quote, reference) is not None:
+            located.append(quote)
+    print(f"tried {len(quotes)}, located {len(located)}")
+    assert len(quotes) >= 40
+    assert located == []
 
 
 def test_locate_quote_consults_is_verified_match(monkeypatch: pytest.MonkeyPatch) -> None:
