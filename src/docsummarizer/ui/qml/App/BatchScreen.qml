@@ -5,7 +5,7 @@ import QtQuick.Dialogs
 import App
 
 // Batch queue: pick a folder + output dir, process all supported docs, and watch
-// per-file status (QUEUED → PROCESSING → DONE/FAILED) plus an overall bar.
+// per-file status (QUEUED → PROCESSING → DONE/FAILED/SKIPPED) plus an overall bar.
 Item {
     id: screen
 

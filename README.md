@@ -113,7 +113,7 @@ docsummarizer                                     # launch the GUI
 docsummarizer-cli document.pdf                    # detailed summary to stdout
 docsummarizer-cli document.pdf -t structured      # brief | detailed | structured
 docsummarizer-cli document.pdf -o summary.txt     # write to a file
-docsummarizer-cli ./papers/ -o ./summaries/       # batch a folder
+docsummarizer-cli ./papers/ -o ./summaries/       # batch a folder → <name>.<type>.txt, skipping existing ones (--overwrite replaces)
 docsummarizer-cli --download-only                 # fetch the model, then exit
 docsummarizer-cli document.pdf --threads 8        # override CPU threads for this run
 docsummarizer-cli document.pdf -l Chinese         # write the summary in a given language
