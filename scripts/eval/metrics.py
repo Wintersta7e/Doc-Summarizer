@@ -1,17 +1,19 @@
 """Scoring for evaluation runs: pure functions over stored text, no model and no I/O.
 
 M1 output presence, M2 language compliance (per call and on the result), M4
-truncation and M12a reproducibility. Every metric keeps what it counted, so a
-report can print numerator, denominator and each failing unit.
+truncation, M7 citation hit rate and M12a reproducibility, plus the verdict
+between two runs. Every metric keeps what it counted, so a report can print
+numerator, denominator and each failing unit.
 """
 
 from __future__ import annotations
 
 import functools
+import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 METRIC_VERSION: int = 1
 
@@ -334,3 +336,233 @@ def m12a(first: str, rerun: str) -> M12a:
         if a != b:
             return M12a(False, index)
     return M12a(False, min(len(first), len(rerun)))
+
+
+class _SpanLike(Protocol):
+    @property
+    def start(self) -> int: ...
+
+    @property
+    def end(self) -> int: ...
+
+
+class _PointLike(Protocol):
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def citation(self) -> _SpanLike | None: ...
+
+
+@dataclass(frozen=True)
+class PointRecord:
+    """One returned point: its citation's offsets as grounding left them, and its quote."""
+
+    citation: tuple[int, int] | None
+    quote: str
+
+
+def point_records(points: Sequence[_PointLike], quotes: Mapping[str, str]) -> list[PointRecord]:
+    """Records for the returned points; ``quotes`` maps a point's text to the model's quote."""
+    return [
+        PointRecord(
+            None if point.citation is None else (point.citation.start, point.citation.end),
+            quotes.get(point.text, ""),
+        )
+        for point in points
+    ]
+
+
+@dataclass(frozen=True)
+class M7:
+    """Citation hit rate over a run's points, plus what is reported beside it."""
+
+    points: int
+    cited: int  # a citation as the production grounding returned it
+    tight: int  # cited, with a span no longer than the span cap
+    whole_document: int  # cited spans covering the whole document
+    quotes: int  # non-empty quotes
+    verbatim: int  # non-empty quotes that are exact substrings of the document
+
+    @property
+    def hit_rate(self) -> float:
+        return self.tight / self.points if self.points else 0.0
+
+
+def m7(points: Sequence[PointRecord], document: str) -> M7:
+    """Score the citations the production grounding returned; never re-locate a quote."""
+    from docsummarizer import provenance
+
+    cited = [point.citation for point in points if point.citation is not None]
+    whole = document.strip()
+    quotes = [point.quote for point in points if point.quote]
+    return M7(
+        points=len(points),
+        cited=len(cited),
+        tight=sum(1 for start, end in cited if end - start <= provenance.MAX_SPAN_CHARS),
+        whole_document=sum(1 for start, end in cited if document[start:end].strip() == whole),
+        quotes=len(quotes),
+        verbatim=sum(1 for quote in quotes if quote in document),
+    )
+
+
+# The noise band's floors: on the corpus aggregate and per cell.
+AGG_FLOOR = 0.05
+CELL_FLOOR = 0.10
+# Below this many units in either arm, a cell's proportions are not compared.
+MIN_CELL_N = 20
+
+HARD_METRICS = ("M1", "M2", "M4", "M12a")
+PROPORTION_METRICS = ("M7",)
+
+
+def noise_delta(p_b: float, n_b: int, p_c: float, n_c: int, floor: float) -> float:
+    """The band within which two proportions differ only by sampling noise."""
+    return max(floor, 2 * math.sqrt(p_b * (1 - p_b) / n_b + p_c * (1 - p_c) / n_c))
+
+
+@dataclass(frozen=True)
+class CaseScore:
+    """One case run's scores, as a verdict reads them."""
+
+    case: str
+    seed: int
+    cell: tuple[str, str, str]  # (target, path, length)
+    hard: dict[str, int]  # metric -> violations; 0 passes
+    proportion: dict[str, tuple[int, int]]  # metric -> (numerator, denominator)
+
+
+@dataclass(frozen=True)
+class Flip:
+    """A hard metric that changed between the arms.
+
+    ``seed`` is ``None`` for an improvement, which must hold at every seed.
+    """
+
+    case: str
+    seed: int | None
+    metric: str
+
+
+@dataclass(frozen=True)
+class VerdictRow:
+    """One line of a verdict: a metric over a cell, the aggregate or one case run.
+
+    ``status`` is ``ok``, ``regression``, ``improvement`` or ``insufficient n``;
+    a case run present in one arm only reads ``only in B`` or ``only in C``.
+    """
+
+    scope: str
+    metric: str
+    p_b: float | None
+    n_b: int
+    p_c: float | None
+    n_c: int
+    delta: float | None
+    status: str
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Candidate C against baseline B: every hard flip and every proportion row."""
+
+    regressions: list[Flip]
+    improvements: list[Flip]
+    rows: list[VerdictRow]
+
+    @property
+    def regressed(self) -> bool:
+        return bool(self.regressions) or any(row.status == "regression" for row in self.rows)
+
+
+def _scope(cell: tuple[str, str, str]) -> str:
+    return "/".join(cell)
+
+
+def _hard_flips(
+    pairs: Sequence[tuple[CaseScore, CaseScore]],
+) -> tuple[list[Flip], list[Flip]]:
+    regressions: list[Flip] = []
+    by_case: dict[tuple[str, str], list[tuple[bool, bool]]] = {}
+    for b, c in pairs:
+        for metric in HARD_METRICS:
+            if metric not in b.hard or metric not in c.hard:
+                continue
+            b_pass, c_pass = b.hard[metric] == 0, c.hard[metric] == 0
+            if b_pass and not c_pass:
+                regressions.append(Flip(b.case, b.seed, metric))
+            by_case.setdefault((b.case, metric), []).append((b_pass, c_pass))
+    improvements = [
+        Flip(case, None, metric)
+        for (case, metric), seeds in by_case.items()
+        if not all(b_pass for b_pass, _ in seeds) and all(c_pass for _, c_pass in seeds)
+    ]
+    return regressions, improvements
+
+
+def _proportion_row(
+    scope: str, metric: str, b: tuple[int, int], c: tuple[int, int], floor: float
+) -> VerdictRow:
+    (num_b, n_b), (num_c, n_c) = b, c
+    p_b = num_b / n_b if n_b else None
+    p_c = num_c / n_c if n_c else None
+    if p_b is None or p_c is None or n_b < MIN_CELL_N or n_c < MIN_CELL_N:
+        return VerdictRow(scope, metric, p_b, n_b, p_c, n_c, None, "insufficient n")
+    delta = noise_delta(p_b, n_b, p_c, n_c, floor)
+    status = "ok"
+    if p_c - p_b < -delta:
+        status = "regression"
+    elif p_c - p_b > delta:
+        status = "improvement"
+    return VerdictRow(scope, metric, p_b, n_b, p_c, n_c, delta, status)
+
+
+def _summed(scores: Sequence[CaseScore], metric: str) -> tuple[int, int]:
+    values = [score.proportion[metric] for score in scores if metric in score.proportion]
+    return sum(num for num, _ in values), sum(den for _, den in values)
+
+
+def verdict(b: Sequence[CaseScore], c: Sequence[CaseScore]) -> Verdict:
+    """Compare two arms case run by case run, with hard flips and noise-banded proportions.
+
+    Runs pair by (case, seed). A hard metric regresses on any pass-to-fail flip
+    and improves only when a case failing in B passes in C at every seed.
+    Proportions are summed per cell and over the aggregate of the paired runs.
+    """
+    b_runs = {(score.case, score.seed): score for score in b}
+    c_runs = {(score.case, score.seed): score for score in c}
+    pairs = [(b_runs[key], c_runs[key]) for key in b_runs if key in c_runs]
+    rows = [
+        VerdictRow(f"{case} seed {seed}", "case run", None, 0, None, 0, None, status)
+        for runs, other, status in ((b_runs, c_runs, "only in B"), (c_runs, b_runs, "only in C"))
+        for case, seed in runs
+        if (case, seed) not in other
+    ]
+    regressions, improvements = _hard_flips(pairs)
+
+    cells: dict[tuple[str, str, str], list[tuple[CaseScore, CaseScore]]] = {}
+    for pair in pairs:
+        cells.setdefault(pair[0].cell, []).append(pair)
+    for metric in HARD_METRICS:
+        for cell, cell_pairs in cells.items():
+            in_cell = {score.case for score, _ in cell_pairs}
+            n = len(cell_pairs)
+            status = "ok"
+            if any(flip.metric == metric and flip.case in in_cell for flip in regressions):
+                status = "regression"
+            elif any(flip.metric == metric and flip.case in in_cell for flip in improvements):
+                status = "improvement"
+            passed_b = sum(1 for score, _ in cell_pairs if score.hard.get(metric, 0) == 0)
+            passed_c = sum(1 for _, score in cell_pairs if score.hard.get(metric, 0) == 0)
+            rows.append(
+                VerdictRow(_scope(cell), metric, passed_b / n, n, passed_c / n, n, None, status)
+            )
+    for metric in PROPORTION_METRICS:
+        for cell, cell_pairs in cells.items():
+            sums_b = _summed([score for score, _ in cell_pairs], metric)
+            sums_c = _summed([score for _, score in cell_pairs], metric)
+            rows.append(_proportion_row(_scope(cell), metric, sums_b, sums_c, CELL_FLOOR))
+        sums_b = _summed([score for score, _ in pairs], metric)
+        sums_c = _summed([score for _, score in pairs], metric)
+        rows.append(_proportion_row("aggregate", metric, sums_b, sums_c, AGG_FLOOR))
+    return Verdict(regressions, improvements, rows)

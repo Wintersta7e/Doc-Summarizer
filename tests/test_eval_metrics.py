@@ -9,12 +9,15 @@ ferry, one per language the classifier must tell apart.
 
 from __future__ import annotations
 
+import json
 import random
 import re
 from pathlib import Path
 
+import pytest
 from eval import cases, metrics
 
+from docsummarizer import model_manager, provenance
 from docsummarizer.model_manager import LANGUAGE_AUTO, OUTPUT_LANGUAGES
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -208,3 +211,167 @@ def test_eval_never_imports_the_detector() -> None:
     print(f"files scanned: {len(files)}; hits: {hits}")
     assert files
     assert hits == []
+
+
+# A sentence longer than the citation span cap, built by repetition inside one sentence.
+_LONG_SENTENCE = (
+    "The ferry crossed the river "
+    + ", and then it crossed back again under a grey sky" * 24
+    + " before the evening bell rang."
+)
+_M7_SENTENCES = (
+    "The river ferry leaves the wooden pier at six every morning.",
+    "Its captain checks the ropes and the engine before anyone boards.",
+    _LONG_SENTENCE,
+    "Students ride it to the school on the far bank.",
+    "In winter the wind over the water is very cold.",
+    "Everyone in the village trusts the old ferry.",
+)
+_M7_DOCUMENT = " ".join(_M7_SENTENCES)
+_M7_QUOTES = (_M7_SENTENCES[0], _M7_SENTENCES[1], _LONG_SENTENCE)
+
+
+def _m7_of_grounded_points() -> metrics.M7:
+    payload = {
+        "lead": "A ferry serves the village.",
+        "points": [{"text": f"Point {i}.", "quote": quote} for i, quote in enumerate(_M7_QUOTES)],
+    }
+    parsed = model_manager._parse_structured_json(json.dumps(payload))
+    assert parsed is not None
+    built = model_manager._build_structured(parsed, "detailed", _M7_DOCUMENT, 0)
+    quotes = {f"Point {i}.": quote for i, quote in enumerate(_M7_QUOTES)}
+    return metrics.m7(metrics.point_records(built.points, quotes), _M7_DOCUMENT)
+
+
+def test_m7_hit_rate_tracks_the_production_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M7 reads which points the production grounding cited.
+
+    Catches M7 testing citations itself instead of reading the production
+    grounding's result.
+    """
+    assert len(_LONG_SENTENCE) > provenance.MAX_SPAN_CHARS
+    unpatched = _m7_of_grounded_points()
+    print(f"m7 unpatched: {unpatched} hit_rate={unpatched.hit_rate}")
+
+    monkeypatch.setattr(provenance, "is_verified_match", lambda q, s: False)
+    rejected = _m7_of_grounded_points()
+    print(f"m7 reject-all: {rejected}")
+    assert rejected.points == len(_M7_QUOTES)
+    assert rejected.cited == 0
+    assert rejected.hit_rate == 0
+
+    # Accept-all still runs locate_quote's coverage pre-filter and its length
+    # floor, so every quote is a whole sentence of six characters or more.
+    monkeypatch.setattr(provenance, "is_verified_match", lambda q, s: True)
+    accepted = _m7_of_grounded_points()
+    print(f"m7 accept-all: {accepted} hit_rate={accepted.hit_rate}")
+    assert accepted.cited == len(_M7_QUOTES)
+    assert accepted.tight == accepted.cited - 1
+    assert accepted.hit_rate == accepted.tight / accepted.points
+
+
+def test_m7_counts_whole_document_and_verbatim() -> None:
+    document = "  A short document about the school garden.  "
+    stripped = document.strip()
+    start = document.index(stripped)
+    records = [
+        metrics.PointRecord((start, start + len(stripped)), "the school garden"),
+        metrics.PointRecord((start, start + 7), "a garden of the school"),
+        metrics.PointRecord(None, ""),
+    ]
+    result = metrics.m7(records, document)
+    print(f"m7: {result}")
+    assert result.points == 3
+    assert result.cited == 2
+    assert result.whole_document == 1
+    assert result.quotes == 2
+    assert result.verbatim == 1
+
+
+def test_eval_never_calls_difflib_matching() -> None:
+    """The evaluation never re-implements the citation match."""
+    names = ("get_matching_blocks", "find_longest_match")
+    files = sorted((_REPO / "scripts" / "eval").glob("*.py"))
+    hits = [
+        f"{path.name}: {name}"
+        for path in files
+        for name in names
+        if name in path.read_text(encoding="utf-8")
+    ]
+    print(f"files scanned: {len(files)}; hits: {hits}")
+    assert files
+    assert hits == []
+
+
+def test_noise_delta_vectors() -> None:
+    expected = {50: 0.143, 100: 0.101, 200: 0.071, 500: 0.050}
+    for n, delta in expected.items():
+        got = metrics.noise_delta(0.85, n, 0.85, n, metrics.AGG_FLOOR)
+        print(f"n={n}: delta={got:.4f}")
+        assert got == pytest.approx(delta, abs=5e-4)
+
+
+_CELL = ("de", "json", "single")
+
+
+def _score(
+    case: str,
+    seed: int,
+    *,
+    m2: int = 0,
+    m7: tuple[int, int] = (0, 0),
+    cell: tuple[str, str, str] = _CELL,
+) -> metrics.CaseScore:
+    hard = {"M1": 0, "M2": m2, "M4": 0, "M12a": 0}
+    return metrics.CaseScore(case, seed, cell, hard, {"M7": m7})
+
+
+def test_verdict_hard_flip_is_a_regression() -> None:
+    b = [_score("de-lit-s/brief/auto", 0), _score("en-lit-s/brief/auto", 0)]
+    c = [_score("de-lit-s/brief/auto", 0, m2=1), _score("en-lit-s/brief/auto", 0)]
+    result = metrics.verdict(b, c)
+    print(f"regressions: {result.regressions}")
+    assert result.regressed
+    assert result.regressions == [metrics.Flip("de-lit-s/brief/auto", 0, "M2")]
+    assert not result.improvements
+
+
+def test_verdict_improvement_needs_every_seed() -> None:
+    case = "de-lit-s/brief/auto"
+    b = [_score(case, 0, m2=1), _score(case, 1, m2=1)]
+    every_seed = metrics.verdict(b, [_score(case, 0), _score(case, 1)])
+    print(f"every seed: {every_seed.improvements}")
+    assert every_seed.improvements == [metrics.Flip(case, None, "M2")]
+    assert not every_seed.regressed
+
+    one_seed = metrics.verdict(b, [_score(case, 0), _score(case, 1, m2=1)])
+    print(f"seed 0 only: {one_seed.improvements}")
+    assert one_seed.improvements == []
+    assert not one_seed.regressed
+
+
+def test_verdict_reports_insufficient_n() -> None:
+    case = "de-lit-s/detailed/auto"
+    small = metrics.verdict([_score(case, 0, m7=(19, 19))], [_score(case, 0, m7=(0, 19))])
+    for row in small.rows:
+        print(f"row: {row}")
+    m7_rows = [row for row in small.rows if row.metric == "M7"]
+    assert {row.status for row in m7_rows} == {"insufficient n"}
+    assert not small.regressed
+
+    gated = metrics.verdict([_score(case, 0, m7=(19, 19))], [_score(case, 0, m2=2, m7=(19, 19))])
+    assert gated.regressed
+    assert gated.regressions == [metrics.Flip(case, 0, "M2")]
+
+
+def test_verdict_within_delta_is_not_a_regression() -> None:
+    case = "de-lit-s/detailed/auto"
+
+    def aggregate(b: tuple[int, int], c: tuple[int, int]) -> metrics.VerdictRow:
+        result = metrics.verdict([_score(case, 0, m7=b)], [_score(case, 0, m7=c)])
+        row = next(r for r in result.rows if r.scope == "aggregate" and r.metric == "M7")
+        print(f"aggregate: {row}; regressed={result.regressed}")
+        return row
+
+    assert aggregate((85, 100), (82, 100)).status == "ok"
+    assert aggregate((425, 500), (350, 500)).status == "regression"
