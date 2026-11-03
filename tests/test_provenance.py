@@ -171,6 +171,7 @@ def test_verified_predicate_cases() -> None:
         ("e too short", "pipes", _WATER, 0.6, None, None),
         ("f near-verbatim at default", near, _WATER, 0.6, s3, 0.963),
         ("f near-verbatim at 0.99", near, _WATER, 0.99, None, None),
+        ("h CJK wrap spaces", _CJK_QUOTE, _CJK_SOURCE, 0.6, _CJK_SOURCE, 1.0),
     ]
     for label, quote, text, threshold, want, want_score in cases:
         span = locate_quote(quote, text, threshold=threshold)
@@ -186,6 +187,37 @@ def test_verified_predicate_cases() -> None:
     print("g threshold below default: expected=ValueError")
     with pytest.raises(ValueError, match="threshold"):
         locate_quote(s2, _WATER, threshold=0.1)
+
+
+_CJK_SOURCE = "山谷裡的小鎮每年春天\n都會舉行一場盛大的\n燈籠節慶祝豐收"
+_CJK_QUOTE = "山谷裡的小鎮每年春天都會舉行一場盛大的燈籠節慶祝豐收"
+
+
+def test_cjk_quote_without_wrap_spaces_is_located() -> None:
+    """A CJK quote that drops the source's line-wrap spaces is still cited.
+
+    Catches dropping the CJK whitespace rule from ``_normalize``, so wrap
+    spaces split the contiguous run.
+    """
+    from docsummarizer.provenance import is_verified_match
+
+    span = locate_quote(_CJK_QUOTE, _CJK_SOURCE)
+    assert span is not None
+    assert (span.start, span.end) == (0, len(_CJK_SOURCE))
+    assert span.score == 1.0
+    assert is_verified_match(_CJK_QUOTE, span.quote)
+
+
+def test_normalize_drops_only_whitespace_touching_cjk() -> None:
+    from docsummarizer.provenance import _normalize
+
+    assert _normalize("A  b\n c") == "a b c"
+    assert _normalize("中文 字\n句") == "中文字句"
+    assert _normalize("see 第三章 now") == "see第三章now"
+    assert _normalize("한국어 문장") == "한국어문장"
+    # Fullwidth "ABC", an ideographic space, then ASCII "def".
+    assert _normalize("\uff21\uff22\uff23\u3000def") == "\uff41\uff42\uff43def"
+    assert _normalize("ひらがな と カタカナ") == "ひらがなとカタカナ"
 
 
 def test_locate_quote_consults_is_verified_match(monkeypatch: pytest.MonkeyPatch) -> None:

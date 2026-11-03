@@ -28,6 +28,12 @@ _MIN_QUOTE_CHARS = 6
 # words reaches it too; one contiguous run must also cover this much of a quote.
 VERIFIED_LONGEST_FRACTION = 0.5
 
+# Whitespace next to CJK text is ignored: a model copying it drops wrap spaces.
+# Han, kana, Hangul, CJK symbols and punctuation, fullwidth forms (escaped, so
+# Unicode normalization of this file cannot fold a range endpoint).
+_CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f\uac00-\ud7af"
+_SPACE_BY_CJK = re.compile(rf"(?<=[{_CJK}])\s+|\s+(?=[{_CJK}])")
+
 # Split on whitespace that follows sentence-terminal punctuation. Keeps the
 # terminator with the sentence it ends. Newlines count as whitespace, so this
 # also breaks on line boundaries after a full stop.
@@ -126,8 +132,8 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
 
 
 def _normalize(s: str) -> str:
-    """Lowercase and collapse runs of whitespace, for fuzzy comparison."""
-    return " ".join(s.lower().split())
+    """Lowercase, collapse whitespace runs, drop whitespace touching CJK text."""
+    return _SPACE_BY_CJK.sub("", " ".join(s.lower().split()))
 
 
 def is_verified_match(quote: str, span_text: str) -> bool:
