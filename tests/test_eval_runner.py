@@ -250,8 +250,8 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     Catches a presence count (an idle match marks the run), and ``unknown``
     counted toward contention.
     """
-    start = run.take_snapshot(_processes(False), _OWN_PID, tasklist=None)
-    end = run.take_snapshot(_processes(True), _OWN_PID, tasklist=None)
+    start = run.take_snapshot(_processes(False), _OWN_PID, host_processes=None)
+    end = run.take_snapshot(_processes(True), _OWN_PID, host_processes=None)
     result = run.count_contention(start, end)
     print(f"full table: {result}")
     assert result.local.count == 2
@@ -263,8 +263,8 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     assert result.contended
 
     idle_only = (103, 104)
-    start = run.take_snapshot(_processes(False, idle_only), _OWN_PID, tasklist=None)
-    end = run.take_snapshot(_processes(True, idle_only), _OWN_PID, tasklist=None)
+    start = run.take_snapshot(_processes(False, idle_only), _OWN_PID, host_processes=None)
+    end = run.take_snapshot(_processes(True, idle_only), _OWN_PID, host_processes=None)
     quiet = run.count_contention(start, end)
     print(
         f"idle only: count={quiet.local.count} unknown={quiet.local.unknown} idle={quiet.local.idle}"
@@ -275,11 +275,28 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     assert not quiet.contended
 
 
-def _tasklist(cpu_time: str) -> str:
+def _host_table(cpu_seconds: str) -> str:
+    """The host's process table as the Windows query prints it: a header, then rows.
+
+    The last row is a protected process, whose CPU cell is empty.
+    """
     return (
-        f'"orchard-llama-host.exe","4242","Console","1","120,000 K","Running","N/A","{cpu_time}","N/A"\n'
-        '"ledger-sync.exe","5151","Console","1","20,000 K","Running","N/A","0:00:02","N/A"\n'
+        '"Id","ProcessName","CPU"\n'
+        f'"4242","orchard-llama-host","{cpu_seconds}"\n'
+        '"5151","ledger-sync","2.5"\n'
+        '"6363","sealed-llama-guard",\n'
     )
+
+
+def test_host_process_table_reads_float_seconds() -> None:
+    """CPU is float seconds; the header and an empty CPU cell are skipped.
+
+    Catches a parser still reading an ``H:MM:SS`` clock, which reads no row
+    of the host's table, so the host side counts nothing.
+    """
+    parsed = run.parse_host_processes(_host_table("2.25"))
+    print(f"parsed host table: {parsed}")
+    assert parsed == {4242: ("orchard-llama-host", 2.25)}
 
 
 def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,12 +305,11 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     Catches the host side left out, so a busy model process on the Windows
     side of a WSL run goes uncounted.
     """
-    assert run.parse_tasklist(_tasklist("0:00:02")) == {4242: ("orchard-llama-host.exe", 2.0)}
-    start = run.take_snapshot([], _OWN_PID, tasklist=lambda: _tasklist("0:00:02"))
+    start = run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("2.0"))
     assert start.host_state == "ok"
 
     busy = run.count_contention(
-        start, run.take_snapshot([], _OWN_PID, tasklist=lambda: _tasklist("0:00:07"))
+        start, run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("7.25"))
     )
     print(f"(a) host advanced 5 s: {busy.host}")
     assert busy.host is not None
@@ -301,15 +317,15 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     assert busy.contended
 
     idle = run.count_contention(
-        start, run.take_snapshot([], _OWN_PID, tasklist=lambda: _tasklist("0:00:02"))
+        start, run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("2.0"))
     )
     print(f"(b) host idle: {idle.host}")
     assert idle.host is not None
     assert idle.host.count == 0
-    assert idle.host.idle == ("orchard-llama-host.exe",)
+    assert idle.host.idle == ("orchard-llama-host",)
     assert not idle.contended
 
-    blind = run.take_snapshot([], _OWN_PID, tasklist=lambda: None)
+    blind = run.take_snapshot([], _OWN_PID, host_processes=lambda: None)
     unknown = run.count_contention(blind, blind)
     print(f"(c) no interop: host_state={blind.host_state} host={unknown.host}")
     assert blind.host_state == "unknown"
@@ -318,10 +334,10 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not unknown.contended
 
     def refuse() -> str:
-        raise AssertionError("tasklist read off WSL")
+        raise AssertionError("host process table read off WSL")
 
     monkeypatch.setattr(run, "under_wsl", lambda: False)
-    monkeypatch.setattr(run, "read_tasklist", refuse)
+    monkeypatch.setattr(run, "read_host_processes", refuse)
     off_wsl = run.snapshot_now()
     print(f"(d) off WSL: host_state={off_wsl.host_state}")
     assert off_wsl.host_state == "n/a"
@@ -1434,8 +1450,8 @@ def _snapshots(
     """``snapshot_now`` returns a start, then an end snapshot of the invented fixtures."""
     taken: list[Any] = []
     for at_end in (False, True):
-        tasklist = None if host is None else (lambda cpu=host[at_end]: _tasklist(cpu))
-        taken.append(run.take_snapshot(_processes(at_end, local), _OWN_PID, tasklist))
+        table = None if host is None else (lambda cpu=host[at_end]: _host_table(cpu))
+        taken.append(run.take_snapshot(_processes(at_end, local), _OWN_PID, table))
     monkeypatch.setattr(run, "snapshot_now", lambda: taken.pop(0))
 
 
@@ -1451,12 +1467,12 @@ def test_contention_mode_exits_1_on_either_side(
 
     slept: list[float] = []
     monkeypatch.setattr(time, "sleep", slept.append)
-    busy, idle = ("0:00:02", "0:00:07"), ("0:00:02", "0:00:02")
+    busy, idle = ("2.0", "7.25"), ("2.0", "2.0")
 
     _snapshots((101, 103), idle, monkeypatch)
     code, out = _checked(tmp_path, capsys, "--contention")
     assert code == 1
-    assert "contention local=1 unknown=0 idle=tallow-idle host=0 idle=orchard-llama-host.exe" in out
+    assert "contention local=1 unknown=0 idle=tallow-idle host=0 idle=orchard-llama-host" in out
 
     _snapshots((103,), busy, monkeypatch)
     code, out = _checked(tmp_path, capsys, "--contention")

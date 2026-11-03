@@ -326,11 +326,21 @@ def under_wsl() -> bool:
     return "microsoft" in platform.uname().release.lower()
 
 
-def read_tasklist() -> str | None:
-    """The Windows host's process table as CSV; ``None`` without interop."""
+def read_host_processes() -> str | None:
+    """The Windows host's process table as CSV; ``None`` when the query fails.
+
+    Process id, name and CPU seconds of every Windows process. ``tasklist /v``
+    carries the same CPU column but takes about a minute on a busy host.
+    """
     try:
         done = subprocess.run(
-            ["tasklist.exe", "/v", "/fo", "csv", "/nh"],  # noqa: S607 - resolved on the interop PATH
+            [  # noqa: S607 - resolved on the interop PATH
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-Process | Select-Object Id,ProcessName,CPU | ConvertTo-Csv -NoTypeInformation",
+            ],
             capture_output=True,
             text=True,
             errors="replace",
@@ -342,17 +352,16 @@ def read_tasklist() -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
-def _clock_seconds(text: str) -> float:
-    hours, minutes, seconds = (int(part) for part in text.split(":"))
-    return float(hours * 3600 + minutes * 60 + seconds)
+def parse_host_processes(text: str) -> dict[int, tuple[str, float]]:
+    """Matching host processes: pid (column 0), name (1) and CPU seconds (2).
 
-
-def parse_tasklist(text: str) -> dict[int, tuple[str, float]]:
-    """Matching host processes: image name (column 0), pid (1) and CPU time (7)."""
+    The header and a process whose CPU cell is empty (protected, unreadable)
+    are skipped, so neither counts as busy or idle.
+    """
     found: dict[int, tuple[str, float]] = {}
     for row in csv.reader(io.StringIO(text)):
         try:
-            image, pid, cpu = row[0], int(row[1]), _clock_seconds(row[7])
+            pid, image, cpu = int(row[0]), row[1], float(row[2])
         except (IndexError, ValueError):
             continue
         if any(marker in image.lower() for marker in _MODEL_MARKERS):
@@ -361,9 +370,9 @@ def parse_tasklist(text: str) -> dict[int, tuple[str, float]]:
 
 
 def take_snapshot(
-    processes: Iterable[Any], own_pid: int, tasklist: Callable[[], str | None] | None
+    processes: Iterable[Any], own_pid: int, host_processes: Callable[[], str | None] | None
 ) -> ContentionSnapshot:
-    """Record every matching process's CPU time, and the host's when ``tasklist`` is given.
+    """Record every matching process's CPU time, and the host's when ``host_processes`` is given.
 
     A process matches when its executable's basename contains ``llama``, or a
     basename among its mapped files contains ``llama`` or ``ggml``.
@@ -389,19 +398,20 @@ def take_snapshot(
             unknown += 1
         except psutil.NoSuchProcess:
             continue
-    if tasklist is None:
+    if host_processes is None:
         return ContentionSnapshot(local, unknown, None, "n/a")
-    text = tasklist()
+    text = host_processes()
     if text is None:
         return ContentionSnapshot(local, unknown, None, "unknown")
-    return ContentionSnapshot(local, unknown, parse_tasklist(text), "ok")
+    return ContentionSnapshot(local, unknown, parse_host_processes(text), "ok")
 
 
 def snapshot_now() -> ContentionSnapshot:
     """A snapshot of this machine, and of the Windows host under WSL."""
     import psutil
 
-    return take_snapshot(psutil.process_iter(), os.getpid(), read_tasklist if under_wsl() else None)
+    host = read_host_processes if under_wsl() else None
+    return take_snapshot(psutil.process_iter(), os.getpid(), host)
 
 
 def _side(
