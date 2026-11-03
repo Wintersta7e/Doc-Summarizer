@@ -9,7 +9,7 @@ Extract, chunk, and summarize academic papers and long documents entirely on you
 [![CI](https://github.com/Wintersta7e/Doc-Summarizer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Wintersta7e/Doc-Summarizer/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Wintersta7e/Doc-Summarizer?label=release&sort=semver)](https://github.com/Wintersta7e/Doc-Summarizer/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#system-requirements)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#system-requirements)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Lint: Ruff](https://img.shields.io/badge/lint-ruff-261230)](https://docs.astral.sh/ruff/)
 [![Types: mypy](https://img.shields.io/badge/types-mypy-blue)](https://mypy-lang.org/)
@@ -71,7 +71,7 @@ flowchart TD
 
 | | Minimum | Recommended |
 |---|---------|-------------|
-| OS | Windows 10 · macOS 11 · Linux | Latest |
+| OS | Windows 10 · Linux | Latest |
 | RAM | 8 GB | 16 GB+ |
 | Storage | 4 GB free | 8 GB free |
 | CPU | 4 cores | 8+ performance cores |
@@ -146,16 +146,7 @@ Model and logs are stored under the platform app-data directory
 
 ## Performance
 
-Summarization is compute-bound; with map-reduce, time scales with document length. Approximate CPU
-timings for the 4B Q4 model on a modern multi-core machine:
-
-| Document | Approx. CPU time |
-|----------|------------------|
-| Short (1–3 pages) | ~30–90 s |
-| Research paper (~10 pages) | ~2–4 min |
-| Long (15+ pages) | 5 min+ |
-
-Times depend heavily on the CPU and the prompt length per chunk. A CUDA build is several times faster.
+Summarization is compute-bound; with map-reduce, time scales with document length.
 
 ## Building from source
 

@@ -9,9 +9,13 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.1.0
+  - repo: local
     hooks:
       - id: mypy
-        # mypy reads its file list + overrides from pyproject.toml.
+        name: mypy
+        # The dev environment's mypy, so it resolves the same installed
+        # packages as CI; it reads its file list + overrides from pyproject.toml.
+        entry: mypy
+        language: system
+        types_or: [python, pyi]
         pass_filenames: false
