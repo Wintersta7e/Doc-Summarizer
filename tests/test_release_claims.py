@@ -106,3 +106,47 @@ def test_pyproject_names_no_setup_scripts() -> None:
     text = _read("pyproject.toml")
     hits = [match.group(0) for pattern in _PYPROJECT_STALE for match in pattern.finditer(text)]
     assert not hits, f"stale claims in pyproject.toml: {hits}"
+
+
+_README_TIMINGS = (
+    "Approximate CPU timings",
+    "Approx. CPU time",
+    "A CUDA build is several times faster",
+)
+_DEVELOPMENT_GPU_CLAIMS = ("Performance Comparison", "no local CUDA toolkit required")
+
+
+def test_readme_names_no_macos() -> None:
+    """README's platform badge and System Requirements OS row name no macOS.
+
+    Restoring ``macOS`` to either line fails this test, and deleting the badge or
+    the row instead fails its locator (0 found).
+    """
+    lines = _read("README.md").splitlines()
+    badges = [line for line in lines if "img.shields.io/badge/platform-" in line]
+    os_rows = [line for line in lines if line.startswith("| OS |")]
+    print(f"platform badges: {len(badges)}; OS rows: {len(os_rows)}")
+    assert len(badges) == 1, f"expected one platform badge, found {len(badges)}"
+    assert len(os_rows) == 1, f"expected one OS row, found {len(os_rows)}"
+    macos = [line for line in badges + os_rows if "macos" in line.casefold()]
+    assert not macos, f"README still names macOS: {macos}"
+
+
+def test_readme_has_no_unsourced_timings() -> None:
+    """README carries no CPU timing table and no CUDA speed claim.
+
+    Restoring the "Approx. CPU time" table, its lead-in sentence or "A CUDA build
+    is several times faster" fails this test.
+    """
+    hits = _hits(_read("README.md"), _README_TIMINGS)
+    assert not hits, f"unsourced timings still in README: {hits}"
+
+
+def test_development_has_no_unsourced_gpu_claims() -> None:
+    """DEVELOPMENT.md has no GPU timing table and no "no CUDA toolkit" promise.
+
+    Restoring the "Performance Comparison" table or the phrase "no local CUDA
+    toolkit required" fails this test.
+    """
+    hits = _hits(_read("DEVELOPMENT.md"), _DEVELOPMENT_GPU_CLAIMS)
+    assert not hits, f"unsourced GPU claims still in DEVELOPMENT.md: {hits}"

@@ -148,7 +148,7 @@ the flag, and the Config screen says so rather than offering a toggle that does 
 
 ### NVIDIA GPU (CUDA)
 
-The easiest route is a prebuilt CUDA wheel — no local CUDA toolkit required:
+The easiest route is a prebuilt CUDA wheel:
 
 ```bash
 pip uninstall llama-cpp-python -y
@@ -182,15 +182,6 @@ Metal support is usually automatic on macOS with Apple Silicon:
 ```bash
 CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --no-cache-dir
 ```
-
-### Performance Comparison
-
-| Hardware | ~Processing Time | Notes |
-|----------|------------------|-------|
-| CPU (8 cores) | 30-90 sec | Default, works everywhere |
-| NVIDIA RTX 3060 | 3-8 sec | Requires CUDA build |
-| NVIDIA RTX 4070 Ti+ | 1-4 sec | Requires CUDA build |
-| Apple M1/M2 | 8-15 sec | Metal acceleration |
 
 ## Building Standalone Executable
 
