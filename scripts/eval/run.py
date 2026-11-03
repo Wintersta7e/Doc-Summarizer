@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from docsummarizer.model_manager import StructuredSummary, Summarizer
     from eval.cases import Case
-    from eval.metrics import Target
+    from eval.metrics import CaseScore, Target
 
 _REPO = Path(__file__).resolve().parents[2]
 _PACKAGE = "docsummarizer"
@@ -858,6 +858,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--rescore", type=Path, metavar="R", help="replay results file R and score it again"
     )
+    mode.add_argument(
+        "--compare", type=Path, nargs=2, metavar=("B", "C"), help="candidate C against baseline B"
+    )
     parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
     parser.add_argument("--model", type=Path, help="the GGUF model file")
     parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
@@ -1538,6 +1541,89 @@ def rescore(eval_dir: Path, source: Path) -> int:
     return 1 if failures else 0
 
 
+# --------------------------------------------------------------------------- #
+# Compare: a candidate against a baseline, only when both measured the same thing
+# --------------------------------------------------------------------------- #
+
+COMPARE_FIELDS = ("machine_id", "backend", "metric_version", "corpus_hash", "seeds", "cases")
+
+
+def _case_scores(case_runs: Sequence[Mapping[str, Any]]) -> list[CaseScore]:
+    """A verdict's view of each repetition-0 case run; repetitions exist for timing only."""
+    from eval import metrics
+
+    scores: list[CaseScore] = []
+    for line in case_runs:
+        if line.get("repetition", 0) != 0:
+            continue
+        scored = line["metrics"]
+        hard = {
+            name: int(scored[name]["violations"])
+            for name in metrics.HARD_METRICS
+            if scored.get(name) is not None
+        }
+        m7 = scored.get("M7")
+        proportion = {"M7": (int(m7["tight"]), int(m7["points"]))} if m7 is not None else {}
+        cell = scored["cell"]
+        scores.append(
+            metrics.CaseScore(
+                line["case"], line["seed"], (cell[0], cell[1], cell[2]), hard, proportion
+            )
+        )
+    return scores
+
+
+def _share_text(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
+    """Compare candidate ``c`` with baseline ``b``: 2 when not comparable, 1 on a regression.
+
+    A bare file name that does not exist as given is read from ``<eval-dir>/results/``.
+    """
+    from eval import metrics
+
+    arms: list[Results] = []
+    for path in (b, c):
+        if not path.exists() and eval_dir is not None and path.name == str(path):
+            path = eval_dir / "results" / path  # noqa: PLW2901 - the file actually read
+        try:
+            arms.append(read_results(path))
+        except (OSError, ValueError) as exc:
+            raise _RefusedError(f"--compare {path}: {exc}") from exc
+    base, candidate = arms
+    lacking = [
+        f"{arm} {name}"
+        for arm, results in (("B", base), ("C", candidate))
+        for name in COMPARE_FIELDS
+        if name not in results.header
+    ]
+    if lacking:
+        raise _RefusedError(f"header lacks: {', '.join(lacking)}")
+    differ = [name for name in COMPARE_FIELDS if base.header[name] != candidate.header[name]]
+    if differ:
+        raise _RefusedError(f"the arms differ in {', '.join(differ)}")
+    b_scores, c_scores = _case_scores(base.case_runs), _case_scores(candidate.case_runs)
+    if not b_scores or not c_scores:
+        raise _RefusedError("zero case runs")
+
+    outcome = metrics.verdict(b_scores, c_scores)
+    print(f"verdict: B {len(b_scores)} case runs, C {len(c_scores)} case runs (repetition 0)")
+    print(f"{'scope':<34} {'metric':<9} {'B':>6} {'n':>5} {'C':>6} {'n':>5} {'delta':>6}  status")
+    for row in outcome.rows:
+        print(
+            f"{row.scope:<34} {row.metric:<9} {_share_text(row.p_b):>6} {row.n_b:>5} "
+            f"{_share_text(row.p_c):>6} {row.n_c:>5} {_share_text(row.delta):>6}  {row.status}"
+        )
+    for flip in outcome.regressions:
+        print(f"regression: {flip.case} seed {flip.seed} {flip.metric}")
+    for flip in outcome.improvements:
+        print(f"improvement: {flip.case} {flip.metric} (every seed)")
+    print("A hard flip blocks a merge unless a recorded reader marks it spurious.")
+    return 1 if outcome.regressed else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, bootstrap app data, then run the chosen mode."""
     args = build_parser().parse_args(argv)
@@ -1553,6 +1639,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.rescore is not None:
             return rescore(args.eval_dir, args.rescore)
+        if args.compare is not None:
+            return compare(args.eval_dir, *args.compare)
         return _run_tier(args)
     except (_RefusedError, ManifestError) as exc:
         print(f"refused: {exc}")

@@ -1218,3 +1218,108 @@ def test_runner_logs_stay_in_the_eval_dir(
     print(f"logs: {logs}")
     assert logs
     assert not inherited.exists() or not any(inherited.rglob("*"))
+
+
+# --------------------------------------------------------------------------- #
+# Compare
+# --------------------------------------------------------------------------- #
+
+_COMPARE_FIELDS = ("machine_id", "backend", "metric_version", "corpus_hash", "seeds", "cases")
+_COMPARE_CASES = tuple(f"doc{i}/detailed/auto" for i in range(17))
+_DIFFERENT: dict[str, Any] = {
+    "machine_id": "another machine",
+    "backend": "gpu:another",
+    "metric_version": 2,
+    "corpus_hash": "d" * 64,
+    "seeds": [0, 1],
+    "cases": list(_COMPARE_CASES[:3]),
+}
+
+
+def _scored_line(case: str, m4: int, repetition: int) -> dict[str, Any]:
+    scores = {
+        "cell": ["en", "json", "single"],
+        "M1": {"violations": 0},
+        "M2": {"violations": 0},
+        "M4": {"violations": m4},
+        "M7": {"tight": 2, "points": 3},
+        "M12a": None,
+    }
+    line = {"kind": "case_run", "case": case, "seed": 0, "repetition": repetition}
+    return {**line, "metrics": scores}
+
+
+def _compare_file(
+    path: Path,
+    *,
+    repeat: int = 1,
+    flip: str | None = None,
+    cases_: tuple[str, ...] = _COMPARE_CASES,
+    **fields: Any,
+) -> Path:
+    header = {
+        "kind": "header",
+        "machine_id": "a machine",
+        "backend": "cpu",
+        "metric_version": 1,
+        "corpus_hash": "c" * 64,
+        "seeds": [0],
+        "cases": list(_COMPARE_CASES),
+        "repeat": repeat,
+        **fields,
+    }
+    with path.open("w", encoding="utf-8") as fh:
+        run.write_line(fh, header)
+        for case in cases_:
+            for repetition in range(repeat):
+                run.write_line(fh, _scored_line(case, int(case == flip), repetition))
+    return path
+
+
+def _compared(
+    tmp_path: Path, b: Path, c: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[int, str]:
+    code = run.main(["--eval-dir", str(tmp_path), "--compare", str(b), str(c)])
+    out = capsys.readouterr().out
+    print(f"--compare {b.name} {c.name} -> {code}\n{out}")
+    return code, out
+
+
+@pytest.mark.parametrize("name", _COMPARE_FIELDS)
+def test_compare_refuses_incomparable_arms(
+    name: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two runs that measured different things are never compared.
+
+    Catches a field dropped from the comparable set, so a verdict between runs
+    of different seeds, machines or documents reads as a change.
+    """
+    b = _compare_file(tmp_path / "b.jsonl")
+    c = _compare_file(tmp_path / "c.jsonl", **{name: _DIFFERENT[name]})
+    code, out = _compared(tmp_path, b, c, capsys)
+    assert code == 2
+    assert f"differ in {name}" in out
+
+
+def test_compare_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    empty = _compare_file(tmp_path / "empty.jsonl", cases_=())
+    code, out = _compared(tmp_path, empty, empty, capsys)
+    assert code == 2
+    assert "zero case runs" in out
+
+    b = _compare_file(tmp_path / "b.jsonl")
+    flipped = _compare_file(tmp_path / "flipped.jsonl", flip=_COMPARE_CASES[4])
+    code, out = _compared(tmp_path, b, flipped, capsys)
+    assert code == 1
+    assert f"regression: {_COMPARE_CASES[4]} seed 0 M4" in out
+
+    for name, candidate in (
+        ("same", _compare_file(tmp_path / "same.jsonl")),
+        ("repeated", _compare_file(tmp_path / "repeated.jsonl", repeat=3)),
+    ):
+        code, out = _compared(tmp_path, b, candidate, capsys)
+        print(f"{name}: {code}")
+        assert code == 0
+        assert "B 17 case runs, C 17 case runs" in out
+        assert "aggregate" in out
+        assert "blocks a merge" in out
