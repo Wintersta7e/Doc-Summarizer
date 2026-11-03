@@ -30,7 +30,7 @@ dependencies = [
     "striprtf>=0.0.32",
     "chardet>=7.4,<8",
     # Utilities. tqdm <4.66.3 has CVE-2024-34062.
-    "huggingface-hub>=1.21,<2",
+    "huggingface-hub>=1.21,<3",
     "tqdm>=4.68,<5",
     "psutil>=7.2,<8",
 ]
