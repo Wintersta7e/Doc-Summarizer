@@ -28,6 +28,9 @@ _MIN_QUOTE_CHARS = 6
 # words reaches it too; one contiguous run must also cover this much of a quote.
 VERIFIED_LONGEST_FRACTION = 0.5
 
+# The longest span, in characters, a citation should cover.
+MAX_SPAN_CHARS = 1000
+
 # Whitespace next to CJK text is ignored: a model copying it drops wrap spaces.
 # Han, kana, Hangul, CJK symbols and punctuation, fullwidth forms (escaped, so
 # Unicode normalization of this file cannot fold a range endpoint).

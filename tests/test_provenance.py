@@ -282,6 +282,12 @@ def test_locate_quote_grounds_sentence_with_abbreviation() -> None:
     assert source[span.start : span.end] == quote
 
 
+def test_max_span_chars_is_the_span_cap() -> None:
+    from docsummarizer.provenance import MAX_SPAN_CHARS
+
+    assert MAX_SPAN_CHARS == 1000
+
+
 def test_source_span_is_frozen() -> None:
     from dataclasses import FrozenInstanceError
 
