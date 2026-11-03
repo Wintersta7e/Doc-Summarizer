@@ -9,8 +9,11 @@ instance with ``object.__new__`` to bypass it.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
+import sys
+import types
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -255,6 +258,77 @@ def _shell(fake_llm, n_ctx: int = 8192) -> Summarizer:
     return s
 
 
+class _PerfLLM(_FakeLLM):
+    """A fake exposing llama.cpp's cumulative perf counters and ``n_tokens``.
+
+    Every call charges its whole prompt to ``n_p_eval`` except an exact repeat
+    of the previous call's messages, which evaluates one token (a prefix hit).
+    Each call's own deltas are recorded on ``calls`` so a test can sum them.
+    """
+
+    def __init__(self, content: str | None = None, counters: bool = True, with_usage: bool = True):
+        super().__init__(content)
+        if counters:
+            self.ctx = object()
+        self.with_usage = with_usage
+        self.n_tokens = 0
+        self.perf = {"n_p_eval": 0, "n_eval": 0, "t_p_eval_ms": 0.0, "t_eval_ms": 0.0}
+        self.contents: list[str] = []
+        self._previous: list[dict] | None = None
+
+    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+        prompt = sum(len(self.tokenize(m["content"].encode())) for m in messages)
+        evaluated = 1 if messages == self._previous else prompt
+        self._previous = messages
+        text = self._content if self._content is not None else f"summary-{len(self.calls) + 1}"
+        out = len(self.tokenize(text.encode()))
+        self.perf["n_p_eval"] += evaluated
+        self.perf["n_eval"] += out
+        self.perf["t_p_eval_ms"] += 10.0 * evaluated
+        self.perf["t_eval_ms"] += 50.0 * out
+        self.n_tokens = prompt + out
+        self.calls.append(
+            {
+                "messages": messages,
+                "kwargs": kwargs,
+                "stream": stream,
+                "prompt": prompt,
+                "evaluated": evaluated,
+                "out": out,
+            }
+        )
+        self.contents.append(text)
+        if stream:
+            return self._stream(text)
+        response: dict = {
+            "choices": [
+                {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+            ]
+        }
+        if self.with_usage:
+            response["usage"] = {"prompt_tokens": prompt, "completion_tokens": out}
+        return response
+
+    def _stream(self, text: str):
+        half = len(text) // 2
+        for piece in (text[:half], text[half:]):
+            yield {"choices": [{"delta": {"content": piece}, "finish_reason": None}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+
+def _fake_llama_cpp(monkeypatch: pytest.MonkeyPatch, llm: _PerfLLM) -> None:
+    """Install a ``llama_cpp`` package whose low-level module reads ``llm.perf``.
+
+    It defines no abort-callback setter, so Stop degrades to streaming as in CI.
+    """
+    pkg = types.ModuleType("llama_cpp")
+    low = types.ModuleType("llama_cpp.llama_cpp")
+    low.llama_perf_context = lambda _ctx: types.SimpleNamespace(**llm.perf)
+    pkg.llama_cpp = low
+    monkeypatch.setitem(sys.modules, "llama_cpp", pkg)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_cpp", low)
+
+
 def test_summarize_single_pass_uses_chat_completion() -> None:
     fake = _FakeLLM(content="THE SUMMARY")
     s = _shell(fake)
@@ -457,3 +531,128 @@ def test_unknown_language_is_passed_through_verbatim() -> None:
     s.summarize("doc", SUMMARY_TYPE_BRIEF, language="Swahili")
 
     assert "Write the summary in Swahili" in fake.calls[0]["messages"][1]["content"]
+
+
+# --------------------------------------------------------------------------- #
+# RunStats: one request's cost, measured from llama.cpp's own counters
+# --------------------------------------------------------------------------- #
+_DETAILED_JSON = json.dumps(
+    {
+        "lead": "The bakery opens early.",
+        "points": [
+            {
+                "text": "Bread is baked at dawn.",
+                "quote": "The village bakery opened its oven door at dawn",
+            }
+        ],
+    }
+)
+
+
+def _bakery_document(sentences: int = 150) -> str:
+    """~9,000 characters of project-written prose about a village bakery."""
+    return " ".join(
+        f"The village bakery opened its oven door at dawn on day {i}." for i in range(sentences)
+    )
+
+
+def _summed(calls: list[dict]) -> tuple[int, int, float, float, int]:
+    """The fake's per-call deltas summed: evaluated, generated, both times, prompt."""
+    return (
+        sum(c["evaluated"] for c in calls),
+        sum(c["out"] for c in calls),
+        sum(10.0 * c["evaluated"] for c in calls) / 1000,
+        sum(50.0 * c["out"] for c in calls) / 1000,
+        sum(c["prompt"] for c in calls),
+    )
+
+
+def _assert_counter_sums(stats, calls: list[dict]) -> None:
+    evaluated, generated, prompt_s, generation_s, prompt = _summed(calls)
+    assert stats.prompt_evaluated == evaluated
+    assert stats.generated_tokens == generated
+    assert stats.prompt_seconds == pytest.approx(prompt_s)
+    assert stats.generation_seconds == pytest.approx(generation_s)
+    assert stats.prompt_tokens == prompt
+
+
+def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each request's ``RunStats`` sums its own completions' counter deltas.
+
+    Every summary request must report what it cost. Catches absolute counters
+    instead of per-call deltas; a character count for generated tokens; a
+    nested ``summarize()`` opening its own accumulator, so Brief and the
+    fallback lose calls.
+    """
+    from docsummarizer.model_manager import RunStats
+
+    # (a) Detailed, single part, blocking.
+    fake = _PerfLLM(_DETAILED_JSON)
+    _fake_llama_cpp(monkeypatch, fake)
+    r = _shell(fake).summarize_structured("A short note about the bakery.", SUMMARY_TYPE_DETAILED)
+    print(f"calls counted: a {r.run_stats.calls}")
+    assert isinstance(r.run_stats, RunStats)
+    assert r.run_stats.calls == len(fake.calls) == 1
+    _assert_counter_sums(r.run_stats, fake.calls)
+
+    # (b) The same, streamed: no usage, so the prompt comes from n_tokens.
+    fake = _PerfLLM(_DETAILED_JSON, with_usage=False)
+    _fake_llama_cpp(monkeypatch, fake)
+    r = _shell(fake).summarize_structured(
+        "A short note about the bakery.", SUMMARY_TYPE_DETAILED, should_cancel=lambda: False
+    )
+    print(f"calls counted: b {r.run_stats.calls}")
+    assert fake.calls[0]["stream"] is True
+    assert r.run_stats.calls == len(fake.calls) == 1
+    assert r.run_stats.prompt_tokens == fake.n_tokens - fake.calls[0]["out"]
+    _assert_counter_sums(r.run_stats, fake.calls)
+
+    # (c) Detailed, multi-part.
+    fake = _PerfLLM(_DETAILED_JSON)
+    _fake_llama_cpp(monkeypatch, fake)
+    r = _shell(fake, n_ctx=2048).summarize_structured(_bakery_document(), SUMMARY_TYPE_DETAILED)
+    print(f"calls counted: c {r.run_stats.calls}")
+    assert r.run_stats.calls == len(fake.calls) > 1
+    _assert_counter_sums(r.run_stats, fake.calls)
+
+    # (d) Brief delegates to summarize(): the nested call shares the scope.
+    fake = _PerfLLM()
+    _fake_llama_cpp(monkeypatch, fake)
+    r = _shell(fake, n_ctx=2048).summarize_structured(_bakery_document(), SUMMARY_TYPE_BRIEF)
+    print(f"calls counted: d {r.run_stats.calls}")
+    assert r.run_stats.calls == len(fake.calls) > 1
+    _assert_counter_sums(r.run_stats, fake.calls)
+
+    # (e) A prefix hit: the repeat evaluates fewer tokens than its prompt holds.
+    fake = _PerfLLM("A short paragraph.")
+    _fake_llama_cpp(monkeypatch, fake)
+    s = _shell(fake)
+    s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
+    r = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
+    print(f"calls counted: e {r.run_stats.calls}")
+    assert r.run_stats.calls == 1
+    assert r.run_stats.prompt_evaluated < r.run_stats.prompt_tokens
+
+    # (f) No counters: the tokenizer counts the output, never a character ratio.
+    fake = _PerfLLM(_DETAILED_JSON, counters=False)
+    _fake_llama_cpp(monkeypatch, fake)
+    r = _shell(fake).summarize_structured("A short note about the bakery.", SUMMARY_TYPE_DETAILED)
+    print(f"calls counted: f {r.run_stats.calls}")
+    assert r.run_stats.calls == len(fake.calls) == 1
+    assert r.run_stats.prompt_evaluated is None
+    assert r.run_stats.prompt_seconds is None
+    assert r.run_stats.generation_seconds is None
+    assert r.run_stats.generated_tokens == sum(
+        len(fake.tokenize(c.encode())) for c in fake.contents
+    )
+
+
+def test_structured_summary_run_stats_is_last_and_defaulted() -> None:
+    """``run_stats`` is appended last and defaulted, so positional builds still work."""
+    from docsummarizer.model_manager import StructuredSummary
+
+    last = dataclasses.fields(StructuredSummary)[-1]
+    assert last.name == "run_stats"
+    assert last.default is None
+    summary = StructuredSummary("brief", "x", [], None, "x")
+    assert summary.run_stats is None
