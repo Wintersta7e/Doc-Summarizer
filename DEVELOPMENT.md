@@ -281,6 +281,96 @@ pytest --cov=docsummarizer --cov-report=term-missing
 docsummarizer-cli test.pdf -t brief
 ```
 
+## Evaluating a model, prompt or pipeline change
+
+The test suite runs against a fake model, so it proves that text reaches the
+prompt, never what the model does with it. `scripts/eval/run.py` runs the real
+model over a local corpus, captures every completion in full and scores it. It
+needs the runtime extra and a GGUF already on disk; it never downloads and
+opens no socket. Results and the corpus stay local, under `<eval-dir>`, and
+never enter the repository.
+
+### Commands
+
+```bash
+# Before a timed run on a shared machine: count busy model processes over
+# SECONDS (default 10), on the Windows host too under WSL; exits 1 when any
+python scripts/eval/run.py --contention [SECONDS]
+
+# Run a tier (smoke or lang) and write <eval-dir>/results/<UTC>-<tier>-<sha>.jsonl
+python scripts/eval/run.py --eval-dir <eval-dir> --tier smoke --model <gguf> --threads 12
+python scripts/eval/run.py --eval-dir <eval-dir> --tier lang --model <gguf>
+
+# Only some cases: --case takes a case id or a document id, repeatable
+python scripts/eval/run.py --eval-dir <eval-dir> --tier smoke --model <gguf> --case zh-lit-s
+
+# Context, offload and seeds (seeds other than 0 are refused until the
+# seed API lands)
+python scripts/eval/run.py --eval-dir <eval-dir> --tier smoke --model <gguf> \
+    --n-ctx 4096 --n-gpu-layers -1 --seeds 0
+
+# Timing: --repeat N re-runs only the cold seed-0 auto runs N times; every
+# other run runs once
+python scripts/eval/run.py --eval-dir <eval-dir> --tier smoke --model <gguf> --repeat 3
+
+# An ad-hoc document outside the corpus: --doc PATH --label LANG, repeatable;
+# --script Simplified|Traditional, when given, once per --doc
+python scripts/eval/run.py --eval-dir <eval-dir> --tier smoke --model <gguf> \
+    --doc <file> --label zh --script Simplified
+
+# Replay a results file through this tree's parsing, grounding and metrics,
+# with no model loaded; prints the coverage-only and production citation arms
+# and audits every citation
+python scripts/eval/run.py --eval-dir <eval-dir> --rescore <results-file>
+
+# Candidate C against baseline B: 0 no regression, 1 a regression,
+# 2 the two runs measured different things
+python scripts/eval/run.py --eval-dir <eval-dir> --compare <baseline> <candidate>
+
+# Checks: runstats compares the request counters with llama.cpp's own
+python scripts/eval/run.py --checks runstats --model <gguf> --threads 12
+
+# The language classifier against a labelled JSONL set (rows {"text", "label"},
+# at least 1,000 sentences in 10 languages)
+python scripts/eval/run.py --self-test language <labelled-set>
+```
+
+The full tier, `--judge`, `--calibrate` and the other checks land later.
+
+### The corpus
+
+`<eval-dir>/corpus/` holds UTF-8 text files and `manifest.json`. The ids and
+each document's shape are fixed in `scripts/eval/cases.py`; a contributor
+without the maintainer's corpus builds one to the same shape, so that every
+comparison stays paired on one corpus. Every text is one of:
+
+- public-domain;
+- an official work excluded from copyright;
+- written for the corpus.
+
+Each manifest entry under `"documents"` records: `id`, `file`, `source`,
+`licence`, `label` (the language the `auto` output must match), `script` for a
+zh document (`Simplified` or `Traditional`), the measured token count per
+model tokenizer, the parts at the context used, and the file's `sha256`. The
+runner reads `id`, `file`, `label`, `script` and `sha256`, and refuses an id
+the case matrix does not know. Each language-set document must exceed the
+prose budget at the lang tier's split context, so that its split run gives at
+least two parts on every summary type.
+
+### The evidence a change shows before merging
+
+| Change | Must show before merging | Backends |
+|---|---|---|
+| Prompt text, language directive, `auto` resolution, sampling, seed | smoke + full against the baseline | GPU full + CPU smoke |
+| Pipeline: chunking, budgets, consolidation, fallbacks, `n_ctx`, point counts | smoke + full against the baseline; an `n_ctx` change also runs the multi-part cases at both values (`--n-ctx`) | GPU full + CPU smoke |
+| Provenance / grounding | `--rescore` of the last full results, plus smoke | CPU |
+| The completion choke point, llama API use, the llama-cpp-python version | smoke + `--checks runstats`; a speed claim also needs `--repeat 3` | CPU and every shipped GPU backend |
+| Default model | the model bake-off | per the bake-off |
+| QML, bridge wiring, CLI plumbing, extractors, docs | the gate only | — |
+
+The files whose change needs evidence are derived from the summary entry
+point's imports, never hand-listed; every results file records their hash.
+
 ## Contributing
 
 1. Fork the repository

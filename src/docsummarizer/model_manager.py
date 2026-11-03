@@ -9,7 +9,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +277,106 @@ class SummaryPoint:
 
 
 @dataclass(frozen=True)
+class RunStats:
+    """One summary request's cost, summed over every completion it issued.
+
+    The three counter fields are ``None`` when the backend exposes no counters.
+    """
+
+    calls: int  # completions the request issued, every step
+    truncated_calls: int  # completions ending finish_reason == "length"
+    prompt_tokens: int | None  # prompt length summed over calls
+    prompt_evaluated: int | None  # n_p_eval deltas; < prompt_tokens on a prefix hit
+    prompt_seconds: float | None  # t_p_eval_ms deltas / 1000
+    generated_tokens: int  # n_eval deltas; without counters, _count_tokens(content)
+    generation_seconds: float | None  # t_eval_ms deltas / 1000
+    wall_seconds: float  # request start -> return
+
+
+@dataclass(frozen=True)
+class _PerfSnapshot:
+    """llama.cpp's cumulative perf counters at one instant."""
+
+    n_p_eval: int
+    n_eval: int
+    t_p_eval_ms: float
+    t_eval_ms: float
+
+
+def _perf_delta(before: _PerfSnapshot, after: _PerfSnapshot) -> _PerfSnapshot:
+    """What one completion added to the counters."""
+    return _PerfSnapshot(
+        after.n_p_eval - before.n_p_eval,
+        after.n_eval - before.n_eval,
+        after.t_p_eval_ms - before.t_p_eval_ms,
+        after.t_eval_ms - before.t_eval_ms,
+    )
+
+
+class _RunStatsAccumulator:
+    """Sums one request's completions; ``finish`` freezes the result once."""
+
+    def __init__(self) -> None:
+        self._start = time.perf_counter()
+        self._calls = 0
+        self._truncated = 0
+        self._prompt_tokens: int | None = 0
+        self._counters = True
+        self._prompt_evaluated = 0
+        self._prompt_ms = 0.0
+        self._generated = 0
+        self._generation_ms = 0.0
+        self._final: RunStats | None = None
+
+    def add_call(
+        self,
+        *,
+        finish_reason: object,
+        perf: _PerfSnapshot | None,
+        usage_prompt_tokens: int | None,
+        n_tokens_after: int | None,
+        count_generated: Callable[[], int],
+    ) -> None:
+        """Add one completion, aborted or not."""
+        self._calls += 1
+        if finish_reason == "length":
+            self._truncated += 1
+        if perf is not None:
+            self._prompt_evaluated += perf.n_p_eval
+            self._prompt_ms += perf.t_p_eval_ms
+            self._generated += perf.n_eval
+            self._generation_ms += perf.t_eval_ms
+        else:
+            self._counters = False
+            self._generated += count_generated()
+        prompt: int | None = None
+        if usage_prompt_tokens is not None:
+            prompt = usage_prompt_tokens
+        elif n_tokens_after is not None and perf is not None:
+            prompt = n_tokens_after - perf.n_eval
+        if prompt is None or self._prompt_tokens is None:
+            self._prompt_tokens = None
+        else:
+            self._prompt_tokens += prompt
+
+    def finish(self) -> RunStats:
+        """The request's ``RunStats``, built on the first call and reused after."""
+        if self._final is None:
+            counters = self._counters
+            self._final = RunStats(
+                calls=self._calls,
+                truncated_calls=self._truncated,
+                prompt_tokens=self._prompt_tokens,
+                prompt_evaluated=self._prompt_evaluated if counters else None,
+                prompt_seconds=self._prompt_ms / 1000 if counters else None,
+                generated_tokens=self._generated,
+                generation_seconds=self._generation_ms / 1000 if counters else None,
+                wall_seconds=time.perf_counter() - self._start,
+            )
+        return self._final
+
+
+@dataclass(frozen=True)
 class StructuredSummary:
     """A structured summary the GUI can render with per-point provenance.
 
@@ -286,6 +386,7 @@ class StructuredSummary:
 
     ``text`` is the plain-text rendering, kept so the CLI and the Save path can
     write a structured summary the same way they write a prose one.
+    ``run_stats`` is what the request cost, set by ``Summarizer.summarize_structured``.
     """
 
     summary_type: str
@@ -293,6 +394,7 @@ class StructuredSummary:
     points: list[SummaryPoint]
     sections: dict[str, list[SummaryPoint]] | None
     text: str
+    run_stats: RunStats | None = None
 
 
 def _split_into_chunks_with_offsets(text: str, max_chars: int) -> list[tuple[str, int]]:
@@ -427,6 +529,32 @@ def _build_structured(
         for name in _STRUCTURED_SECTIONS
     }
     return _make_structured(SUMMARY_TYPE_STRUCTURED, None, [], sections)
+
+
+def _log_run_stats(stats: RunStats) -> None:
+    """Log one request's counts and times on a single line, never its content."""
+
+    def count(value: int | None) -> str:
+        return "n/a" if value is None else str(value)
+
+    def seconds(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.3f}"
+
+    def rate(tokens: int | None, elapsed: float | None) -> str:
+        return "n/a" if tokens is None or not elapsed else f"{tokens / elapsed:.1f}"
+
+    log_info(
+        f"run_stats calls={stats.calls} truncated={stats.truncated_calls} "
+        f"prompt_tokens={count(stats.prompt_tokens)} "
+        f"prompt_evaluated={count(stats.prompt_evaluated)} "
+        f"prompt_s={seconds(stats.prompt_seconds)} "
+        f"prompt_tok_s={rate(stats.prompt_evaluated, stats.prompt_seconds)} "
+        f"generated={stats.generated_tokens} "
+        f"generation_s={seconds(stats.generation_seconds)} "
+        f"gen_tok_s={rate(stats.generated_tokens, stats.generation_seconds)} "
+        f"wall_s={stats.wall_seconds:.3f}"
+    )
+    log_debug(f"Memory usage: {get_memory_usage_mb()} MB")
 
 
 def _render_structured(
@@ -612,6 +740,10 @@ def download_model(
 class Summarizer:
     """Handles text summarization using the local LLM."""
 
+    # The open request's accumulator; a class default so every instance starts
+    # without one.
+    _run_stats: _RunStatsAccumulator | None = None
+
     def __init__(
         self,
         model_path: Path,
@@ -776,26 +908,101 @@ class Summarizer:
         if llm is None:
             raise RuntimeError(_CLOSED_MESSAGE)
         check = self._cancel_check
-        if check is None:
-            response = llm.create_chat_completion(messages=messages, **kwargs)
-            return str(response["choices"][0]["message"].get("content") or "").strip()
-        _raise_if_cancelled(check)
+        if check is not None:
+            _raise_if_cancelled(check)
+        before = self._perf_snapshot()
+        finish_reason: object = None
+        usage: Any = None
         content = ""
         try:
-            with self._llama_abort_callback_guard(check):
-                for chunk in llm.create_chat_completion(messages=messages, stream=True, **kwargs):
+            if check is None:
+                response = llm.create_chat_completion(messages=messages, **kwargs)
+                choice = response["choices"][0]
+                finish_reason = choice.get("finish_reason")
+                usage = response.get("usage")
+                content = str(choice["message"].get("content") or "")
+                return content.strip()
+            try:
+                with self._llama_abort_callback_guard(check):
+                    for chunk in llm.create_chat_completion(
+                        messages=messages, stream=True, **kwargs
+                    ):
+                        _raise_if_cancelled(check)
+                        choice = chunk["choices"][0]
+                        finish_reason = choice.get("finish_reason") or finish_reason
+                        delta = (choice.get("delta") or {}).get("content")
+                        if delta:
+                            content += delta
                     _raise_if_cancelled(check)
-                    delta = (chunk["choices"][0].get("delta") or {}).get("content")
-                    if delta:
-                        content += delta
-                _raise_if_cancelled(check)
-        except SummarizationCancelledError:
-            raise
+            except SummarizationCancelledError:
+                raise
+            except Exception as exc:
+                if check():
+                    raise SummarizationCancelledError from exc
+                raise
+            return content.strip()
+        finally:
+            self._record_call(before, finish_reason, usage, content)
+
+    @contextmanager
+    def _request_stats(self) -> Iterator[_RunStatsAccumulator]:
+        """The request's accumulator: the outermost entry point opens it, nested calls share it."""
+        current = self._run_stats
+        if current is not None:
+            yield current
+            return
+        stats = _RunStatsAccumulator()
+        self._run_stats = stats
+        try:
+            yield stats
+        finally:
+            self._run_stats = None
+            _log_run_stats(stats.finish())
+
+    def _perf_snapshot(self) -> _PerfSnapshot | None:
+        """llama.cpp's perf counters now, or ``None`` when the backend has none."""
+        ctx = self._llama_context()
+        if ctx is None:
+            return None
+        try:
+            from llama_cpp import llama_cpp
+
+            perf_context = getattr(llama_cpp, "llama_perf_context", None)
+            if not callable(perf_context):
+                return None
+            data = perf_context(ctx)
+            return _PerfSnapshot(
+                int(data.n_p_eval),
+                int(data.n_eval),
+                float(data.t_p_eval_ms),
+                float(data.t_eval_ms),
+            )
         except Exception as exc:
-            if check():
-                raise SummarizationCancelledError from exc
-            raise
-        return content.strip()
+            log_debug(f"llama perf counters unavailable: {exc!s}")
+            return None
+
+    def _record_call(
+        self, before: _PerfSnapshot | None, finish_reason: object, usage: Any, content: str
+    ) -> None:
+        """Add one completion to the open request's stats, if a request is open."""
+        stats = self._run_stats
+        if stats is None:
+            return
+        # Runs in _complete's finally: raising here would mask the call's own error.
+        try:
+            after = self._perf_snapshot() if before is not None else None
+            perf = _perf_delta(before, after) if before is not None and after is not None else None
+            usage_prompt = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+            n_tokens = getattr(self.llm, "n_tokens", None)
+            stats.add_call(
+                finish_reason=finish_reason,
+                perf=perf,
+                usage_prompt_tokens=usage_prompt if isinstance(usage_prompt, int) else None,
+                n_tokens_after=n_tokens if isinstance(n_tokens, int) else None,
+                count_generated=lambda: self._count_tokens(content) if content else 0,
+            )
+        except Exception as exc:
+            log_debug(f"Unable to record run stats: {exc!s}")
 
     def _count_tokens(self, text: str) -> int:
         """Tokens ``text`` occupies in this model's context window."""
@@ -859,44 +1066,41 @@ class Summarizer:
         if self.llm is None:
             raise RuntimeError(_CLOSED_MESSAGE)
 
-        self._cancel_check = should_cancel
-        self._language = normalize_language(language)
-        text = text.strip()
-        log_info(
-            f"Starting summarization: type={summary_type}, "
-            f"language={self._language}, input_chars={len(text)}"
-        )
+        with self._request_stats():
+            self._cancel_check = should_cancel
+            self._language = normalize_language(language)
+            text = text.strip()
+            log_info(
+                f"Starting summarization: type={summary_type}, "
+                f"language={self._language}, input_chars={len(text)}"
+            )
 
-        budget_tokens = max(self.n_ctx - max_tokens - _SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
-        chunks = [chunk for chunk, _ in self._chunks_within(text, budget_tokens, _paragraph_chunks)]
+            budget_tokens = max(self.n_ctx - max_tokens - _SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
+            chunks = [
+                chunk for chunk, _ in self._chunks_within(text, budget_tokens, _paragraph_chunks)
+            ]
 
-        if len(chunks) == 1:
-            start_time = time.time()
-            summary = self._summarize_once(text, summary_type, max_tokens)
-            self._log_speed(summary, time.time() - start_time)
-            return summary
+            if len(chunks) == 1:
+                return self._summarize_once(text, summary_type, max_tokens)
 
-        # Document exceeds the context budget: map-reduce.
-        log_info(f"Document exceeds context budget; summarizing in {len(chunks)} chunks")
-        start_time = time.time()
+            # Document exceeds the context budget: map-reduce.
+            log_info(f"Document exceeds context budget; summarizing in {len(chunks)} chunks")
 
-        partials = []
-        for i, chunk in enumerate(chunks, 1):
-            _raise_if_cancelled(should_cancel)
-            log_info(f"Summarizing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
-            partials.append(self._summarize_once(chunk, summary_type, max_tokens))
-        combined = "\n\n".join(partials)
+            partials = []
+            for i, chunk in enumerate(chunks, 1):
+                _raise_if_cancelled(should_cancel)
+                log_info(f"Summarizing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
+                partials.append(self._summarize_once(chunk, summary_type, max_tokens))
+            combined = "\n\n".join(partials)
 
-        # Reduce. If the combined partials still overflow (a very long
-        # document with many chunks), recurse — each pass strictly shrinks the
-        # text, so this terminates.
-        if self._count_tokens(combined) > budget_tokens:
-            log_info("Combined section summaries still exceed budget; reducing again")
-            return self.summarize(combined, summary_type, max_tokens, should_cancel, language)
+            # Reduce. If the combined partials still overflow (a very long
+            # document with many chunks), recurse — each pass strictly shrinks the
+            # text, so this terminates.
+            if self._count_tokens(combined) > budget_tokens:
+                log_info("Combined section summaries still exceed budget; reducing again")
+                return self.summarize(combined, summary_type, max_tokens, should_cancel, language)
 
-        summary = self._synthesize(combined, summary_type, max_tokens)
-        self._log_speed(summary, time.time() - start_time)
-        return summary
+            return self._synthesize(combined, summary_type, max_tokens)
 
     def summarize_structured(
         self,
@@ -918,32 +1122,35 @@ class Summarizer:
         if self.llm is None:
             raise RuntimeError(_CLOSED_MESSAGE)
 
-        # NB: do not strip — citation offsets must index the caller's exact text
-        # (extracted documents commonly start with whitespace). split_sentences
-        # already ignores leading/trailing whitespace for grounding.
-        if summary_type == SUMMARY_TYPE_BRIEF:
-            lead = self.summarize(text, SUMMARY_TYPE_BRIEF, max_tokens, should_cancel, language)
-            return StructuredSummary(SUMMARY_TYPE_BRIEF, lead or None, [], None, lead)
+        with self._request_stats() as stats:
+            # NB: do not strip — citation offsets must index the caller's exact text
+            # (extracted documents commonly start with whitespace). split_sentences
+            # already ignores leading/trailing whitespace for grounding.
+            if summary_type == SUMMARY_TYPE_BRIEF:
+                lead = self.summarize(text, SUMMARY_TYPE_BRIEF, max_tokens, should_cancel, language)
+                brief = StructuredSummary(SUMMARY_TYPE_BRIEF, lead or None, [], None, lead)
+                return replace(brief, run_stats=stats.finish())
 
-        if summary_type not in (SUMMARY_TYPE_DETAILED, SUMMARY_TYPE_STRUCTURED):
-            summary_type = SUMMARY_TYPE_DETAILED
+            if summary_type not in (SUMMARY_TYPE_DETAILED, SUMMARY_TYPE_STRUCTURED):
+                summary_type = SUMMARY_TYPE_DETAILED
 
-        log_info(
-            f"Starting structured summarization: type={summary_type}, "
-            f"language={normalize_language(language)}, input_chars={len(text)}"
-        )
-        try:
-            result = self._summarize_structured(
-                text, summary_type, max_tokens, should_cancel, language
+            log_info(
+                f"Starting structured summarization: type={summary_type}, "
+                f"language={normalize_language(language)}, input_chars={len(text)}"
             )
-        except SummarizationCancelledError:
-            raise  # a clean stop must not fall back to more inference
-        except Exception as exc:
-            log_warning(f"Structured summarization failed ({exc!s}); falling back to prose")
-            result = None
-        if result is None:
-            return self._fallback_structured(text, summary_type, max_tokens, language)
-        return result
+            try:
+                result = self._summarize_structured(
+                    text, summary_type, max_tokens, should_cancel, language
+                )
+            except SummarizationCancelledError:
+                raise  # a clean stop must not fall back to more inference
+            except Exception as exc:
+                log_warning(f"Structured summarization failed ({exc!s}); falling back to prose")
+                result = None
+            if result is None:
+                fallback = self._fallback_structured(text, summary_type, max_tokens, language)
+                return replace(fallback, run_stats=stats.finish())
+            return replace(result, run_stats=stats.finish())
 
     def _summarize_structured(
         self,
@@ -1077,15 +1284,6 @@ class Summarizer:
             temperature=0.3,
             top_p=0.9,
         )
-
-    def _log_speed(self, summary: str, elapsed: float) -> None:
-        approx_tokens = max(len(summary) // 4, 1)
-        tokens_per_sec = approx_tokens / elapsed if elapsed > 0 else 0
-        log_info(
-            f"Summary generated in {elapsed:.2f}s "
-            f"(~{approx_tokens} tokens, {tokens_per_sec:.1f} tok/s)"
-        )
-        log_debug(f"Memory usage: {get_memory_usage_mb()} MB")
 
     def close(self) -> None:
         """Release the underlying llama.cpp model.
