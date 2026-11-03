@@ -5,11 +5,20 @@ For users who prefer terminal over GUI.
 """
 
 import argparse
+import os
 import sys
+from collections import Counter
 from pathlib import Path
+from typing import Literal, NoReturn
 
 from .document_parser import extract_text, find_documents, get_document_info
-from .io_helpers import write_summary_txt
+from .io_helpers import (
+    SKIPPED_APPEARED,
+    SKIPPED_EXISTS,
+    same_file,
+    summary_filename,
+    write_summary_txt,
+)
 from .model_manager import (
     DEFAULT_MODEL,
     LANGUAGE_AUTO,
@@ -53,21 +62,34 @@ def ensure_model() -> bool:
     return True
 
 
+Outcome = Literal["written", "skipped", "failed"]
+
+# One planned input: the source, its output (None = console), and whether its
+# output already exists and is left alone.
+PlannedInput = tuple[Path, Path | None, bool]
+
+
 def summarize_file(
     filepath: str,
     summarizer: Summarizer,
     summary_type: str = SUMMARY_TYPE_DETAILED,
-    output_path: str | None = None,
+    target: Path | None = None,
     language: str = LANGUAGE_AUTO,
-) -> bool:
-    """Summarize a single file."""
+    *,
+    replace: bool = True,
+) -> Outcome:
+    """Summarize a single file into `target`, or to the console without one.
+
+    With `replace=False` an output that appeared since the run checked it is
+    kept and the input counts as skipped.
+    """
     info = get_document_info(filepath)
     print(f"Processing: {info['name']} ({info['size_mb']} MB)")
 
     text, error = extract_text(filepath)
     if error:
         print(f"  Error: {error}")
-        return False
+        return "failed"
 
     print(f"  Extracted {len(text)} characters")
 
@@ -76,31 +98,33 @@ def summarize_file(
         summary = summarizer.summarize(text, summary_type=summary_type, language=language)
     except Exception as e:
         print(f"  Error: {e!s}")
-        return False
+        return "failed"
 
-    if output_path:
-        out_file = Path(output_path)
-        if out_file.is_dir():
-            out_file = out_file / f"{Path(filepath).stem}_summary.txt"
-
-        write_summary_txt(
-            out_file,
-            source_name=info["name"],
-            summary=summary,
-            summary_type=summary_type,
-            separator_width=60,
-            replace=True,
-        )
-
-        print(f"  Saved to: {out_file}")
-    else:
+    if target is None:
         print("\n" + "=" * 60)
         print(f"SUMMARY ({summary_type})")
         print("=" * 60 + "\n")
         print(summary)
         print("\n" + "=" * 60)
+        return "written"
 
-    return True
+    try:
+        written = write_summary_txt(
+            target,
+            source_name=info["name"],
+            summary=summary,
+            summary_type=summary_type,
+            separator_width=60,
+            replace=replace,
+        )
+    except OSError as e:  # e.g. a locked target; the rest of the run goes on
+        print(f"  Error: could not write {target}: {e}")
+        return "failed"
+    if not written:
+        print(f"{info['name']}: skipped ({SKIPPED_APPEARED})")
+        return "skipped"
+    print(f"  Saved to: {target}")
+    return "written"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -159,6 +183,12 @@ Examples:
         help="CPU threads for inference (overrides the saved setting).",
     )
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace summaries that already exist in the output folder "
+        "(folder runs; by default they are skipped)",
+    )
+    parser.add_argument(
         "--download-only", action="store_true", help="Only download the model, do not process files"
     )
     return parser
@@ -174,6 +204,93 @@ def _resolve_runtime(args: argparse.Namespace, settings: Settings) -> tuple[int 
 def _resolve_language(args: argparse.Namespace, settings: Settings) -> str:
     """Resolve the output language — the ``--language`` flag beats the setting."""
     return normalize_language(settings.output_language if args.language is None else args.language)
+
+
+def _refuse(message: str) -> NoReturn:
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _names_a_directory(value: str) -> bool:
+    """`-o` names a directory: an existing one, or a path ending in a separator."""
+    return (
+        Path(value).is_dir()
+        or value.endswith(os.sep)
+        or (os.altsep is not None and value.endswith(os.altsep))
+    )
+
+
+def _make_output_dir(out: Path) -> None:
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _refuse(f"could not create the output folder: {e.strerror or e}")
+
+
+def _resolve_targets(
+    input_path: Path, files: list[Path], output: str | None, summary_type: str
+) -> list[Path | None]:
+    """One output per input (None = console); exits 2 on an unsafe `-o`."""
+    if output is None:
+        return [None for _ in files]
+    out = Path(output)
+    if input_path.is_dir():
+        if out.exists() and not out.is_dir():
+            _refuse("a folder input needs an output folder")
+        if same_file(out, input_path):
+            _refuse(
+                f"Choose a different output folder (default: {input_path.resolve() / 'summaries'})"
+            )
+        _make_output_dir(out)
+        return [out / summary_filename(f, summary_type, "txt") for f in files]
+    to_dir = _names_a_directory(output)
+    target = out / summary_filename(input_path, summary_type, "txt") if to_dir else out
+    if same_file(target, input_path):
+        _refuse("the output would replace the input file; choose another output")
+    if to_dir:
+        _make_output_dir(out)
+    return [target]
+
+
+def _plan_run(
+    args: argparse.Namespace, input_path: Path, files: list[Path]
+) -> tuple[list[PlannedInput], bool]:
+    """Resolve every output before the model loads; returns the plan and `replace`.
+
+    A folder run leaves an existing output alone unless `--overwrite`; a named
+    single input always writes its output.
+    """
+    targets = _resolve_targets(input_path, files, args.output, args.type)
+    folder_run = input_path.is_dir() and args.output is not None
+    keep_existing = folder_run and not args.overwrite
+    plan = [
+        (f, t, keep_existing and t is not None and os.path.lexists(t))
+        for f, t in zip(files, targets, strict=True)
+    ]
+    return plan, not keep_existing
+
+
+def _run_plan(
+    plan: list[PlannedInput],
+    summarizer: Summarizer,
+    summary_type: str,
+    language: str,
+    *,
+    replace: bool,
+) -> Counter[Outcome]:
+    counts: Counter[Outcome] = Counter()
+    for filepath, target, exists in plan:
+        if exists:
+            print(f"{filepath.name}: skipped: {SKIPPED_EXISTS}")
+            counts["skipped"] += 1
+        else:
+            counts[
+                summarize_file(
+                    str(filepath), summarizer, summary_type, target, language, replace=replace
+                )
+            ] += 1
+        print()
+    return counts
 
 
 def main() -> None:
@@ -200,6 +317,8 @@ def main() -> None:
         print(f"Error: No supported documents found in: {args.input}")
         sys.exit(1)
 
+    plan, replace = _plan_run(args, input_path, files)
+
     settings = load_settings()
     n_threads, n_gpu_layers = _resolve_runtime(args, settings)
     language = _resolve_language(args, settings)
@@ -218,16 +337,15 @@ def main() -> None:
         + "\n"
     )
 
-    success_count = 0
     try:
-        for filepath in files:
-            if summarize_file(str(filepath), summarizer, args.type, args.output, language):
-                success_count += 1
-            print()
+        counts = _run_plan(plan, summarizer, args.type, language, replace=replace)
     finally:
         summarizer.close()
 
-    print(f"Done. Successfully processed {success_count}/{len(files)} file(s).")
+    print(
+        f"Done. {counts['written']} written, {counts['skipped']} skipped, "
+        f"{counts['failed']} failed."
+    )
 
 
 if __name__ == "__main__":
