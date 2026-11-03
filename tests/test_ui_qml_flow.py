@@ -16,12 +16,30 @@ import shiboken6
 from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QNetworkReply, QNetworkRequest
-from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQml import QQmlApplicationEngine, QQmlEngine, QQmlExpression
 from PySide6.QtQuick import QQuickItem, QQuickWindow
 
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
 from docsummarizer.ui.app import create_engine
 from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
+
+_APP_QML = Path(__file__).resolve().parents[1] / "src" / "docsummarizer" / "ui" / "qml" / "App"
+
+# QML's Text.textFormat values (AutoText is 2).
+_PLAIN, _RICH, _MARKDOWN = 0, 1, 3
+
+# Where each payload is shown, and the format its renderer must use.
+_EXPECTED_FORMAT = {
+    "LEADMARK": _MARKDOWN,
+    "POINTMARK": _MARKDOWN,
+    "SECTIONMARK": _MARKDOWN,
+    "PROSEMARK": _MARKDOWN,
+    "FILEMARK": _PLAIN,
+    "ROWMARK": _PLAIN,
+    "OUTDIRMARK": _PLAIN,
+    "TOASTMARK": _PLAIN,
+    "DOCMARK": _RICH,  # escaped before it is rendered
+}
 
 
 @pytest.fixture(scope="session")
@@ -179,3 +197,65 @@ def test_local_only_manager_refuses_remote_schemes(
     assert all(r.error() != QNetworkReply.NetworkError.NoError for r in remote)
     assert local_reply.error() == QNetworkReply.NetworkError.NoError
     assert bytes(local_reply.readAll().data()) == b"local bytes"
+
+
+def _text_format(item: QQuickItem) -> int:
+    # PySide has no converter for QQuickText::TextFormat; QML evaluates it to a number.
+    expr = QQmlExpression(QQmlEngine.contextForObject(item), item, "textFormat")
+    value, undefined = expr.evaluate()
+    assert not undefined
+    return int(value)
+
+
+def test_content_text_formats_are_explicit(
+    console: tuple[QQmlApplicationEngine, ConsoleBridge, QQuickWindow],
+    loopback: tuple[int, list[str]],
+) -> None:
+    """Model output renders as Markdown, file names as plain text and document text as
+    escaped rich text; none of their renderers is left on ``AutoText``.
+
+    Mutation caught: deleting ``textFormat`` from the lead, a point, a section point,
+    a file-name line, a Batch row, the Batch output line or the toast - that
+    ``Text`` reads ``AutoText``.
+    """
+    _engine, bridge, window = console
+    port, _hits = loopback
+    seen = dict.fromkeys(_EXPECTED_FORMAT, 0)
+    wrong: list[str] = []
+
+    def check() -> None:
+        for item in _items(window):
+            name = item.metaObject().className()
+            if not name.startswith("QQuickText") or name.startswith("QQuickTextInput"):
+                continue
+            text = str(item.property("text") or "")
+            for tag, expected in _EXPECTED_FORMAT.items():
+                if tag not in text:
+                    continue
+                seen[tag] += 1
+                actual = _text_format(item)
+                if actual != expected or (expected == _RICH and "<img" in text):
+                    wrong.append(f"{tag} in {name}: textFormat {actual}, expected {expected}")
+
+    _render_everything(bridge, window, port, check)
+    print(f"renderers checked per payload: {seen}")
+    assert all(seen.values()), f"a payload reached no renderer: {seen}"
+    assert wrong == []
+
+
+def test_no_qml_opens_a_link() -> None:
+    """No QML handler reacts to a link, so a Markdown link in model text stays inert.
+
+    Mutation caught: ``onLinkActivated: link => Qt.openUrlExternally(link)`` on
+    any ``Text``.
+    """
+    files = sorted(_APP_QML.glob("*.qml"))
+    offenders = [
+        f"{path.name}:{n}"
+        for path in files
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "LinkActivated" in line
+    ]
+    print(f"qml files scanned={len(files)} offenders={offenders}")
+    assert files, "scanned no QML file"
+    assert offenders == []

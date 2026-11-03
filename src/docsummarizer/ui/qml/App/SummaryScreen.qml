@@ -214,6 +214,7 @@ Item {
                     }
                     Text {
                         text: "FILE 0x7F · " + bridge.currentFileName.toUpperCase()
+                        textFormat: Text.PlainText
                         color: Theme.faint
                         font.family: Theme.mono
                         font.pixelSize: 9
@@ -234,6 +235,7 @@ Item {
                 }
                 Text {
                     text: bridge.currentFileName
+                    textFormat: Text.PlainText
                     color: Theme.ink
                     font.family: Theme.serif
                     font.pixelSize: 33
@@ -388,6 +390,7 @@ Item {
                         visible: String(screen.summary.lead) !== ""
                         Layout.fillWidth: true
                         text: screen.summary.lead
+                        textFormat: Text.MarkdownText
                         wrapMode: Text.WordWrap
                         color: Theme.ink
                         font.family: Theme.serif
@@ -430,6 +433,7 @@ Item {
                                     Text {
                                         Layout.fillWidth: true
                                         text: modelData.text
+                                        textFormat: Text.MarkdownText
                                         color: Theme.inkSoft
                                         font.family: Theme.ui
                                         font.pixelSize: 14
@@ -501,6 +505,7 @@ Item {
                                             required property var modelData
                                             Layout.fillWidth: true
                                             text: modelData.text
+                                            textFormat: Text.MarkdownText
                                             color: Theme.inkSoft
                                             font.family: Theme.body
                                             font.pixelSize: 13
@@ -603,6 +608,7 @@ Item {
 
     TextEdit {
         id: copyHelper
+        textFormat: TextEdit.PlainText
         visible: false
     }
 
