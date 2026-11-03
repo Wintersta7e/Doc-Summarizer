@@ -53,9 +53,9 @@ def test_split_sentences_splits_on_newlines_after_punctuation() -> None:
 # locate_quote — fuzzy-match a quote to the best source sentence
 # --------------------------------------------------------------------------- #
 _SOURCE = (
-    "The Transformer is a model architecture eschewing recurrence. "
-    "It relies entirely on an attention mechanism to draw global dependencies. "
-    "Experiments show it is superior in quality while being more parallelizable."
+    "The harbour ferry is a flat-bottomed boat that crosses without a keel. "
+    "It hauls itself along a steel cable stretched across the narrow channel. "
+    "Records show the crossing is cheaper to run than the old bridge toll."
 )
 
 _WATER = (
@@ -66,7 +66,7 @@ _WATER = (
 
 
 def test_locate_quote_verbatim_match_returns_that_sentence() -> None:
-    quote = "It relies entirely on an attention mechanism to draw global dependencies."
+    quote = "It hauls itself along a steel cable stretched across the narrow channel."
     span = locate_quote(quote, _SOURCE)
     assert span is not None
     assert _SOURCE[span.start : span.end] == quote
@@ -74,7 +74,7 @@ def test_locate_quote_verbatim_match_returns_that_sentence() -> None:
 
 
 def test_locate_quote_offsets_map_into_full_source() -> None:
-    quote = "The Transformer is a model architecture eschewing recurrence."
+    quote = "The harbour ferry is a flat-bottomed boat that crosses without a keel."
     span = locate_quote(quote, _SOURCE)
     assert span is not None
     assert span.start == 0
@@ -94,7 +94,7 @@ def test_locate_quote_short_verbatim_fragment_grounds() -> None:
     # A 4-bit model often cites a phrase, not a whole sentence. A verbatim
     # fragment must still ground to its source sentence (coverage, not the
     # symmetric whole-sentence ratio).
-    for fragment in ("eschewing recurrence", "attention mechanism", "superior in quality"):
+    for fragment in ("without a keel", "steel cable", "cheaper to run"):
         span = locate_quote(fragment, _SOURCE)
         assert span is not None, fragment
         assert fragment in _SOURCE[span.start : span.end]
@@ -103,7 +103,7 @@ def test_locate_quote_short_verbatim_fragment_grounds() -> None:
 def test_locate_quote_threshold_governs_fuzzy_match() -> None:
     # A threshold can only raise the coverage bar: a strict one rejects a loose
     # paraphrase, and one below the default is refused rather than loosening it.
-    quote = "the model avoids recurrent and convolutional layers"
+    quote = "the ferry needs neither sails nor an engine"
     assert locate_quote(quote, _SOURCE, threshold=0.99) is None
     with pytest.raises(ValueError, match="threshold"):
         locate_quote(quote, _SOURCE, threshold=0.1)
