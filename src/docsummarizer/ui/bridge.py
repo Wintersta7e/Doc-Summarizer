@@ -22,7 +22,14 @@ from typing import Any
 from PySide6.QtCore import Property, QMutex, QObject, QThreadPool, QUrl, Signal, Slot
 
 from docsummarizer import document_parser
-from docsummarizer.io_helpers import write_summary_docx, write_summary_txt
+from docsummarizer.io_helpers import (
+    SKIPPED_APPEARED,
+    SKIPPED_EXISTS,
+    same_file,
+    summary_filename,
+    write_summary_docx,
+    write_summary_txt,
+)
 from docsummarizer.logger import log_debug, log_error, log_info
 from docsummarizer.model_manager import (
     DEFAULT_MODEL,
@@ -103,6 +110,24 @@ def summary_to_variant(summary: StructuredSummary) -> dict[str, Any]:
         },
         "text": summary.text,
     }
+
+
+def _plan_batch(
+    files: list[Path], out: Path, summary_type: str
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """Each input's output path and its initial batch row.
+
+    An output that already exists is checked here, before any inference: its
+    row starts ``SKIPPED`` and the run leaves the file alone.
+    """
+    targets = [out / summary_filename(f, summary_type, "txt") for f in files]
+    rows: list[dict[str, Any]] = [
+        {"name": f.name, "status": "SKIPPED", "tokens": 0, "reason": SKIPPED_EXISTS}
+        if os.path.lexists(target)
+        else {"name": f.name, "status": "QUEUED", "tokens": 0, "reason": ""}
+        for f, target in zip(files, targets, strict=True)
+    ]
+    return targets, rows
 
 
 def _default_factory(model_path: Path, n_threads: int | None, n_gpu_layers: int) -> Summarizer:
@@ -638,6 +663,12 @@ class ConsoleBridge(QObject):
         if not folder.is_dir():
             self.toast.emit("That folder does not exist")
             return None
+        if same_file(out, folder):
+            # Outputs are supported inputs: the next run would summarize them.
+            self.toast.emit(
+                f"Choose a different output folder (default: {folder.resolve() / 'summaries'})"
+            )
+            return None
         files = document_parser.find_documents(folder)
         if not files:
             self.toast.emit("No supported documents in that folder")
@@ -649,25 +680,15 @@ class ConsoleBridge(QObject):
             return None
         return files
 
-    @staticmethod
-    def _batch_output_path(out: Path, stem: str, used: set[str]) -> Path:
-        """A unique ``<stem>_summary.txt`` under ``out`` — disambiguating
-        same-stem inputs (e.g. report.pdf + report.docx) so they don't silently
-        overwrite each other."""
-        name = f"{stem}_summary.txt"
-        counter = 2
-        while name in used:
-            name = f"{stem}_{counter}_summary.txt"
-            counter += 1
-        used.add(name)
-        return out / name
-
     @Slot(str, str)
     def batchProcess(self, folder_path: str, out_dir: str) -> None:
         """Summarize every supported document in a folder, writing .txt outputs.
 
-        Maintains ``batchRows`` (a list of {name, status, tokens}) so the UI can
-        show per-file QUEUED → PROCESSING → DONE/FAILED status as work proceeds.
+        Each output is named ``<name>.<type>.txt``; one that already exists is
+        left alone and its input skipped without inference. Maintains
+        ``batchRows`` (a list of {name, status, tokens, reason}) so the UI can
+        show per-file QUEUED → PROCESSING → DONE/FAILED/SKIPPED status as work
+        proceeds; ``reason`` says why a row was skipped.
         """
         summarizer = self._get_summarizer()
         if summarizer is None or self._busy:
@@ -680,25 +701,25 @@ class ConsoleBridge(QObject):
         summary_type = self._summary_type
         language = self._settings.output_language
         total = len(files)
-        self._batch_rows = [{"name": f.name, "status": "QUEUED", "tokens": 0} for f in files]
+        targets, self._batch_rows = _plan_batch(files, out, summary_type)
         self.batchRowsChanged.emit()
         self._set_busy(True)
         self._set_status(f"Processing 0/{total}…", "ok")
 
-        def set_row(index: int, status: str, tokens: int = 0) -> None:
+        def set_row(index: int, status: str, tokens: int = 0, reason: str = "") -> None:
             rows = [dict(r) for r in self._batch_rows]
-            rows[index]["status"] = status
+            rows[index].update(status=status, reason=reason)
             if tokens:
                 rows[index]["tokens"] = tokens
             self._batch_rows = rows
             self.batchRowsChanged.emit()
 
-        used_names: set[str] = set()
-
         def work() -> tuple[int, list[dict[str, str]]]:
             done_count = 0
             failures: list[dict[str, str]] = []
-            for index, path in enumerate(files):
+            for index, (path, target) in enumerate(zip(files, targets, strict=True)):
+                if self._batch_rows[index]["status"] == "SKIPPED":  # planned skip
+                    continue
                 set_row(index, "PROCESSING")
                 self.batchProgress.emit(index, total, path.name)
                 text, error = document_parser.extract_text(str(path))
@@ -708,15 +729,18 @@ class ConsoleBridge(QObject):
                     continue
                 try:
                     summary = summarizer.summarize(text, summary_type, language=language)
-                    write_summary_txt(
-                        self._batch_output_path(out, path.stem, used_names),
+                    written = write_summary_txt(
+                        target,
                         source_name=path.name,
                         summary=summary,
                         summary_type=summary_type,
-                        replace=True,
+                        replace=False,
                     )
-                    set_row(index, "DONE", max(len(summary) // 4, 1))
-                    done_count += 1
+                    if written:
+                        set_row(index, "DONE", max(len(summary) // 4, 1))
+                        done_count += 1
+                    else:  # another writer created it after the check
+                        set_row(index, "SKIPPED", reason=SKIPPED_APPEARED)
                 except Exception as exc:  # one bad file must not abort the batch
                     set_row(index, "FAILED")
                     failures.append({"name": path.name, "error": str(exc)})

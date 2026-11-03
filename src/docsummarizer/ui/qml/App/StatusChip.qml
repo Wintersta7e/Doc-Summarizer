@@ -2,7 +2,7 @@ import QtQuick
 import App
 
 // Batch status pill: DONE (accent) / PROCESSING (brass, pulsing) / QUEUED (dim) /
-// FAILED (error). Optional trailing meta (e.g. token count).
+// FAILED (error) / SKIPPED (dim). Optional trailing meta (e.g. token count).
 Rectangle {
     id: chip
     property string status: "QUEUED"

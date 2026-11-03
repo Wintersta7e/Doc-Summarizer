@@ -7,6 +7,8 @@ summarizer stands in for the llama-cpp-backed one.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QSignalSpy
@@ -228,7 +230,7 @@ def test_batch_creates_missing_output_dir(qapp, monkeypatch, tmp_path) -> None:
     out = tmp_path / "out_missing"
     bridge.batchProcess(str(src), str(out))
     assert out.is_dir()
-    assert (out / "a_summary.txt").exists()
+    assert (out / "a.txt.detailed.txt").exists()
 
 
 def test_async_load_document_completes_off_thread(qapp, monkeypatch, tmp_path) -> None:
@@ -330,8 +332,9 @@ def test_batch_same_stem_inputs_do_not_overwrite(qapp, monkeypatch, tmp_path) ->
     (src / "report.md").write_text("Hello world two.", encoding="utf-8")
     out = tmp_path / "out"
     bridge.batchProcess(str(src), str(out))
-    produced = sorted(p.name for p in out.glob("*_summary.txt"))
-    assert len(produced) == 2, produced  # both saved, neither overwritten
+    produced = sorted(p.name for p in out.glob("*.detailed.txt"))
+    # both saved, neither overwritten
+    assert produced == ["report.md.detailed.txt", "report.txt.detailed.txt"], produced
 
 
 def test_url_to_path_handles_windows_and_posix_urls() -> None:
@@ -452,8 +455,8 @@ def test_batch_process_summarizes_folder(qapp, monkeypatch, tmp_path) -> None:
     assert done_count == 2
     assert total == 2  # the .png is not a supported document
     assert failures == []
-    assert (out / "a_summary.txt").exists()
-    assert (out / "b_summary.txt").exists()
+    assert (out / "a.txt.detailed.txt").exists()
+    assert (out / "b.md.detailed.txt").exists()
 
 
 def test_batch_process_no_documents_emits_toast(qapp, monkeypatch, tmp_path) -> None:
@@ -465,3 +468,137 @@ def test_batch_process_no_documents_emits_toast(qapp, monkeypatch, tmp_path) -> 
     spy = QSignalSpy(bridge.toast)
     bridge.batchProcess(str(tmp_path), str(out))  # empty folder
     assert spy.count() == 1
+
+
+# --------------------------------------------------------------------------- #
+# Batch: never replace an unchecked file
+# --------------------------------------------------------------------------- #
+_SENTINEL = b"a file the user wrote\n"
+
+
+class _CountingSummarizer(_FakeSummarizer):
+    """Counts plain summaries and runs an optional hook inside each model call."""
+
+    def __init__(self, hook: Callable[[str], None] | None = None) -> None:
+        super().__init__()
+        self.calls = 0
+        self.hook = hook
+
+    def summarize(
+        self,
+        text: str,
+        summary_type: str = SUMMARY_TYPE_DETAILED,
+        language: str = LANGUAGE_AUTO,
+    ) -> str:
+        self.calls += 1
+        if self.hook is not None:
+            self.hook(text)
+        return super().summarize(text, summary_type, language)
+
+
+def _batch_bridge(monkeypatch, fake: _FakeSummarizer) -> ConsoleBridge:
+    monkeypatch.setattr(bridge_mod, "is_model_downloaded", lambda: True)
+    bridge = ConsoleBridge(summarizer_factory=lambda *_: fake, synchronous=True)
+    bridge.checkModel()
+    return bridge
+
+
+def _batch_inputs(folder, *names: str):
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (folder / name).write_text(f"content of {name}", encoding="utf-8")
+    return folder
+
+
+def _rows_by_name(bridge: ConsoleBridge) -> dict[str, dict]:
+    return {row["name"]: row for row in bridge._get_batch_rows()}
+
+
+def test_batch_never_replaces_unchecked_files(qapp, monkeypatch, tmp_path) -> None:
+    """Catches Batch without the existence check: it replaces the planned output."""
+    fake = _CountingSummarizer()
+    bridge = _batch_bridge(monkeypatch, fake)
+    src = _batch_inputs(tmp_path / "in", "a.txt", "b.md", "c.txt")
+    out = tmp_path / "out"
+    out.mkdir()
+    planned = out / "c.txt.detailed.txt"
+    planned.write_bytes(_SENTINEL)
+    user_file = out / "a_summary.txt"
+    user_file.write_bytes(_SENTINEL)
+    mtimes = {p: p.stat().st_mtime_ns for p in (planned, user_file)}
+
+    bridge.batchProcess(str(src), str(out))
+
+    rows = _rows_by_name(bridge)
+    identical = sum(
+        p.read_bytes() == _SENTINEL and p.stat().st_mtime_ns == mtimes[p] for p in mtimes
+    )
+    written = sum((out / n).exists() for n in ("a.txt.detailed.txt", "b.md.detailed.txt"))
+    print(f"written={written} preexisting_identical={identical}")
+    assert rows["c.txt"]["status"] == "SKIPPED"
+    assert rows["c.txt"]["reason"] == "summary exists"
+    assert written == 2
+    assert identical == 2
+    assert fake.calls == 2
+
+
+def test_batch_outputs_are_distinct_and_unscanned(qapp, monkeypatch, tmp_path) -> None:
+    """Catches stem-based names (a.txt and a.md collide) and a rescan of the outputs."""
+    fake = _CountingSummarizer()
+    bridge = _batch_bridge(monkeypatch, fake)
+    src = _batch_inputs(tmp_path / "in", "a.txt", "a.md")
+    out = src / "summaries"
+
+    bridge.batchProcess(str(src), str(out))
+    first = _rows_by_name(bridge)
+    bridge.batchProcess(str(src), str(out))
+    second = _rows_by_name(bridge)
+
+    print(f"rows per run: {len(first)}, {len(second)}")
+    assert sorted(p.name for p in out.iterdir()) == ["a.md.detailed.txt", "a.txt.detailed.txt"]
+    assert len(first) == len(second) == 2
+    assert all(row["status"] == "DONE" for row in first.values())
+    assert all(row["status"] == "SKIPPED" for row in second.values())
+    assert fake.calls == 2
+
+
+def test_batch_output_equal_to_input_is_refused(qapp, monkeypatch, tmp_path) -> None:
+    """Catches Batch without the output-equals-input check: it writes into the input."""
+    fake = _CountingSummarizer()
+    bridge = _batch_bridge(monkeypatch, fake)
+    src = _batch_inputs(tmp_path / "in", "a.txt", "b.md")
+    (src / "sub").mkdir()
+    before = sorted(src.rglob("*"))
+
+    for out in (src, src / "sub" / ".."):
+        spy = QSignalSpy(bridge.toast)
+        bridge.batchProcess(str(src), str(out))
+        assert spy.count() == 1
+        assert spy.at(0)[0].startswith("Choose a different output folder")
+        assert bridge._get_busy() is False
+        assert bridge._get_batch_rows() == []
+
+    assert sorted(src.rglob("*")) == before
+    assert fake.calls == 0
+
+
+@pytest.mark.windows
+def test_batch_two_writers_appeared_during_run(qapp, monkeypatch, tmp_path) -> None:
+    """Catches Batch publishing over a file that appeared after its check."""
+    out = tmp_path / "out"
+    target = out / "b.md.detailed.txt"
+
+    def other_writer(text: str) -> None:
+        if text == "content of b.md":
+            target.write_bytes(_SENTINEL)
+
+    bridge = _batch_bridge(monkeypatch, _CountingSummarizer(other_writer))
+    src = _batch_inputs(tmp_path / "in", "a.txt", "b.md")
+
+    bridge.batchProcess(str(src), str(out))
+
+    row = _rows_by_name(bridge)["b.md"]
+    assert target.read_bytes() == _SENTINEL
+    assert row["status"] == "SKIPPED"
+    assert row["reason"] == "appeared during run"
+    assert sorted(out.glob("*.partial")) == []
