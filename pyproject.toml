@@ -48,7 +48,7 @@ dev = [
     "pytest>=9.0,<10",
     "pytest-cov>=7.0,<8",
     "ruff>=0.15,<0.17",
-    "mypy>=2.1,<3",
+    "mypy>=2.4,<3",
 ]
 gui = [
     # Native Qt/QML desktop UI (the "Abstract Console" redesign). Optional so a
