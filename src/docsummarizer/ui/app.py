@@ -48,7 +48,9 @@ class LocalOnlyNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
 
     Model text can carry ``<img src="http://…">`` or ``![x](http://…)``, and a
     QML ``Text`` fetches either one. Every network request the engine makes
-    passes through a manager this factory created.
+    passes through a manager this factory created. A ``Text`` opens a local-file
+    image itself and never through a manager, so the summary screen escapes
+    Markdown image syntax instead.
     """
 
     def __init__(self) -> None:

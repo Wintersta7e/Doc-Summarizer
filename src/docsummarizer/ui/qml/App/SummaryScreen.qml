@@ -21,6 +21,11 @@ Item {
     function escapeHtml(s) {
         return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
+    // Markdown model output must never load an image: Qt opens a file URL itself,
+    // outside the engine's network access, and a host in it is a network share.
+    function escapeImages(s) {
+        return String(s).replace(/!\[/g, "!\\[");
+    }
     function renderSource() {
         var raw = bridge.extractedText;
         if (raw === "")
@@ -389,7 +394,7 @@ Item {
                     Text {
                         visible: String(screen.summary.lead) !== ""
                         Layout.fillWidth: true
-                        text: screen.summary.lead
+                        text: screen.escapeImages(screen.summary.lead)
                         textFormat: Text.MarkdownText
                         wrapMode: Text.WordWrap
                         color: Theme.ink
@@ -432,7 +437,7 @@ Item {
                                     spacing: 3
                                     Text {
                                         Layout.fillWidth: true
-                                        text: modelData.text
+                                        text: screen.escapeImages(modelData.text)
                                         textFormat: Text.MarkdownText
                                         color: Theme.inkSoft
                                         font.family: Theme.ui
@@ -504,7 +509,7 @@ Item {
                                         delegate: Text {
                                             required property var modelData
                                             Layout.fillWidth: true
-                                            text: modelData.text
+                                            text: screen.escapeImages(modelData.text)
                                             textFormat: Text.MarkdownText
                                             color: Theme.inkSoft
                                             font.family: Theme.body

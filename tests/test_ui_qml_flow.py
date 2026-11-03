@@ -13,10 +13,18 @@ from pathlib import Path
 
 import pytest
 import shiboken6
-from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import (
+    QEventLoop,
+    QMessageLogContext,
+    QObject,
+    QTimer,
+    QtMsgType,
+    QUrl,
+    qInstallMessageHandler,
+)
+from PySide6.QtGui import QGuiApplication, QTextDocument
 from PySide6.QtNetwork import QNetworkReply, QNetworkRequest
-from PySide6.QtQml import QQmlApplicationEngine, QQmlEngine, QQmlExpression
+from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent, QQmlEngine, QQmlExpression
 from PySide6.QtQuick import QQuickItem, QQuickWindow
 
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
@@ -148,13 +156,24 @@ def test_rendered_text_fetches_nothing(
 ) -> None:
     """Rendering model output, document text and file names opens no socket.
 
+    The text renderers no longer issue any request, so an ``Image`` with a remote
+    source, created in the same engine, keeps the guard under test.
+
     Mutation caught: ``create_engine`` building a plain ``QQmlApplicationEngine``
-    (no local-only factory). Every ``Text`` left on ``AutoText`` then GETs the
-    payload's ``<img>``, and every ``MarkdownText`` one its ``![x](...)``, from
-    the loopback server.
+    (no local-only factory). The ``Image`` then GETs its source from the loopback
+    server, as would any ``Text`` left on ``AutoText`` (its ``<img>``) or any
+    ``MarkdownText`` whose image syntax is not escaped (its ``![x](...)``).
     """
     engine, bridge, window = console
     port, hits = loopback
+    component = QQmlComponent(engine)
+    component.setData(
+        f'import QtQuick\nImage {{ source: "http://127.0.0.1:{port}/IMAGEMARK.png" }}'.encode(),
+        QUrl(),
+    )
+    image = component.create()
+    assert isinstance(image, QQuickItem), component.errorString()
+    image.setParentItem(window.contentItem())
     _render_everything(bridge, window, port, lambda: None)
     print(f"requests={len(hits)} {sorted(hits)}")
     assert hits == [], f"rendering fetched {sorted(hits)}"
@@ -259,3 +278,75 @@ def test_no_qml_opens_a_link() -> None:
     print(f"qml files scanned={len(files)} offenders={offenders}")
     assert files, "scanned no QML file"
     assert offenders == []
+
+
+def _local_image_payload(tag: str) -> str:
+    """Text carrying an inline and a reference-style image at a file URL with a host."""
+    base = f"file://example.invalid/share/{tag}"
+    ref = tag.lower()
+    return f"{tag} ![a]({base}-inline.png) ![b][{ref}]\n\n[{ref}]: {base}-ref.png"
+
+
+def test_summary_text_loads_no_local_file_image(
+    console: tuple[QQmlApplicationEngine, ConsoleBridge, QQuickWindow],
+) -> None:
+    """Model output never makes Qt open a ``file://<host>/`` image, inline or by reference.
+
+    Qt opens a Markdown image's file URL itself, outside the engine's network
+    access, and a host in that URL is a network share on Windows. The summary
+    screen escapes image syntax, so the characters show and nothing is opened.
+
+    Mutation caught: rendering the lead, a Detailed point or a Structured section
+    point without ``escapeImages`` - Qt then tries to open that payload's image
+    (the log names its tag) and the ``![`` no longer shows.
+    """
+    _engine, bridge, window = console
+    tags = ("LEADMARK", "POINTMARK", "SECTIONMARK")
+    messages: list[str] = []
+
+    def handler(_mode: QtMsgType, _context: QMessageLogContext, message: str) -> None:
+        messages.append(message)
+
+    shown: dict[str, list[str]] = {tag: [] for tag in tags}
+    bridge._current_file = "local.txt"
+    bridge._extracted_text = "document text"
+    bridge.docChanged.emit()
+    window.setProperty("activeScreen", "summary")
+    previous = qInstallMessageHandler(handler)
+    try:
+        for summary in (
+            StructuredSummary(
+                "detailed",
+                _local_image_payload("LEADMARK"),
+                [SummaryPoint(_local_image_payload("POINTMARK"))],
+                None,
+                "t",
+            ),
+            StructuredSummary(
+                "structured",
+                None,
+                [],
+                {"PURPOSE": [SummaryPoint(_local_image_payload("SECTIONMARK"))]},
+                "t",
+            ),
+        ):
+            bridge.summaryReady.emit(summary_to_variant(summary))
+            window.grabWindow()
+            _spin(500)
+            for item in _items(window):
+                if not item.metaObject().className().startswith("QQuickText"):
+                    continue
+                text = str(item.property("text") or "")
+                for tag in tags:
+                    if tag in text and _text_format(item) == _MARKDOWN:
+                        document = QTextDocument()
+                        document.setMarkdown(text)
+                        shown[tag].append(document.toPlainText())
+    finally:
+        qInstallMessageHandler(previous)
+    opened = sorted({m for m in messages if "example.invalid" in m})
+    print(f"opened={opened} shown={shown}")
+    assert opened == []
+    assert all(shown.values()), f"a payload reached no Markdown renderer: {shown}"
+    hidden = [tag for tag, texts in shown.items() for t in texts if t.count("![") != 2]
+    assert hidden == [], f"image syntax rendered as an image for {hidden}"
