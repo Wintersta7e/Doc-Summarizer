@@ -36,11 +36,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# `runtime` carries the heavy native LLM backend. Split out from the
-# default deps because llama-cpp-python ships wheels only for a narrow
-# matrix; CI installs the package without it (tests stub the Llama
-# import). End users install `docsummarizer[runtime]` via the setup
-# scripts.
+# `runtime` carries the heavy native LLM backend. CI installs the package
+# without it (tests stub the Llama import).
 runtime = [
     "llama-cpp-python>=0.3.31,<0.4",
 ]
