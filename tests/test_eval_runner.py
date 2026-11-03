@@ -548,6 +548,8 @@ def eval_llm(monkeypatch: pytest.MonkeyPatch) -> Any:
         return _shell(fake, n_ctx)
 
     monkeypatch.setattr(run, "build_summarizer", build)
+    monkeypatch.setattr(run, "snapshot_now", _empty_snapshot)
+    monkeypatch.setattr(sys, "path", list(sys.path))
     fake.built = built
     return fake
 
@@ -708,3 +710,241 @@ def test_m12a_rerun_compares_with_the_first_run(monkeypatch: pytest.MonkeyPatch)
     assert m12a["identical"] is False
     assert m12a["first_diff"] == _PROSE.index("early") + 4
     assert m12a["violations"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# The tier CLI
+# --------------------------------------------------------------------------- #
+
+_SENTENCES = {
+    "zh": "村里的面包店每天清晨五点开门。",
+    "de": "Die Fähre fährt jeden Morgen um sechs Uhr über den breiten Fluss. ",
+    "en": "The river ferry leaves the wooden pier at six every morning. ",
+    "fr": "Le bac quitte le ponton en bois chaque matin à six heures. ",
+    "es": "El transbordador sale del muelle de madera cada mañana a las seis. ",
+    "ru": "Паром каждое утро отходит от деревянной пристани в шесть часов. ",
+    "ja": "村のパン屋は毎朝五時に店を開けます。",
+}
+_SMOKE_DOCS = ("zh-lit-s", "zh-mix-s", "de-lit-s", "en-lit-s", "zh-lit-m")
+
+
+def _corpus(tmp_path: Path, ids: tuple[str, ...], long: tuple[str, ...] = ()) -> Path:
+    """An eval dir with project-written documents and their manifest.
+
+    zh texts are long enough to split at ``--n-ctx 2048``; a ``long`` document
+    also splits at ``SPLIT_N_CTX``.
+    """
+    entries = []
+    for doc_id in ids:
+        shape = cases.DOCUMENTS[doc_id]
+        repeats = 160 if doc_id in long else (40 if shape.label == "zh" else 3)
+        text = _SENTENCES[shape.label] * repeats
+        script = shape.script or "Simplified"
+        fields = {"script": script} if shape.label == "zh" else {}
+        entries.append(_manifest_entry(tmp_path, doc_id, text, **fields))
+    _write_manifest(tmp_path, entries)
+    return tmp_path
+
+
+def _gguf(tmp_path: Path) -> Path:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF stand-in")
+    return model
+
+
+def _results(eval_dir: Path) -> list[dict[str, Any]]:
+    files = sorted((eval_dir / "results").iterdir())
+    assert len(files) == 1, files
+    return [json.loads(line) for line in files[0].read_text(encoding="utf-8").splitlines()]
+
+
+def _case_runs(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [line for line in lines if line["kind"] == "case_run"]
+
+
+def test_cli_smoke_tier_writes_a_complete_results_file(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
+    argv = ["--eval-dir", str(eval_dir), "--tier", "smoke", "--model", str(_gguf(tmp_path))]
+    code = run.main([*argv, "--n-ctx", "2048"])
+    out = capsys.readouterr().out
+    print(out)
+    assert code == 0
+
+    files = sorted((eval_dir / "results").iterdir())
+    print(f"results files: {[f.name for f in files]}")
+    assert len(files) == 1
+    assert re.fullmatch(r"\d{8}T\d{6}Z-smoke-[0-9a-f]+\.jsonl", files[0].name)
+    lines = _results(eval_dir)
+    header = lines[0]
+    assert header["kind"] == "header"
+    assert set(run.HEADER_FIELDS) <= set(header), set(run.HEADER_FIELDS) - set(header)
+    assert len(_case_runs(lines)) == 17
+    assert sum(1 for line in lines if line["kind"] == "call") == eval_llm.completions
+    assert header["n_ctx"] == 2048
+    assert header["tier"] == "smoke"
+
+    for column in ("M1", "M2", "M4", "M7", "M12a"):
+        assert column in out
+    assert re.search(r"cases=17 case_runs=17 calls=[1-9]\d* scored_units=\d+", out)
+    assert not (tmp_path / "DocSummarizer").exists()
+    assert list((eval_dir / "appdata").rglob("*.log"))
+
+
+def test_cli_refuses_zero_and_bad_selectors(
+    eval_llm: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
+    model = _gguf(tmp_path)
+    base = ["--eval-dir", str(eval_dir), "--model", str(model), "--n-ctx", "2048"]
+
+    def refused(argv: list[str]) -> str:
+        code = run.main(argv)
+        out = capsys.readouterr().out
+        print(f"{argv[len(base) :]} -> {code}: {out.strip()}")
+        assert code == 2
+        return out
+
+    assert "nope" in refused([*base, "--tier", "smoke", "--case", "nope"])
+    assert "seed 0 only until the seed API lands" in refused(
+        [*base, "--tier", "smoke", "--seeds", "1"]
+    )
+
+    with pytest.raises(SystemExit) as parse_error:
+        run.main([*base, "--tier", "full"])
+    err = capsys.readouterr().err
+    print(f"--tier full -> {parse_error.value.code}: {err.strip()}")
+    assert parse_error.value.code == 2
+    assert all(tier in err for tier in run.RUNNABLE_TIERS)
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    absent = ["--eval-dir", str(empty), "--model", str(model), "--tier", "smoke"]
+    assert "absent" in refused(absent)
+
+    doc = tmp_path / "f.txt"
+    doc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
+    assert "--label" in refused([*base, "--tier", "smoke", "--doc", str(doc)])
+
+    def no_tokens(text: bytes, add_bos: bool = True) -> list[int]:
+        raise RuntimeError("tokenizer unavailable")
+
+    monkeypatch.setattr(eval_llm, "tokenize", no_tokens)
+    assert "calls=0" in refused([*base, "--tier", "smoke"])
+
+
+def test_cli_case_and_doc_restrict_the_run(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = _gguf(tmp_path)
+
+    def selected(name: str, tier: str, ids: tuple[str, ...], *extra: str) -> list[dict[str, Any]]:
+        eval_dir = _corpus(tmp_path / name, ids)
+        argv = ["--eval-dir", str(eval_dir), "--model", str(model), "--tier", tier, *extra]
+        assert run.main([*argv, "--n-ctx", "2048"]) == 0
+        capsys.readouterr()
+        lines = _results(eval_dir)
+        print(f"{extra}: {[line['case'] for line in _case_runs(lines)]}")
+        return lines
+
+    by_doc = _case_runs(selected("doc", "lang", cases.LANGUAGE_SET_IDS, "--case", "de-cred-s"))
+    assert len(by_doc) == 6
+    assert {line["case"] for line in by_doc} == {
+        f"de-cred-s/{t}/auto{suffix}" for t in SUMMARY_TYPES for suffix in ("", "@split")
+    }
+
+    exact = ("--case", "de-cred-s/brief/auto")
+    one = _case_runs(selected("one", "lang", cases.LANGUAGE_SET_IDS, *exact))
+    assert [line["case"] for line in one] == ["de-cred-s/brief/auto"]
+    twin = (*exact, "--case", "de-cred-s/brief/auto@split")
+    both = _case_runs(selected("twin", "lang", cases.LANGUAGE_SET_IDS, *twin))
+    assert [line["case"] for line in both] == [
+        "de-cred-s/brief/auto",
+        "de-cred-s/brief/auto@split",
+    ]
+
+    adhoc = tmp_path / "f.txt"
+    adhoc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
+    sha = hashlib.sha256(adhoc.read_bytes()).hexdigest()
+    lines = selected("adhoc", "smoke", _SMOKE_DOCS, "--doc", str(adhoc), "--label", "de")
+    runs = _case_runs(lines)
+    assert [line["case"] for line in runs] == [
+        f"{sha[:12]}/{t}/auto" for t in (SUMMARY_TYPE_BRIEF, SUMMARY_TYPE_DETAILED)
+    ]
+    expected = hashlib.sha256(f"{sha[:12]}:{sha}\n".encode()).hexdigest()
+    assert lines[0]["corpus_hash"] == expected
+    assert lines[0]["documents"][sha[:12]]["path"] == str(adhoc.resolve())
+
+
+def test_repeat_scopes_to_cold_auto_runs(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only the seed-0 ``auto`` runs that timing reads are repeated.
+
+    Catches repeating the whole tier, so warm, explicit-language and M12a runs
+    are paid for N times.
+    """
+    smoke = cases.TIERS["smoke"]
+    runs = run.expand_runs(smoke, seeds=(0, 1), repeat=3)
+    auto = [c for c in smoke if c.language == "auto" and not c.m12a]
+    seed0_auto = [r for r in runs if r.seed == 0 and r.case in auto]
+    seed1 = [r for r in runs if r.seed == 1]
+    explicit = [r for r in runs if r.case.language != "auto"]
+    m12a = [r for r in runs if r.case.m12a]
+    print(
+        f"total {len(runs)}: seed-0 auto {len(seed0_auto)}, seed-1 auto {len(seed1)}, "
+        f"explicit {len(explicit)}, m12a {len(m12a)}"
+    )
+    assert len(runs) == 47
+    assert (len(seed0_auto), len(seed1), len(explicit), len(m12a)) == (30, 10, 4, 3)
+    assert runs[-3:] == m12a
+    assert all(r.seed == 0 and r.repetition == 0 for r in [*explicit, *m12a])
+    for case in auto:
+        own = [(r.seed, r.repetition) for r in runs if r.case == case]
+        start = next(i for i, r in enumerate(runs) if r.case == case)
+        assert own == [(0, 0), (0, 1), (0, 2), (1, 0)]
+        assert [(r.seed, r.repetition) for r in runs[start : start + 4]] == own
+
+    eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
+    argv = ["--eval-dir", str(eval_dir), "--model", str(_gguf(tmp_path)), "--tier", "smoke"]
+    assert run.main([*argv, "--n-ctx", "2048", "--repeat", "3"]) == 0
+    out = capsys.readouterr().out
+    lines = _results(eval_dir)
+    print(f"case_run lines: {len(_case_runs(lines))}")
+    assert len(_case_runs(lines)) == 37
+    assert lines[0]["repeat"] == 3
+    assert lines[0]["repeat_scope"] == run.REPEAT_SCOPE
+    assert "cases=17 case_runs=37" in out
+
+    with pytest.raises(SystemExit) as parse_error:
+        run.main([*argv, "--repeat", "0"])
+    assert parse_error.value.code == 2
+
+
+def test_lang_tier_runs_the_split_pass(
+    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    eval_dir = _corpus(tmp_path / "eval", cases.LANGUAGE_SET_IDS, long=("de-cred-s",))
+    argv = ["--eval-dir", str(eval_dir), "--model", str(_gguf(tmp_path)), "--tier", "lang"]
+    selection = ["--case", "de-cred-s", "--case", "fr-lit-s"]
+    assert run.main([*argv, *selection, "--n-ctx", "2048"]) == 0
+    out = capsys.readouterr().out
+    print(out)
+    print(f"builds: {eval_llm.built}")
+    assert eval_llm.built == [2048, cases.SPLIT_N_CTX]
+
+    lines = _results(eval_dir)
+    header = lines[0]
+    assert header["split_n_ctx"] == cases.SPLIT_N_CTX
+    split_runs = [line for line in _case_runs(lines) if line["case"].endswith("@split")]
+    assert len(split_runs) == 6
+    assert {line["n_ctx"] for line in split_runs} == {cases.SPLIT_N_CTX}
+    expected = [f"fr-lit-s/{t}/auto@split" for t in SUMMARY_TYPES]
+    assert header["not_split"] == expected
+    for case_id in expected:
+        assert f"not split: {case_id}" in out
+    assert all(line["parts"] > 1 for line in split_runs if line["case"].startswith("de-cred-s"))

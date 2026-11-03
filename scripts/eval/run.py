@@ -8,6 +8,7 @@ the functions that use them, after it has run.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import csv
 import hashlib
@@ -18,10 +19,12 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import IO, TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from docsummarizer.model_manager import StructuredSummary, Summarizer
@@ -734,11 +737,13 @@ def run_cases(
     runs: Sequence[RunSpec],
     texts: Mapping[str, str],
     targets: Mapping[str, Target],
+    on_run: Callable[[CaseRun], None] | None = None,
 ) -> list[CaseRun]:
     """Run each spec in order from a reset model and its seed, capturing every call.
 
     ``texts`` is keyed by document id and ``targets`` by case id. A case flagged
     ``m12a`` is compared with repetition 0 of the same case without the flag.
+    ``on_run`` sees each case run as soon as it is scored.
     """
     capture = summarizer.llm
     if not isinstance(capture, CapturingLlama):
@@ -770,4 +775,437 @@ def run_cases(
         if case.m12a:
             case_run.metrics["M12a"] = _m12a(_first_run_of(case, spec.seed, done), case_run)
         done.append(case_run)
+        if on_run is not None:
+            on_run(case_run)
     return done
+
+
+# --------------------------------------------------------------------------- #
+# The tier CLI and the results file
+# --------------------------------------------------------------------------- #
+
+RUNNABLE_TIERS = ("smoke", "lang")
+REPEAT_SCOPE = "seed-0 auto runs"
+HEADER_FIELDS: tuple[str, ...] = (
+    "kind",
+    "metric_version",
+    "commit",
+    "dirty",
+    "git_error",
+    "gated_hash",
+    "gated_files",
+    "gated_missing_roots",
+    "corpus_hash",
+    "documents",
+    "model_sha256",
+    "model_size",
+    "llama_cpp_version",
+    "lib_dir",
+    "backend",
+    "n_gpu_layers",
+    "threads",
+    "n_ctx",
+    "split_n_ctx",
+    "seeds",
+    "repeat",
+    "repeat_scope",
+    "tier",
+    "cases",
+    "not_split",
+    "machine_id",
+    "utc_start",
+    "utc_end",
+    "load_average",
+    "contention",
+    "peak_rss_bytes",
+)
+
+
+class _RefusedError(Exception):
+    """A selection or input the runner will not measure; main prints it and exits 2."""
+
+
+def _seed_list(text: str) -> tuple[int, ...]:
+    try:
+        seeds = tuple(int(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a comma-separated list of seeds: {text!r}") from None
+    return seeds
+
+
+def _at_least_one(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The runner's command line: one mode, plus the options a tier run reads."""
+    parser = argparse.ArgumentParser(
+        prog="run.py", description="Run evaluation cases against a local corpus."
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--tier", choices=RUNNABLE_TIERS, help="run a tier's cases")
+    parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
+    parser.add_argument("--model", type=Path, help="the GGUF model file")
+    parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
+    parser.add_argument("--n-gpu-layers", type=int, default=0, help="layers to offload")
+    parser.add_argument("--n-ctx", type=int, help="context window (default: the app's)")
+    parser.add_argument("--seeds", type=_seed_list, default=(0,), help="comma-separated")
+    parser.add_argument(
+        "--repeat", type=_at_least_one, default=1, help="repeat each seed-0 auto run N times"
+    )
+    parser.add_argument("--case", action="append", default=[], help="a case id or document id")
+    parser.add_argument("--doc", action="append", type=Path, default=[], help="ad-hoc document")
+    parser.add_argument("--label", action="append", default=[], help="each --doc's language")
+    parser.add_argument("--script", action="append", default=[], help="each zh --doc's script")
+    return parser
+
+
+def expand_runs(cases: Sequence[Case], seeds: Sequence[int], repeat: int) -> list[RunSpec]:
+    """The case runs to make, in order; only seed-0 ``auto`` runs repeat.
+
+    Per case in tier order: at seed 0 an ``auto`` case runs ``repeat`` times
+    back to back and any other case once; at each later seed only an ``auto``
+    case runs, once. The ``m12a`` re-runs go last, at seed 0.
+    """
+    runs: list[RunSpec] = []
+    reruns: list[RunSpec] = []
+    for case in cases:
+        if case.m12a:
+            reruns.append(RunSpec(case, 0))
+            continue
+        auto = case.language == "auto"
+        for seed in seeds:
+            if seed == 0:
+                runs.extend(RunSpec(case, 0, rep) for rep in range(repeat if auto else 1))
+            elif auto:
+                runs.append(RunSpec(case, seed))
+    return runs + reruns
+
+
+def results_path(eval_dir: Path, tier: str, short_sha: str, now: datetime) -> Path:
+    """``<eval-dir>/results/<UTC>-<tier>-<sha>.jsonl``."""
+    return eval_dir / "results" / f"{now:%Y%m%dT%H%M%SZ}-{tier}-{short_sha}.jsonl"
+
+
+def write_line(fh: IO[str], record: Mapping[str, Any]) -> None:
+    """One JSON record per line."""
+    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+@dataclass(frozen=True)
+class Results:
+    """A results file: its header, call lines and case-run lines."""
+
+    header: dict[str, Any]
+    calls: list[dict[str, Any]]
+    case_runs: list[dict[str, Any]]
+
+
+def read_results(path: Path) -> Results:
+    """Read a results file; the header must be its first line."""
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    if not lines or lines[0].get("kind") != "header":
+        raise ValueError(f"{path}: the first line is not a header")
+    calls = [line for line in lines if line.get("kind") == "call"]
+    case_runs = [line for line in lines if line.get("kind") == "case_run"]
+    return Results(lines[0], calls, case_runs)
+
+
+def _share(num: int, den: int) -> str:
+    return f"{num}/{den}"
+
+
+def _table_row(name: str, runs: Sequence[Mapping[str, Any]]) -> str:
+    metrics = [run["metrics"] for run in runs]
+    calls = sum(m["M1"]["calls"] for m in metrics)
+    m1 = _share(calls - sum(m["M1"]["violations"] for m in metrics), calls)
+    m2 = _share(sum(1 for m in metrics if m["M2"]["passed"]), len(metrics))
+    m4 = _share(calls - sum(m["M4"]["violations"] for m in metrics), calls)
+    m7s = [m["M7"] for m in metrics if m["M7"] is not None]
+    m7 = _share(sum(m["tight"] for m in m7s), sum(m["points"] for m in m7s))
+    m12as = [m["M12a"] for m in metrics if m.get("M12a") is not None]
+    m12a = _share(sum(1 for m in m12as if m["identical"]), len(m12as))
+    return f"{name:<28} {len(runs):>5} {m1:>9} {m2:>9} {m4:>9} {m7:>9} {m12a:>7}"
+
+
+def print_table(case_runs: Sequence[Mapping[str, Any]]) -> None:
+    """One row per cell and an aggregate row, read from repetition 0; then the counts."""
+    first = [run for run in case_runs if run.get("repetition", 0) == 0]
+    cells: dict[str, list[Mapping[str, Any]]] = {}
+    for run in first:
+        cells.setdefault("/".join(run["metrics"]["cell"]), []).append(run)
+    print(f"{'cell':<28} {'runs':>5} {'M1':>9} {'M2':>9} {'M4':>9} {'M7':>9} {'M12a':>7}")
+    for name in sorted(cells):
+        print(_table_row(name, cells[name]))
+    print(_table_row("aggregate", first))
+    for run in first:
+        metrics = run["metrics"]
+        for off in metrics["M2"]["off_target"]:
+            where = "result" if off["call"] is None else f"call {off['call']}"
+            print(f"M2 off-target: {run['case']} {where} [{off['got']}]: {off['unit']}")
+        m12a = metrics.get("M12a")
+        if m12a is not None and not m12a["identical"]:
+            print(f"M12a first difference: {run['case']} at char {m12a['first_diff']}")
+        if run.get("error"):
+            print(f"error: {run['case']}: {run['error']}")
+    calls = sum(run["calls"] for run in case_runs)
+    scored = sum(run["metrics"]["M2"]["scored"] for run in case_runs)
+    unique = len({run["case"] for run in case_runs})
+    print(f"cases={unique} case_runs={len(case_runs)} calls={calls} scored_units={scored}")
+
+
+def _select_cases(args: argparse.Namespace) -> list[Case]:
+    from eval import cases
+
+    tier = cases.TIERS[args.tier]
+    selected = list(tier) if not args.doc else []
+    if args.case:
+        chosen: set[str] = set()
+        for selector in args.case:
+            matched = {case.id for case in tier if selector in (case.id, case.doc)}
+            if not matched:
+                raise _RefusedError(f"--case {selector}: no case in tier {args.tier} matches")
+            chosen |= matched
+        selected = [case for case in tier if case.id in chosen]
+    for doc in _adhoc_documents(args):
+        types = cases.TIER_TYPES[args.tier]
+        selected += [cases.Case(doc.id, t, "auto") for t in types]
+        if args.tier == "lang":
+            selected += [cases.Case(doc.id, t, "auto", split=True) for t in types]
+    return selected
+
+
+def _adhoc_documents(args: argparse.Namespace) -> list[ManifestDocument]:
+    if len(args.label) != len(args.doc) or len(args.script) not in (0, len(args.doc)):
+        raise _RefusedError("each --doc needs a --label (and, if any is given, a --script)")
+    scripts = args.script or [None] * len(args.doc)
+    documents = []
+    for path, label, script in zip(args.doc, args.label, scripts, strict=True):
+        try:
+            sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise _RefusedError(f"--doc {path}: {exc}") from exc
+        documents.append(ManifestDocument(sha[:12], path.resolve(), label, script, sha))
+    return documents
+
+
+def _documents_for(args: argparse.Namespace, runs: Sequence[RunSpec]) -> list[ManifestDocument]:
+    adhoc = {doc.id: doc for doc in _adhoc_documents(args)}
+    needed = list(dict.fromkeys(spec.case.doc for spec in runs))
+    corpus = [doc_id for doc_id in needed if doc_id not in adhoc]
+    manifest = load_manifest(args.eval_dir) if corpus else {}
+    lacking = [doc_id for doc_id in corpus if doc_id not in manifest]
+    if lacking:
+        raise _RefusedError(f"manifest lacks: {', '.join(lacking)}")
+    documents = [manifest[doc_id] for doc_id in corpus]
+    verify_documents(documents)
+    return [*documents, *(adhoc[doc_id] for doc_id in needed if doc_id in adhoc)]
+
+
+def _targets(runs: Sequence[RunSpec], documents: Mapping[str, ManifestDocument]) -> dict[str, Any]:
+    from eval import metrics
+
+    targets: dict[str, Any] = {}
+    for spec in runs:
+        doc = documents[spec.case.doc]
+        try:
+            targets[spec.case.id] = metrics.target_for(spec.case.language, doc.label, doc.script)
+        except ValueError as exc:
+            raise _RefusedError(f"{spec.case.id}: {exc}") from exc
+    return targets
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _llama_cpp_install() -> tuple[str | None, str | None]:
+    """The installed llama-cpp-python version and its library dir, without importing it."""
+    import importlib.metadata
+    import importlib.util
+
+    try:
+        version: str | None = importlib.metadata.version("llama-cpp-python")
+    except importlib.metadata.PackageNotFoundError:
+        version = None
+    lib_dir = os.environ.get("LLAMA_CPP_LIB_PATH")
+    if not lib_dir:
+        spec = importlib.util.find_spec("llama_cpp")
+        lib_dir = str(Path(spec.origin).parent) if spec is not None and spec.origin else None
+    return version, lib_dir
+
+
+def _peak_rss_bytes() -> int | None:
+    if sys.platform == "win32":
+        import psutil
+
+        return int(psutil.Process().memory_info().peak_wset)
+    import resource
+
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+
+def _default_n_ctx() -> int:
+    import inspect
+
+    from docsummarizer.model_manager import Summarizer
+
+    return int(inspect.signature(Summarizer.__init__).parameters["n_ctx"].default)
+
+
+def _call_lines(index: int, case_run: CaseRun) -> list[dict[str, Any]]:
+    where = {"run": index, "case": case_run.case, "seed": case_run.seed}
+    where["repetition"] = case_run.repetition
+    return [{"kind": "call", **where, **asdict(call)} for call in case_run.calls]
+
+
+def _case_run_line(index: int, case_run: CaseRun) -> dict[str, Any]:
+    line = {"kind": "case_run", "run": index, **asdict(case_run)}
+    line["calls"] = len(case_run.calls)
+    return line
+
+
+def _run_passes(
+    args: argparse.Namespace,
+    runs: Sequence[RunSpec],
+    texts: Mapping[str, str],
+    targets: Mapping[str, Any],
+    sink: IO[str],
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Run every pass, a split pass on its own model build; stream each case run's lines."""
+    from eval import cases
+
+    passes: list[tuple[int, list[RunSpec]]] = []
+    for spec in runs:
+        n_ctx = cases.SPLIT_N_CTX if spec.case.split else args.n_ctx
+        if passes and passes[-1][0] == n_ctx:
+            passes[-1][1].append(spec)
+        else:
+            passes.append((n_ctx, [spec]))
+    lines: list[dict[str, Any]] = []
+    threads: int | None = None
+
+    def stream(case_run: CaseRun) -> None:
+        line = _case_run_line(len(lines), case_run)
+        for record in [*_call_lines(len(lines), case_run), line]:
+            write_line(sink, record)
+        sink.flush()
+        lines.append(line)
+
+    for n_ctx, specs in passes:
+        summarizer = build_summarizer(
+            args.model, n_ctx=n_ctx, n_threads=args.threads, n_gpu_layers=args.n_gpu_layers
+        )
+        threads = getattr(summarizer, "n_threads", args.threads) if threads is None else threads
+        try:
+            run_cases(summarizer, specs, texts, targets, on_run=stream)
+        finally:
+            summarizer.close()
+    return lines, threads
+
+
+def _run_tier(args: argparse.Namespace) -> int:
+    from eval import cases, metrics
+
+    if tuple(args.seeds) != (0,):
+        raise _RefusedError("--seeds: seed 0 only until the seed API lands")
+    if args.eval_dir is None or args.model is None:
+        raise _RefusedError("a tier run needs --eval-dir and --model")
+    if not args.model.is_file():
+        raise _RefusedError(f"model not found: {args.model}")
+    args.n_ctx = args.n_ctx or _default_n_ctx()
+    runs = expand_runs(_select_cases(args), args.seeds, args.repeat)
+    documents = {doc.id: doc for doc in _documents_for(args, runs)}
+    targets = _targets(runs, documents)
+    texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
+    model_sha = _file_sha256(args.model)
+    git = git_state(_REPO)
+    package = _REPO / "src" / _PACKAGE
+    gated = derive_gated(package)
+    start = datetime.now(timezone.utc)
+    final = results_path(args.eval_dir, args.tier, (git.commit or "unknown")[:12], start)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    partial = final.with_name(final.name + ".partial")
+    with partial.open("w", encoding="utf-8") as sink:
+        lines, threads = _run_passes(args, runs, texts, targets, sink)
+    not_split = [line["case"] for line in lines if "@split" in line["case"] and line["parts"] < 2]
+    for case_id in not_split:
+        print(f"not split: {case_id}")
+    version, lib_dir = _llama_cpp_install()
+    gpu = f"gpu:{Path(lib_dir).name}" if lib_dir else "gpu"
+    header = {
+        "kind": "header",
+        "metric_version": metrics.METRIC_VERSION,
+        "commit": git.commit,
+        "dirty": git.dirty,
+        "git_error": git.error,
+        "gated_hash": gated_hash(package, gated.files),
+        "gated_files": list(gated.files),
+        "gated_missing_roots": list(gated.missing_roots),
+        "corpus_hash": corpus_hash(documents.values()),
+        "documents": {
+            doc.id: {
+                "sha256": doc.sha256,
+                **({"path": str(doc.path)} if doc.id not in cases.DOCUMENTS else {}),
+            }
+            for doc in documents.values()
+        },
+        "model_sha256": model_sha,
+        "model_size": args.model.stat().st_size,
+        "llama_cpp_version": version,
+        "lib_dir": lib_dir,
+        "backend": "cpu" if args.n_gpu_layers == 0 else gpu,
+        "n_gpu_layers": args.n_gpu_layers,
+        "threads": threads,
+        "n_ctx": args.n_ctx,
+        "split_n_ctx": cases.SPLIT_N_CTX if any(s.case.split for s in runs) else None,
+        "seeds": list(args.seeds),
+        "repeat": args.repeat,
+        "repeat_scope": REPEAT_SCOPE,
+        "tier": args.tier,
+        "cases": list(dict.fromkeys(spec.case.id for spec in runs)),
+        "not_split": not_split,
+        "machine_id": machine_id(),
+        "utc_start": start.isoformat(),
+        "utc_end": datetime.now(timezone.utc).isoformat(),
+        "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+        "contention": [
+            {"run": line["run"], "case": line["case"], **line["contention"]} for line in lines
+        ],
+        "peak_rss_bytes": _peak_rss_bytes(),
+    }
+    with final.open("x", encoding="utf-8") as out:
+        write_line(out, header)
+        out.write(partial.read_text(encoding="utf-8"))
+    partial.unlink()
+    print(f"results: {final}")
+    print_table(lines)
+    calls = sum(line["calls"] for line in lines)
+    return 2 if not lines or calls == 0 else 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Parse, bootstrap app data, then run the chosen mode."""
+    args = build_parser().parse_args(argv)
+    if args.eval_dir is not None:
+        app_data = args.eval_dir / "appdata"
+    else:
+        app_data = Path(tempfile.mkdtemp(prefix="docsummarizer-eval-"))
+        print(f"app data: {app_data}")
+    bootstrap(app_data)
+    try:
+        return _run_tier(args)
+    except (_RefusedError, ManifestError) as exc:
+        print(f"refused: {exc}")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
