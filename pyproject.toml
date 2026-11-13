@@ -25,7 +25,7 @@ classifiers = [
 ]
 dependencies = [
     # Document parsing. pypdf <6.10.2 carries ~24 DoS advisories.
-    "pypdf>=6.14,<7",
+    "pypdf>=6.14,<8",
     "python-docx>=1.2,<2",
     "striprtf>=0.0.32",
     "chardet>=7.4,<8",
