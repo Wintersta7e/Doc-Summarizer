@@ -32,9 +32,9 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-# The score of a full run, rounded down; raise it, never lower it. 0 until a
-# full run under the memory limit completes and is measured.
-MUTATION_THRESHOLD = 0
+# The score of a full run, rounded down; raise it, never lower it. Measured
+# 67.8 % (2250 of 3321 caught) over the whole package in 25 minutes.
+MUTATION_THRESHOLD = 67
 _PACKAGE = "src/docsummarizer"
 _WORK_DIR = Path("mutants")
 _STATS = _WORK_DIR / "mutmut-cicd-stats.json"

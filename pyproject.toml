@@ -188,7 +188,7 @@ extend-ignore-names = [
     # 99 hits: an assert compares against the literal the behaviour must
     # produce; a named constant would only restate the expected value.
     "PLR2004",
-    # 30 hits: white-box tests of module-private helpers and bridge state;
+    # 33 hits: white-box tests of module-private helpers and bridge state;
     # making them public would widen the API that later changes rewrite.
     "SLF001",
 ]
@@ -252,7 +252,7 @@ root = "tests"
 # The repository root too: pytest imports the tests as the `tests` package, so
 # one test module can share another's fixture builder.
 extraPaths = [".", "src", "scripts"]
-# 41 hits: white-box tests of module-private helpers and bridge state; making
+# 44 hits: white-box tests of module-private helpers and bridge state; making
 # them public would widen the API that later changes rewrite. src, run.py and
 # scripts stay fully checked.
 reportPrivateUsage = false

@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 from typing import TYPE_CHECKING
 
+import chardet
 import pytest
 
 from docsummarizer.document_parser import (
@@ -18,6 +19,23 @@ from docsummarizer.document_parser import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("detected", [None, "ascii"], ids=["no-guess", "too-narrow"])
+def test_extract_txt_replaces_bytes_the_detected_encoding_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detected: str | None
+) -> None:
+    """Not UTF-8, and the detector's guess (none means UTF-8) cannot read every byte."""
+
+    def detect(_raw: bytes) -> dict[str, str | None]:
+        return {"encoding": detected}
+
+    monkeypatch.setattr(chardet, "detect", detect)
+    target = tmp_path / "latin.txt"
+    _ = target.write_bytes(b"caf\xe9")
+
+    assert extract_text(str(target)) == ("caf�", None)
+    assert analyze_document(str(target))["encoding"] == (detected or "utf-8")
 
 
 def test_extract_unsupported_extension(tmp_path: Path) -> None:

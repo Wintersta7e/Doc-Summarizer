@@ -37,10 +37,22 @@ def test_app_data_dir_darwin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
 def test_app_data_dir_win32(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    # Apart from XDG_DATA_HOME, so the Linux branch cannot give the same answer.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     d = paths.app_data_dir("models")
-    assert d == tmp_path / "DocSummarizer" / "models"
+    assert d == tmp_path / "Local" / "DocSummarizer" / "models"
     assert d.exists()
+
+
+def test_app_data_dir_win32_falls_back_to_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without LOCALAPPDATA, Windows uses `~/AppData/Local/...`."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    d = paths.app_data_dir("models")
+    assert d == tmp_path / "AppData" / "Local" / "DocSummarizer" / "models"
 
 
 def test_app_data_dir_linux_falls_back_to_home(

@@ -25,18 +25,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from PySide6.QtCore import qInstallMessageHandler
 from PySide6.QtGui import QGuiApplication
 from typing_extensions import override
 
 from docsummarizer import cli
-from docsummarizer.settings import save_settings, settings_path
+from docsummarizer.settings import Settings, save_settings, settings_path
 from docsummarizer.ui import app as app_mod
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from types import ModuleType
 
-    from docsummarizer.settings import Settings
+    from PySide6.QtCore import QMessageLogContext, QtMsgType
+
+# What the stand-in application's event loop returns.
+_EXEC_STATUS = 7
 
 _LOG = logging.getLogger(__name__)
 _REPO = Path(__file__).resolve().parents[1]
@@ -276,14 +280,18 @@ def test_smoke_test_fails_on_a_qml_warning(
     _edit(
         app_dir / "Main.qml",
         "Component.onCompleted: Theme.applyMode(win.bridge.appearance)",
-        'Component.onCompleted: { Theme.applyMode(win.bridge.appearance); console.warn("probe") }',
+        "Component.onCompleted: { Theme.applyMode(win.bridge.appearance); "
+        'console.warn("probe one"); console.warn("probe two") }',
     )
 
     assert app_mod.main(["DocSummarizer", "--smoke-test"]) == 1
 
     out, err = capsys.readouterr()
     assert out == ""
-    assert "probe" in err
+    # One line per warning, each led by its category.
+    probes = [line.partition(": ") for line in err.splitlines() if "probe" in line]
+    assert [message for _, _, message in probes] == ["probe one", "probe two"]
+    assert len({category for category, _, _ in probes}) == 1
 
 
 @pytest.mark.usefixtures("qapp")
@@ -297,6 +305,163 @@ def test_smoke_test_fails_without_the_bundled_fonts(
     out, err = capsys.readouterr()
     assert out == ""
     assert "no bundled fonts" in err
+
+
+@pytest.mark.parametrize(
+    ("error", "installed"),
+    [(None, True), (ModuleNotFoundError("no llama_cpp", name="llama_cpp"), False)],
+    ids=["installed", "not-installed"],
+)
+def test_the_runtime_check_tells_an_installed_runtime_from_a_missing_one(
+    monkeypatch: pytest.MonkeyPatch, error: Exception | None, *, installed: bool
+) -> None:
+    _install_runtime(monkeypatch, _Runtime(error))
+
+    assert app_mod._import_model_runtime() is installed
+
+
+@pytest.mark.usefixtures("qapp")
+def test_smoke_test_fails_when_the_settings_do_not_round_trip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reads = iter([Settings(n_threads=2), Settings(n_threads=3)])
+
+    def load_settings() -> Settings:
+        return next(reads)
+
+    monkeypatch.setattr(app_mod, "load_settings", load_settings)
+
+    assert app_mod.main(["DocSummarizer", "--smoke-test"]) == 1
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "settings did not round-trip through" in err
+
+
+def _earlier_handler(_mode: QtMsgType, _context: QMessageLogContext, _message: str) -> None:
+    """A Qt message handler installed before the smoke run."""
+
+
+@pytest.mark.usefixtures("qapp")
+def test_smoke_test_puts_back_the_qt_message_handler_it_replaced(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original = qInstallMessageHandler(_earlier_handler)
+    try:
+        assert app_mod.main(["DocSummarizer", "--smoke-test"]) == 0
+    finally:
+        current = qInstallMessageHandler(original)
+
+    assert current is _earlier_handler
+    assert capsys.readouterr().out == _SMOKE_OK
+
+
+@pytest.mark.usefixtures("qapp")
+def test_the_smoke_run_gives_qt_the_command_line_without_its_own_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[list[str]] = []
+    running = app_mod._application
+
+    def application(args: list[str]) -> QGuiApplication:
+        seen.append(args)
+        return running(args)
+
+    monkeypatch.setattr(app_mod, "_application", application)
+    result = tmp_path / "result.txt"
+    args = ["DocSummarizer", "--smoke-test", "--smoke-result", str(result), "-style", "Basic"]
+
+    assert app_mod.main(args) == 0
+
+    assert seen == [["DocSummarizer", "-style", "Basic"]]
+    assert capsys.readouterr().out == _SMOKE_OK
+
+
+@pytest.mark.usefixtures("qapp")
+def test_the_smoke_run_leaves_the_app_logger_only_a_null_handler(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert app_mod.main(["DocSummarizer", "--smoke-test"]) == 0
+
+    handlers = logging.getLogger("DocSummarizer").handlers
+    assert handlers
+    assert all(type(handler) is logging.NullHandler for handler in handlers)
+    assert capsys.readouterr().out == _SMOKE_OK
+
+
+@pytest.mark.usefixtures("qapp")
+def test_main_reads_sys_argv_when_given_no_command_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["DocSummarizer", "--smoke-test"])
+
+    assert app_mod.main() == 0
+
+    assert capsys.readouterr().out == _SMOKE_OK
+
+
+class _Recorder:
+    """Stands in for a Qt object: records each method called on it, with its arguments."""
+
+    def __init__(self, *args: object) -> None:
+        self.args: tuple[object, ...] = args
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        def method(*args: object) -> None:
+            self.calls.append((name, args))
+
+        return method
+
+    @staticmethod
+    def instance() -> None:
+        """No application is running yet."""
+
+    def exec(self) -> int:
+        self.calls.append(("exec", ()))
+        return _EXEC_STATUS
+
+
+def test_a_new_application_is_named_for_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_mod, "QGuiApplication", _Recorder)
+
+    app = app_mod._application(["DocSummarizer", "-style", "Basic"])
+
+    assert isinstance(app, _Recorder)
+    assert app.args == (["DocSummarizer", "-style", "Basic"],)
+    assert app.calls == [
+        ("setApplicationName", ("DocSummarizer",)),
+        ("setOrganizationName", ("DocSummarizer",)),
+    ]
+
+
+def test_main_opens_the_window_checks_the_model_and_runs_the_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, bridge = _Recorder(), _Recorder()
+    applications: list[list[str]] = []
+    engines: list[object] = []
+    hooked: list[object] = []
+
+    def application(args: list[str]) -> _Recorder:
+        applications.append(args)
+        return app
+
+    def create_engine(application: object) -> tuple[object, _Recorder]:
+        engines.append(application)
+        return object(), bridge
+
+    monkeypatch.setattr(app_mod, "_application", application)
+    monkeypatch.setattr(app_mod, "create_engine", create_engine)
+    monkeypatch.setattr(app_mod, "_install_excepthook", hooked.append)
+
+    assert app_mod.main(["DocSummarizer"]) == _EXEC_STATUS
+
+    assert applications == [["DocSummarizer"]]
+    assert engines == [app]
+    assert hooked == [bridge]
+    assert bridge.calls == [("checkModel", ())]
+    assert app.calls == [("exec", ())]
 
 
 def test_run_py_runs_the_smoke_test_in_a_fresh_process(tmp_path: Path) -> None:
