@@ -12,10 +12,22 @@ Rectangle {
     signal navigate(string name)
 
     readonly property var items: [
-        {"name": "summary", "label": "Summary"},
-        {"name": "extract", "label": "Extract"},
-        {"name": "batch", "label": "Batch"},
-        {"name": "config", "label": "Config"}
+        {
+            "name": "summary",
+            "label": "Summary"
+        },
+        {
+            "name": "extract",
+            "label": "Extract"
+        },
+        {
+            "name": "batch",
+            "label": "Batch"
+        },
+        {
+            "name": "config",
+            "label": "Config"
+        }
     ]
 
     ColumnLayout {

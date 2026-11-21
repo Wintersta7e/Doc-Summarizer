@@ -11,7 +11,7 @@ import App
 Item {
     id: screen
 
-    signal enter()
+    signal enter
 
     property bool shown: true
     property bool started: false
@@ -82,9 +82,7 @@ Item {
 
             Text {
                 Layout.fillWidth: true
-                text: "DocSummarizer runs entirely offline. Before the first summary, the "
-                    + "local language model is downloaded once and cached on this machine. "
-                    + "Nothing leaves your device after this step."
+                text: "DocSummarizer runs entirely offline. Before the first summary, the " + "local language model is downloaded once and cached on this machine. " + "Nothing leaves your device after this step."
                 color: Theme.text
                 font.family: Theme.body
                 font.pixelSize: 15
@@ -163,11 +161,7 @@ Item {
                 id: action
                 Layout.fillWidth: true
                 enabled: !(screen.started && bridge.downloadPercent < 100)
-                text: bridge.downloadPercent >= 100
-                    ? "Enter Console"
-                    : (screen.started
-                        ? "Downloading… " + Math.round(bridge.downloadPercent) + "%"
-                        : "Begin Download")
+                text: bridge.downloadPercent >= 100 ? "Enter Console" : (screen.started ? "Downloading… " + Math.round(bridge.downloadPercent) + "%" : "Begin Download")
                 onClicked: {
                     if (!screen.started) {
                         screen.started = true;

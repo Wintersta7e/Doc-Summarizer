@@ -9,7 +9,13 @@ import App
 Item {
     id: screen
 
-    property var summary: ({"summaryType": "detailed", "lead": "", "points": [], "sections": ({}), "text": ""})
+    property var summary: ({
+            "summaryType": "detailed",
+            "lead": "",
+            "points": [],
+            "sections": ({}),
+            "text": ""
+        })
     property int activePoint: -1
     property string activeSection: ""
     property int hlStart: -1
@@ -624,6 +630,5 @@ Item {
         defaultSuffix: "txt"  // so a name typed without an extension still saves
         nameFilters: ["Text (*.txt)", "Word document (*.docx)"]
         onAccepted: bridge.saveSummary(selectedFile.toString())
-
     }
 }
