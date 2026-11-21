@@ -339,14 +339,15 @@ markers = ["windows: also run by the windows-latest CI job (Windows filesystem s
 [tool.coverage.run]
 source = ["docsummarizer"]
 branch = true
-# ui/app.py launches the Qt event loop and needs a display; it's validated
-# manually (its engine wiring is covered by the QML load test), so it's
-# excluded from the coverage gate.
+# ui/app.py launches the Qt event loop and needs a display; its engine wiring
+# is covered by the QML load tests, its event loop only by the exe boot check.
+# It joins the gate once the application smoke run covers main().
 omit = ["*/ui/app.py"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 60
+# The total; scripts/check.py --per-file-floor holds every file to 80.
+fail_under = 90
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",

@@ -10,6 +10,7 @@ import pytest
 
 from docsummarizer.document_parser import (
     SUPPORTED_EXTENSION_SET,
+    analyze_document,
     extract_text,
     find_documents,
     get_document_info,
@@ -145,3 +146,79 @@ def test_find_documents_in_directory_filters_to_supported(tmp_path: Path) -> Non
 
     found = {p.name for p in find_documents(tmp_path)}
     assert found == {"a.pdf", "b.docx"}
+
+
+def _write_pdf(target: Path, *pages: str) -> None:
+    """Write a minimal PDF whose pages each draw one line of text."""
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(len(pages)))
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode())
+    font = 3 + 2 * len(pages)
+    for i, line in enumerate(pages):
+        stream = f"BT /F1 12 Tf 72 720 Td ({line}) Tj ET".encode()
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 {font} 0 R >> >> /Contents {4 + 2 * i} 0 R >>".encode()
+        )
+        objects.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+    _ = target.write_bytes(bytes(out))
+
+
+def test_extract_pdf_joins_the_text_of_every_page(tmp_path: Path) -> None:
+    target = tmp_path / "doc.pdf"
+    _write_pdf(target, "first page", "second page")
+
+    text, error = extract_text(str(target))
+
+    assert error is None
+    assert text == "first page\n\nsecond page"
+    assert analyze_document(str(target), text)["pages"] == 2
+
+
+def test_a_corrupt_pdf_is_an_error_message_not_a_crash(tmp_path: Path) -> None:
+    target = tmp_path / "broken.pdf"
+    _ = target.write_bytes(b"not a pdf at all")
+
+    text, error = extract_text(str(target))
+
+    assert text == ""
+    assert error is not None
+    assert error.startswith("Error extracting text: ")
+    assert analyze_document(str(target), "")["pages"] is None
+
+
+def test_extract_docx_reads_table_rows(tmp_path: Path) -> None:
+    from docx import Document
+
+    target = tmp_path / "table.docx"
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    for row, cells in zip(table.rows, (("name", "size"), ("report", "")), strict=True):
+        for cell, value in zip(row.cells, cells, strict=True):
+            cell.text = value
+    _ = document.add_table(rows=1, cols=1)  # an empty row adds no line
+    document.save(str(target))
+
+    text, error = extract_text(str(target))
+
+    assert error is None
+    assert text == "name | size\n\nreport"
+
+
+def test_analyze_document_without_a_readable_file_has_no_encoding(tmp_path: Path) -> None:
+    stats = analyze_document(str(tmp_path / "gone.txt"), "")
+
+    assert stats["encoding"] is None

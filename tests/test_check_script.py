@@ -3,9 +3,15 @@
 
 from __future__ import annotations
 
+import json
+from typing import TYPE_CHECKING
+
 import pytest
 
 import check
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 EXPECTED_ORDER = ("format", "lint", "types", "arch", "qml", "test")
 FAILED_STATUS = 3
@@ -57,3 +63,49 @@ def test_an_unknown_step_is_a_usage_error() -> None:
         _ = check.main(["deploy"])
 
     assert exit_info.value.code == USAGE_ERROR
+
+
+def _coverage_report(folder: Path, percents: dict[str, float]) -> Path:
+    """Write a coverage JSON report holding only each file's summary percent."""
+    report = folder / "coverage.json"
+    files = {name: {"summary": {"percent_covered": pct}} for name, pct in percents.items()}
+    _ = report.write_text(json.dumps({"files": files}), encoding="utf-8")
+    return report
+
+
+def test_per_file_floor_names_every_file_below_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file under the floor fails the gate even when the total passes."""
+    report = _coverage_report(tmp_path, {"a.py": 79.9, "b.py": 100.0, "c.py": 12.5})
+
+    assert check.per_file_floor(report) == 1
+    err = capsys.readouterr().err
+    assert "a.py covers 79.9%, below the 80% floor" in err
+    assert "c.py covers 12.5%" in err
+    assert "b.py" not in err
+
+
+def test_per_file_floor_passes_files_at_the_floor(tmp_path: Path) -> None:
+    """Exactly the floor is enough."""
+    report = _coverage_report(tmp_path, {"a.py": check.FILE_FLOOR, "b.py": 95.0})
+
+    assert check.per_file_floor(report) == 0
+
+
+def test_the_test_step_writes_the_report_the_floor_reads() -> None:
+    """The floor runs after pytest, on the JSON report pytest was told to write."""
+    pytest_command, floor_command = check.STEPS["test"]
+
+    assert f"--cov-report=json:{check.COVERAGE_JSON}" in pytest_command
+    assert floor_command[1:] == ("scripts/check.py", "--per-file-floor")
+
+
+def test_the_floor_flag_reads_the_repository_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--per-file-floor`` checks the report in the repository root, not a step."""
+    _ = _coverage_report(tmp_path, {"a.py": 50.0})
+    monkeypatch.setattr(check, "REPO", tmp_path)
+
+    assert check.main(["--per-file-floor"]) == 1
