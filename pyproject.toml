@@ -162,7 +162,7 @@ extend-ignore-names = [
     "cpuCount", "createRequest", "currentFileName", "docChanged", "downloadChanged", "downloadPercent",
     "extractedText", "gpuEnabled", "gpuSupported", "hasDoc", "loadComplete", "loadDocument",
     "loadModel", "modelDownloaded", "modelName", "modelQuant", "modelReady", "modelReadyChanged",
-    "modelSizeGb", "outputLanguage", "outputLanguages", "reloadArmed", "reloadArmedChanged", "reloadModel",
+    "modelSizeGb", "outgoingData", "outputLanguage", "outputLanguages", "reloadArmed", "reloadArmedChanged", "reloadModel",
     "saveSummary", "savedFlash", "setAppearance", "setOutputLanguage", "setSummaryType", "setThreads",
     "settingsChanged", "statusChanged", "statusColor", "statusText", "summaryError", "summaryReady",
     "summaryType", "summaryTypeChanged", "summaryTypes", "toggleGpu", "unloadDocument", "urlToPath",

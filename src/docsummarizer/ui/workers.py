@@ -10,9 +10,10 @@ controller (``self.after(0, ...)``), but with Qt's queued signal/slot delivery.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
 
 from PySide6.QtCore import QObject, QRunnable, Signal
+from typing_extensions import override
 
 from docsummarizer.logger import get_logger
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+@final
 class WorkerSignals(QObject):
     """Result channel for a :class:`Worker` (a QObject so signals are bound)."""
 
@@ -27,6 +29,7 @@ class WorkerSignals(QObject):
     failed = Signal(str)
 
 
+@final
 class Worker(QRunnable):
     """Run ``fn()`` off the UI thread, reporting via signals.
 
@@ -40,6 +43,7 @@ class Worker(QRunnable):
         self._fn = fn
         self.signals = WorkerSignals()
 
+    @override
     def run(self) -> None:
         """Call ``fn`` and emit its result or its error message."""
         try:

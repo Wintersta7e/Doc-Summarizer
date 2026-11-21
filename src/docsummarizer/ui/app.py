@@ -13,12 +13,13 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
 
 from PySide6.QtCore import QIODevice, QObject, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
+from typing_extensions import override
 
 from docsummarizer.logger import log_error, log_startup
 from docsummarizer.ui.bridge import ConsoleBridge
@@ -32,6 +33,7 @@ _MAIN_QML = _QML_DIR / "App" / "Main.qml"
 _LOCAL_SCHEMES = frozenset({"file", "qrc"})
 
 
+@final
 class _LocalOnlyNetworkAccessManager(QNetworkAccessManager):
     """Swaps a non-local request for an empty URL, which fails before any socket opens."""
 
@@ -39,18 +41,21 @@ class _LocalOnlyNetworkAccessManager(QNetworkAccessManager):
         super().__init__(parent)
         self._guard = guard
 
+    @override
     def createRequest(
         self,
         op: QNetworkAccessManager.Operation,
         request: QNetworkRequest,
-        outgoing_data: QIODevice | None = None,
+        /,
+        outgoingData: QIODevice | None = None,
     ) -> QNetworkReply:
         if request.url().scheme() not in _LOCAL_SCHEMES:
             self._guard.count_refusal()
             request = QNetworkRequest(QUrl())
-        return super().createRequest(op, request, outgoing_data)
+        return super().createRequest(op, request, outgoingData)
 
 
+@final
 class LocalOnlyNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
     """Gives the QML engine managers that refuse every URL but ``file:`` and ``qrc:``.
 
@@ -78,11 +83,13 @@ class LocalOnlyNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
         with self._lock:
             self._refused += 1
 
+    @override
     def create(self, parent: QObject) -> QNetworkAccessManager:
         """Return a local-only manager owned by ``parent``."""
         return _LocalOnlyNetworkAccessManager(self, parent)
 
 
+@final
 class _LocalOnlyEngine(QQmlApplicationEngine):
     """A QML engine whose network access is local-only.
 
@@ -107,10 +114,10 @@ def create_engine(app: QGuiApplication) -> tuple[QQmlApplicationEngine, ConsoleB
     """
     engine = _LocalOnlyEngine()
     bridge = ConsoleBridge()
-    register_fonts()  # so QML resolves Cormorant/Chakra/Saira/Share Tech Mono
+    _ = register_fonts()  # so QML resolves Cormorant/Chakra/Saira/Share Tech Mono
     engine.addImportPath(str(_QML_DIR))
     engine.rootContext().setContextProperty("bridge", bridge)
-    app.aboutToQuit.connect(bridge.shutdown)
+    _ = app.aboutToQuit.connect(bridge.shutdown)
     engine.load(QUrl.fromLocalFile(str(_MAIN_QML)))
     if not engine.rootObjects():
         msg = f"Failed to load QML from {_MAIN_QML}"
