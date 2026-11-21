@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import sys
-
 import check
 import pytest
 
@@ -50,15 +48,6 @@ def test_a_failing_step_stops_the_gate_and_exits_non_zero(
 def test_a_missing_tool_fails_its_step() -> None:
     """A tool absent from the environment is a red step, not a crash."""
     assert check.run_command(("no-such-gate-tool",)) == check.EXIT_NOT_FOUND
-
-
-def test_jscpd_must_be_the_pinned_version() -> None:
-    """Any jscpd other than the pinned one is refused; other tools are not version-checked."""
-    error = check.version_error("jscpd", sys.executable)
-
-    assert error is not None
-    assert check.JSCPD_VERSION in error
-    assert check.version_error("ruff", sys.executable) is None
 
 
 def test_an_unknown_step_is_a_usage_error() -> None:

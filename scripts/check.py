@@ -23,7 +23,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
-# jscpd is an npm tool, outside uv.lock: the gate refuses any other version.
+# jscpd is an npm tool, outside uv.lock: npx runs exactly this version.
 JSCPD_VERSION = "5.4.3"
 JSCPD_PATHS = ("src", "scripts", "run.py")
 # The exit status a shell gives a command it cannot find.
@@ -43,7 +43,16 @@ STEPS: dict[str, tuple[Command, ...]] = {
         ("lint-imports",),
         ("deptry", "."),
         ("vulture",),
-        ("jscpd", "--min-lines", "6", "--exit-code", "1", *JSCPD_PATHS),
+        (
+            "npx",
+            "--yes",
+            f"jscpd@{JSCPD_VERSION}",
+            "--min-lines",
+            "6",
+            "--exit-code",
+            "1",
+            *JSCPD_PATHS,
+        ),
     ),
     "qml": ((PYTHON, "scripts/check_qml.py"),),
     "test": (("pytest", "--cov"),),
@@ -58,26 +67,12 @@ def resolve(tool: str) -> str | None:
     return shutil.which(tool, path=sysconfig.get_path("scripts")) or shutil.which(tool)
 
 
-def version_error(tool: str, exe: str) -> str | None:
-    """Return why exe is not the pinned version of tool, or None when it is."""
-    if tool != "jscpd":
-        return None
-    out = subprocess.run([exe, "--version"], capture_output=True, text=True, check=False)
-    found = out.stdout.split()[-1] if out.stdout.split() else "nothing"
-    if found == JSCPD_VERSION:
-        return None
-    return f"jscpd {JSCPD_VERSION} is pinned, found {found}"
-
-
 def run_command(command: Command) -> int:
     """Run command from the repository root and return its exit status."""
     exe = resolve(command[0])
     if exe is None:
         print(f"check.py: {command[0]} is not installed in this environment", file=sys.stderr)
         return EXIT_NOT_FOUND
-    if error := version_error(command[0], exe):
-        print(f"check.py: {error}", file=sys.stderr)
-        return 1
     return subprocess.run([exe, *command[1:]], cwd=REPO, check=False).returncode
 
 
