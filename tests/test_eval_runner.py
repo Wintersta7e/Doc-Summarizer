@@ -7,14 +7,15 @@ package's configuration are checked as data, and the runner against fakes.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
-from argparse import Namespace
 import inspect
 import json
 import os
 import re
 import subprocess
 import sys
+from argparse import Namespace
 from collections import namedtuple
 from pathlib import Path
 from typing import Any
@@ -1572,6 +1573,41 @@ def test_eval_args_defaults_match_the_parser() -> None:
     declared |= vars(run.EvalArgs())
     declared["checks"] = "runstats"
     assert declared == parsed
+
+
+def _field_names(cls: type) -> list[str]:
+    return [f.name for f in dataclasses.fields(cls)]
+
+
+def test_record_types_mirror_the_records_they_store() -> None:
+    """Each results-file record type names its source's fields, in the order a line holds them."""
+    assert list(run.SpanRecord.__annotations__) == _field_names(provenance.SourceSpan)
+    assert list(run.PointLine.__annotations__) == _field_names(model_manager.SummaryPoint)
+    summary = _field_names(model_manager.StructuredSummary)
+    assert list(run.ResultRecord.__annotations__) == [n for n in summary if n != "run_stats"]
+    assert list(run.OffTargetRecord.__annotations__) == _field_names(metrics.OffTarget)
+    assert list(run.M7Score.__annotations__) == [*_field_names(metrics.M7), "hit_rate"]
+    m12a = [*_field_names(metrics.M12a), "violations", "first"]
+    assert list(run.M12aScore.__annotations__) == m12a
+    where = ["kind", "run", "case", "seed", "repetition"]
+    assert list(run.CallLine.__annotations__) == [*where, *_field_names(run.CallRecord)]
+    assert list(run.CaseRunLine.__annotations__) == ["kind", "run", *_field_names(run.CaseRun)]
+
+
+def test_result_record_is_the_summary_without_its_run_stats() -> None:
+    """A result line holds every summary field but its run stats, nested points included."""
+    quote = "Ein Satz."
+    cited = model_manager.SummaryPoint("Ein Punkt.", provenance.SourceSpan(0, 9, quote, 1.0))
+    bare = model_manager.SummaryPoint("Ohne Quelle.")
+    stats = model_manager.RunStats(1, 0, None, None, None, 3, None, 0.5)
+    result = model_manager.StructuredSummary(
+        SUMMARY_TYPE_DETAILED, "Lead.", [cited], {"Kern": [cited, bare]}, quote, stats
+    )
+    expected = dataclasses.asdict(result)
+    del expected["run_stats"]
+    record = run._result_record(result)
+    assert record == expected
+    assert json.dumps(record) == json.dumps(expected)  # and in the same key order
 
 
 def test_docs_name_every_runner_option() -> None:

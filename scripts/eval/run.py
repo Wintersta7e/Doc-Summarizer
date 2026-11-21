@@ -27,10 +27,10 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
+from typing import IO, TYPE_CHECKING, Literal, Protocol, TypedDict, cast, overload
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         RunStats,
         StructuredSummary,
         Summarizer,
+        SummaryPoint,
     )
     from eval.cases import Case
     from eval.metrics import CaseScore, Target
@@ -59,6 +60,232 @@ if TYPE_CHECKING:
         def set_seed(self, seed: int) -> None:
             """Seed the sampler."""
             ...
+
+    class MappedFile(Protocol):
+        """One of a process's mapped files, as ``psutil`` reports it."""
+
+        @property
+        def path(self) -> str:
+            """The mapped file's path."""
+            ...
+
+    class CpuTimes(Protocol):
+        """A process's CPU time, as ``psutil`` reports it."""
+
+        @property
+        def user(self) -> float:
+            """Seconds in user mode."""
+            ...
+
+        @property
+        def system(self) -> float:
+            """Seconds in kernel mode."""
+            ...
+
+    class ProcessLike(Protocol):
+        """The part of ``psutil.Process`` a contention snapshot reads."""
+
+        @property
+        def pid(self) -> int:
+            """The process id."""
+            ...
+
+        def exe(self) -> str:
+            """The executable's path, or an empty string."""
+            ...
+
+        def memory_maps(self) -> Sequence[MappedFile]:
+            """The files the process maps."""
+            ...
+
+        def cpu_times(self) -> CpuTimes:
+            """The CPU time the process has used."""
+            ...
+
+    class PeakMemory(Protocol):
+        """Windows' ``psutil`` memory info, which carries the peak working set."""
+
+        @property
+        def peak_wset(self) -> int:
+            """The peak working set in bytes."""
+            ...
+
+
+# --------------------------------------------------------------------------- #
+# The results file's records: one JSON object per line
+# --------------------------------------------------------------------------- #
+
+
+class SpanRecord(TypedDict):
+    """A cited point's source span."""
+
+    start: int
+    end: int
+    quote: str
+    score: float
+
+
+class PointLine(TypedDict):
+    """One summary point and its citation, if any."""
+
+    text: str
+    citation: SpanRecord | None
+
+
+class ResultRecord(TypedDict):
+    """A returned structured summary, without its run stats."""
+
+    summary_type: str
+    lead: str | None
+    points: list[PointLine]
+    sections: dict[str, list[PointLine]] | None
+    text: str
+
+
+class M1Score(TypedDict):
+    """M1: calls whose content is empty or holds think tags."""
+
+    violations: int
+    calls: int
+    failed_calls: list[int]
+
+
+class OffTargetRecord(TypedDict):
+    """One M2 unit in the wrong language; ``call`` is ``None`` for the result."""
+
+    call: int | None
+    unit: str
+    got: str
+
+
+class M2Score(TypedDict):
+    """M2: units in a language other than the target's."""
+
+    violations: int
+    passed: bool
+    scored: int
+    unparsed_calls: int
+    off_target: list[OffTargetRecord]
+
+
+class M4Score(TypedDict):
+    """M4: calls the token limit cut short."""
+
+    violations: int
+    calls: int
+    truncated_calls: list[int]
+
+
+class M7Score(TypedDict):
+    """M7: how tightly the returned points' citations hold their quotes."""
+
+    points: int
+    cited: int
+    tight: int
+    whole_document: int
+    quotes: int
+    verbatim: int
+    hit_rate: float
+
+
+class M12aScore(TypedDict):
+    """M12a: whether a re-run returned the first run's text."""
+
+    identical: bool
+    first_diff: int | None
+    violations: int
+    first: str
+
+
+class CaseMetrics(TypedDict):
+    """Every score of one case run, and the cell it counts toward."""
+
+    cell: list[str]
+    M1: M1Score
+    M2: M2Score
+    M4: M4Score
+    M7: M7Score | None
+    M12a: M12aScore | None
+
+
+class CallLine(TypedDict):
+    """A ``call`` line: one completion, and the case run it belongs to."""
+
+    kind: str
+    run: int
+    case: str
+    seed: int
+    repetition: int
+    seq: int
+    messages: list[dict[str, str]]
+    kwargs: dict[str, object]
+    stream: bool
+    content: str
+    finish_reason: str | None
+    usage: CompletionUsage | None
+    perf: dict[str, float] | None
+    error: str | None
+
+
+class CaseRunLine(TypedDict):
+    """A ``case_run`` line: one case run's outcome and scores; ``calls`` is its call count."""
+
+    kind: str
+    run: int
+    case: str
+    seed: int
+    repetition: int
+    n_ctx: int
+    parts: int
+    result: ResultRecord | None
+    run_stats: dict[str, object] | None
+    calls: int
+    tokenized: dict[str, int]
+    contention: dict[str, object]
+    contended: bool
+    error: str | None
+    metrics: CaseMetrics
+
+
+class RescoredLine(CaseRunLine):
+    """A rescored ``case_run`` line, with the coverage-only arm's M7 beside its scores."""
+
+    m7_coverage_only: M7Score | None
+
+
+def _object_dict(value: object) -> dict[str, object] | None:
+    """``value`` as a JSON object, or ``None`` when it is not one."""
+    if not isinstance(value, dict):
+        return None
+    return cast("dict[str, object]", value)
+
+
+def _point_line(point: SummaryPoint) -> PointLine:
+    span = point.citation
+    citation: SpanRecord | None = None
+    if span is not None:
+        citation = {"start": span.start, "end": span.end, "quote": span.quote, "score": span.score}
+    return {"text": point.text, "citation": citation}
+
+
+def _result_record(result: StructuredSummary) -> ResultRecord:
+    """The result as its line records it: every field but ``run_stats``."""
+    sections = result.sections
+    return {
+        "summary_type": result.summary_type,
+        "lead": result.lead,
+        "points": [_point_line(point) for point in result.points],
+        "sections": None
+        if sections is None
+        else {name: [_point_line(point) for point in points] for name, points in sections.items()},
+        "text": result.text,
+    }
+
+
+def _record(value: RunStats | Contention) -> dict[str, object]:
+    """A dataclass's fields as a JSON object, recursively."""
+    record: dict[str, object] = asdict(value)
+    return record
 
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -239,28 +466,36 @@ _REQUIRED = ("id", "file", "label", "sha256")
 def _manifest_document(entry: object, corpus: Path) -> ManifestDocument:
     from eval import cases
 
-    if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in _REQUIRED):
+    record = _object_dict(entry) or {}
+    doc_id, file, label, sha256 = (record.get(key) for key in _REQUIRED)
+    if not (
+        isinstance(doc_id, str)
+        and isinstance(file, str)
+        and isinstance(label, str)
+        and isinstance(sha256, str)
+    ):
         msg = f"manifest unreadable: an entry lacks one of {_REQUIRED}"
         raise ManifestError(msg)
-    doc_id = entry["id"]
     shape = cases.DOCUMENTS.get(doc_id)
     if shape is None:
         msg = f"manifest unknown: {doc_id} (ad-hoc documents go through --doc)"
         raise ManifestError(msg)
-    if entry["label"] != shape.label:
-        msg = f"manifest label: {doc_id} ({entry['label']!r}, not {shape.label!r})"
+    if label != shape.label:
+        msg = f"manifest label: {doc_id} ({label!r}, not {shape.label!r})"
         raise ManifestError(msg)
-    script = entry.get("script")
+    script = record.get("script")
     if shape.label == "zh" and (
         script not in _SCRIPTS or (shape.script is not None and script != shape.script)
     ):
         msg = f"manifest script: {doc_id} ({script!r})"
         raise ManifestError(msg)
-    path = (corpus / entry["file"]).resolve()
+    path = (corpus / file).resolve()
     if not path.is_relative_to(corpus.resolve()):
         msg = f"manifest file outside the corpus: {doc_id}"
         raise ManifestError(msg)
-    return ManifestDocument(doc_id, path, entry["label"], script, entry["sha256"])
+    return ManifestDocument(
+        doc_id, path, label, script if isinstance(script, str) else None, sha256
+    )
 
 
 def load_manifest(eval_dir: Path) -> dict[str, ManifestDocument]:
@@ -268,19 +503,19 @@ def load_manifest(eval_dir: Path) -> dict[str, ManifestDocument]:
     corpus = eval_dir / "corpus"
     manifest = corpus / "manifest.json"
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = _object_dict(cast("object", json.loads(manifest.read_text(encoding="utf-8"))))
     except FileNotFoundError:
         msg = f"manifest absent: {manifest}"
         raise ManifestError(msg) from None
     except (OSError, ValueError) as exc:
         msg = f"manifest unreadable: {manifest}: {exc}"
         raise ManifestError(msg) from exc
-    entries = data.get("documents") if isinstance(data, dict) else None
+    entries = data.get("documents") if data is not None else None
     if not isinstance(entries, list):
         msg = f"manifest unreadable: {manifest}: no documents list"
         raise ManifestError(msg)
     documents: dict[str, ManifestDocument] = {}
-    for entry in entries:
+    for entry in cast("list[object]", entries):
         doc = _manifest_document(entry, corpus)
         if doc.id in documents:
             msg = f"manifest duplicate: {doc.id}"
@@ -413,7 +648,9 @@ def parse_host_processes(text: str) -> dict[int, tuple[str, float]]:
 
 
 def take_snapshot(
-    processes: Iterable[Any], own_pid: int, host_processes: Callable[[], str | None] | None
+    processes: Iterable[ProcessLike],
+    own_pid: int,
+    host_processes: Callable[[], str | None] | None,
 ) -> ContentionSnapshot:
     """Record every matching process's CPU time, and the host's when ``host_processes`` is given.
 
@@ -490,8 +727,8 @@ class CallRecord:
     """One completion as the model returned it, before any clean-up."""
 
     seq: int
-    messages: list[dict[str, Any]]
-    kwargs: dict[str, Any]
+    messages: list[dict[str, str]]
+    kwargs: dict[str, object]
     stream: bool
     content: str
     finish_reason: str | None
@@ -525,7 +762,7 @@ class CapturingLlama:
 
     def __getattr__(self, name: str) -> object:
         """Any attribute not wrapped here is the wrapped model's."""
-        return getattr(self._real, name)
+        return cast("object", getattr(self._real, name))
 
     def _perf_since(self, before: object) -> dict[str, float] | None:
         after = self._snapshot() if before is not None else None
@@ -661,14 +898,14 @@ class CaseRun:
     repetition: int
     n_ctx: int
     parts: int
-    result: dict[str, Any] | None
-    run_stats: dict[str, Any] | None
+    result: ResultRecord | None
+    run_stats: dict[str, object] | None
     calls: list[CallRecord]
     tokenized: dict[str, int]
-    contention: dict[str, Any]
+    contention: dict[str, object]
     contended: bool
     error: str | None
-    metrics: dict[str, Any] = field(default_factory=dict)
+    metrics: CaseMetrics
 
 
 def _json_units(content: str) -> list[str] | None:
@@ -683,13 +920,13 @@ def _json_units(content: str) -> list[str] | None:
     return [unit for text in texts for unit in metrics.split_units(text)]
 
 
-def _json_points(parsed: Mapping[str, Any]) -> list[tuple[str, str]]:
+def _json_points(parsed: Mapping[str, object]) -> list[tuple[str, str]]:
     """Every ``(text, quote)`` pair of a parsed call: Detailed points and each section."""
     from docsummarizer.model_manager import read_raw_points
 
     pairs = read_raw_points(parsed.get("points"))
-    sections = parsed.get("sections")
-    if isinstance(sections, dict):
+    sections = _object_dict(parsed.get("sections"))
+    if sections is not None:
         for value in sections.values():
             pairs.extend(read_raw_points(value))
     return pairs
@@ -707,7 +944,7 @@ def _model_quotes(calls: Sequence[CallRecord]) -> dict[str, str]:
     return quotes
 
 
-def _result_points(result: StructuredSummary) -> list[Any]:
+def _result_points(result: StructuredSummary) -> list[SummaryPoint]:
     points = list(result.points)
     for section in (result.sections or {}).values():
         points.extend(section)
@@ -726,7 +963,7 @@ class ScoringInput:
 
 def score_case_run(
     asked: ScoringInput, result: StructuredSummary | None, calls: Sequence[CallRecord]
-) -> dict[str, Any]:
+) -> CaseMetrics:
     """Score one case run: every call's raw content and the returned result.
 
     The one scoring path a run and a rescore share. The rendered ``text`` of a
@@ -742,14 +979,22 @@ def score_case_run(
         for call, json_call in zip(calls, is_json, strict=True)
     ]
     result_units: list[str] = []
-    m7: dict[str, Any] | None = None
+    m7: M7Score | None = None
     if result is not None:
         points = _result_points(result)
         texts = [result.lead or "", *(point.text for point in points)]
         result_units = [unit for t in texts for unit in metrics.split_units(t)]
         if case.summary_type != SUMMARY_TYPE_BRIEF:
             scored = metrics.m7(metrics.point_records(points, _model_quotes(calls)), text)
-            m7 = {**asdict(scored), "hit_rate": scored.hit_rate}
+            m7 = {
+                "points": scored.points,
+                "cited": scored.cited,
+                "tight": scored.tight,
+                "whole_document": scored.whole_document,
+                "quotes": scored.quotes,
+                "verbatim": scored.verbatim,
+                "hit_rate": scored.hit_rate,
+            }
     m1 = [metrics.m1(call.content).passed for call in calls]
     m4 = [metrics.m4(call.finish_reason) for call in calls]
     m2 = metrics.m2(call_units, result_units, target)
@@ -767,7 +1012,9 @@ def score_case_run(
             "passed": m2.passed,
             "scored": m2.scored,
             "unparsed_calls": m2.unparsed_calls,
-            "off_target": [asdict(off) for off in m2.off_target],
+            "off_target": [
+                {"call": off.call, "unit": off.unit, "got": off.got} for off in m2.off_target
+            ],
         },
         "M4": {
             "violations": sum(m4),
@@ -786,16 +1033,23 @@ def _first_run_of(rerun: Case, seed: int, done: Sequence[CaseRun]) -> CaseRun | 
     )
 
 
-def _m12a(first: CaseRun | None, rerun: CaseRun) -> dict[str, Any] | None:
+def _m12a(first: CaseRun | None, rerun: CaseRun) -> M12aScore | None:
     from eval import metrics
 
     if first is None or first.result is None or rerun.result is None:
         return None
     outcome = metrics.m12a(first.result["text"], rerun.result["text"])
-    return {**asdict(outcome), "violations": 0 if outcome.identical else 1, "first": first.case}
+    return {
+        "identical": outcome.identical,
+        "first_diff": outcome.first_diff,
+        "violations": 0 if outcome.identical else 1,
+        "first": first.case,
+    }
 
 
-def _counting_chunks(summarizer: Summarizer, observed: list[int]) -> Callable[..., Any]:
+def _counting_chunks(
+    summarizer: Summarizer, observed: list[int]
+) -> Callable[[str, int, Callable[[str, int], list[tuple[str, int]]]], list[tuple[str, int]]]:
     """``chunks_within``, recording the piece count of each top-level call."""
     original = summarizer.chunks_within
     depth = 0
@@ -824,7 +1078,8 @@ def _run_one(
     capture.reset()
     capture.set_seed(spec.seed)
     observed: list[int] = []
-    summarizer.chunks_within = _counting_chunks(summarizer, observed)  # type: ignore[method-assign]
+    # An instance attribute shadows the method for this run; the del below drops it.
+    vars(summarizer)["chunks_within"] = _counting_chunks(summarizer, observed)
     result: StructuredSummary | None = None
     error: str | None = None
     start = snapshot_now()
@@ -862,24 +1117,23 @@ def run_cases(
     for spec in runs:
         case, text = spec.case, texts[spec.case.doc]
         result, error, parts, contention = _run_one(summarizer, capture, spec, text)
-        result_dict = asdict(result) if result is not None else None
-        stats = result_dict.pop("run_stats", None) if result_dict is not None else None
+        stats = result.run_stats if result is not None else None
+        asked = ScoringInput(case, text, targets[case.id], parts)
         case_run = CaseRun(
             case=case.id,
             seed=spec.seed,
             repetition=spec.repetition,
             n_ctx=summarizer.n_ctx,
             parts=parts,
-            result=result_dict,
-            run_stats=stats,
+            result=_result_record(result) if result is not None else None,
+            run_stats=_record(stats) if stats is not None else None,
             calls=capture.calls,
             tokenized=capture.tokenized,
-            contention={**asdict(contention), "contended": contention.contended},
+            contention={**_record(contention), "contended": contention.contended},
             contended=contention.contended,
             error=error,
+            metrics=score_case_run(asked, result, capture.calls),
         )
-        asked = ScoringInput(case, text, targets[case.id], parts)
-        case_run.metrics = score_case_run(asked, result, case_run.calls)
         if case.m12a:
             case_run.metrics["M12a"] = _m12a(_first_run_of(case, spec.seed, done), case_run)
         done.append(case_run)
@@ -1044,7 +1298,7 @@ def results_path(eval_dir: Path, tier: str, short_sha: str, now: datetime) -> Pa
     return eval_dir / "results" / f"{now:%Y%m%dT%H%M%SZ}-{tier}-{short_sha}.jsonl"
 
 
-def write_line(fh: IO[str], record: Mapping[str, Any]) -> None:
+def write_line(fh: IO[str], record: Mapping[str, object]) -> None:
     """One JSON record per line."""
     _ = fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -1053,43 +1307,57 @@ def write_line(fh: IO[str], record: Mapping[str, Any]) -> None:
 class Results:
     """A results file: its header, call lines and case-run lines."""
 
-    header: dict[str, Any]
-    calls: list[dict[str, Any]]
-    case_runs: list[dict[str, Any]]
+    header: dict[str, object]
+    calls: list[CallLine]
+    case_runs: list[CaseRunLine]
+
+
+def _kind(record: object) -> object:
+    fields = _object_dict(record)
+    return fields.get("kind") if fields is not None else None
 
 
 def read_results(path: Path) -> Results:
-    """Read a results file; the header must be its first line."""
-    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    if not lines or lines[0].get("kind") != "header":
+    """Read a results file; the header must be its first line.
+
+    A ``call`` or ``case_run`` line is taken to hold the fields this runner writes.
+    """
+    lines = [
+        cast("object", json.loads(line))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    kinds = [_kind(line) for line in lines]
+    if not lines or kinds[0] != "header":
         msg = f"{path}: the first line is not a header"
         raise ValueError(msg)
-    calls = [line for line in lines if line.get("kind") == "call"]
-    case_runs = [line for line in lines if line.get("kind") == "case_run"]
-    return Results(lines[0], calls, case_runs)
+    pairs = list(zip(lines, kinds, strict=True))
+    calls = [cast("CallLine", line) for line, kind in pairs if kind == "call"]
+    case_runs = [cast("CaseRunLine", line) for line, kind in pairs if kind == "case_run"]
+    return Results(cast("dict[str, object]", lines[0]), calls, case_runs)
 
 
 def _share(num: int, den: int) -> str:
     return f"{num}/{den}"
 
 
-def _table_row(name: str, runs: Sequence[Mapping[str, Any]]) -> str:
+def _table_row(name: str, runs: Sequence[CaseRunLine]) -> str:
     metrics = [run["metrics"] for run in runs]
     calls = sum(m["M1"]["calls"] for m in metrics)
     m1 = _share(calls - sum(m["M1"]["violations"] for m in metrics), calls)
     m2 = _share(sum(1 for m in metrics if m["M2"]["passed"]), len(metrics))
     m4 = _share(calls - sum(m["M4"]["violations"] for m in metrics), calls)
-    m7s = [m["M7"] for m in metrics if m["M7"] is not None]
+    m7s = [score for m in metrics if (score := m["M7"]) is not None]
     m7 = _share(sum(m["tight"] for m in m7s), sum(m["points"] for m in m7s))
-    m12as = [m["M12a"] for m in metrics if m.get("M12a") is not None]
+    m12as = [rerun for m in metrics if (rerun := m.get("M12a")) is not None]
     m12a = _share(sum(1 for m in m12as if m["identical"]), len(m12as))
     return f"{name:<28} {len(runs):>5} {m1:>9} {m2:>9} {m4:>9} {m7:>9} {m12a:>7}"
 
 
-def print_table(case_runs: Sequence[Mapping[str, Any]]) -> None:
+def print_table(case_runs: Sequence[CaseRunLine]) -> None:
     """One row per cell and an aggregate row, read from repetition 0; then the counts."""
     first = [run for run in case_runs if run.get("repetition", 0) == 0]
-    cells: dict[str, list[Mapping[str, Any]]] = {}
+    cells: dict[str, list[CaseRunLine]] = {}
     for run in first:
         cells.setdefault("/".join(run["metrics"]["cell"]), []).append(run)
     print(f"{'cell':<28} {'runs':>5} {'M1':>9} {'M2':>9} {'M4':>9} {'M7':>9} {'M12a':>7}")
@@ -1139,7 +1407,7 @@ def _adhoc_documents(args: EvalArgs) -> list[ManifestDocument]:
         msg = "each --doc needs a --label (and, if any is given, a --script)"
         raise _RefusedError(msg)
     scripts = args.script or [None] * len(args.doc)
-    documents = []
+    documents: list[ManifestDocument] = []
     for path, label, script in zip(args.doc, args.label, scripts, strict=True):
         try:
             sha = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1166,10 +1434,12 @@ def _documents_for(
     return [*documents, *(adhoc[doc_id] for doc_id in needed if doc_id in adhoc)]
 
 
-def _targets(runs: Sequence[RunSpec], documents: Mapping[str, ManifestDocument]) -> dict[str, Any]:
+def _targets(
+    runs: Sequence[RunSpec], documents: Mapping[str, ManifestDocument]
+) -> dict[str, Target]:
     from eval import metrics
 
-    targets: dict[str, Any] = {}
+    targets: dict[str, Target] = {}
     for spec in runs:
         doc = documents[spec.case.doc]
         try:
@@ -1205,7 +1475,9 @@ def _peak_rss_bytes() -> int | None:
     if sys.platform == "win32":
         import psutil
 
-        return int(psutil.Process().memory_info().peak_wset)
+        # The stubs describe this platform's memory info; Windows' carries peak_wset.
+        memory = cast("PeakMemory", cast("object", psutil.Process().memory_info()))
+        return memory.peak_wset
     import resource
 
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
@@ -1214,19 +1486,53 @@ def _peak_rss_bytes() -> int | None:
 def _default_n_ctx() -> int:
     from docsummarizer.model_manager import Summarizer
 
-    return int(inspect.signature(Summarizer.__init__).parameters["n_ctx"].default)
+    default = cast("object", inspect.signature(Summarizer.__init__).parameters["n_ctx"].default)
+    if not isinstance(default, int):
+        msg = f"Summarizer's n_ctx default is not an int: {default!r}"
+        raise TypeError(msg)
+    return default
 
 
-def _call_lines(index: int, case_run: CaseRun) -> list[dict[str, Any]]:
-    where = {"run": index, "case": case_run.case, "seed": case_run.seed}
-    where["repetition"] = case_run.repetition
-    return [{"kind": "call", **where, **asdict(call)} for call in case_run.calls]
+def _call_lines(index: int, case_run: CaseRun) -> list[CallLine]:
+    return [
+        {
+            "kind": "call",
+            "run": index,
+            "case": case_run.case,
+            "seed": case_run.seed,
+            "repetition": case_run.repetition,
+            "seq": call.seq,
+            "messages": call.messages,
+            "kwargs": call.kwargs,
+            "stream": call.stream,
+            "content": call.content,
+            "finish_reason": call.finish_reason,
+            "usage": call.usage,
+            "perf": call.perf,
+            "error": call.error,
+        }
+        for call in case_run.calls
+    ]
 
 
-def _case_run_line(index: int, case_run: CaseRun) -> dict[str, Any]:
-    line = {"kind": "case_run", "run": index, **asdict(case_run)}
-    line["calls"] = len(case_run.calls)
-    return line
+def _case_run_line(index: int, case_run: CaseRun) -> CaseRunLine:
+    return {
+        "kind": "case_run",
+        "run": index,
+        "case": case_run.case,
+        "seed": case_run.seed,
+        "repetition": case_run.repetition,
+        "n_ctx": case_run.n_ctx,
+        "parts": case_run.parts,
+        "result": case_run.result,
+        "run_stats": case_run.run_stats,
+        "calls": len(case_run.calls),
+        "tokenized": case_run.tokenized,
+        "contention": case_run.contention,
+        "contended": case_run.contended,
+        "error": case_run.error,
+        "metrics": case_run.metrics,
+    }
 
 
 @dataclass(frozen=True)
@@ -1243,9 +1549,9 @@ def _run_passes(
     build: ModelBuild,
     runs: Sequence[RunSpec],
     texts: Mapping[str, str],
-    targets: Mapping[str, Any],
+    targets: Mapping[str, Target],
     sink: IO[str],
-) -> tuple[list[dict[str, Any]], int | None]:
+) -> tuple[list[CaseRunLine], int | None]:
     """Run every pass, a split pass on its own model build; stream each case run's lines."""
     from eval import cases
 
@@ -1256,13 +1562,14 @@ def _run_passes(
             passes[-1][1].append(spec)
         else:
             passes.append((n_ctx, [spec]))
-    lines: list[dict[str, Any]] = []
+    lines: list[CaseRunLine] = []
     threads: int | None = None
 
     def stream(case_run: CaseRun) -> None:
         line = _case_run_line(len(lines), case_run)
-        for record in [*_call_lines(len(lines), case_run), line]:
-            write_line(sink, record)
+        for call in _call_lines(len(lines), case_run):
+            write_line(sink, call)
+        write_line(sink, line)
         sink.flush()
         lines.append(line)
 
@@ -1325,7 +1632,7 @@ def _run_tier(args: EvalArgs) -> int:
         print(f"not split: {case_id}")
     version, lib_dir = _llama_cpp_install()
     gpu = f"gpu:{Path(lib_dir).name}" if lib_dir else "gpu"
-    header = {
+    header: dict[str, object] = {
         "kind": "header",
         "metric_version": metrics.METRIC_VERSION,
         "commit": git.commit,
@@ -1396,7 +1703,7 @@ class ReplayMismatchError(Exception):
 
 
 def _normalized(value: object) -> object:
-    return json.loads(json.dumps(value))
+    return cast("object", json.loads(json.dumps(value)))
 
 
 class ReplayLlama:
@@ -1407,9 +1714,9 @@ class ReplayLlama:
     fall back, and the replay must still report the first difference.
     """
 
-    def __init__(self, calls: Sequence[Mapping[str, Any]], tokenized: Mapping[str, int]) -> None:
+    def __init__(self, calls: Sequence[CallLine], tokenized: Mapping[str, int]) -> None:
         """Replay ``calls`` in order; ``tokenized`` maps a text hash to its token count."""
-        self._calls: list[Mapping[str, Any]] = list(calls)
+        self._calls: list[CallLine] = list(calls)
         self._tokenized: dict[str, int] = dict(tokenized)
         self.consumed: int = 0
         self.mismatch: ReplayMismatchError | None = None
@@ -1510,16 +1817,18 @@ def accept_every_match() -> Generator[None, None, None]:
         provenance.is_verified_match = original
 
 
-def _cited_points(result: Mapping[str, Any]) -> list[tuple[int, Mapping[str, Any]]]:
-    """``(index, point)`` for each cited point: the Detailed points, then each section."""
-    sections = result.get("sections") or {}
-    points = [*(result.get("points") or []), *(p for s in sections.values() for p in s)]
-    return [(i, point) for i, point in enumerate(points) if point.get("citation") is not None]
+def _cited_points(result: ResultRecord) -> list[tuple[int, PointLine, SpanRecord]]:
+    """``(index, point, span)`` for each cited point: the Detailed points, then each section."""
+    sections = result["sections"] or {}
+    points = [*result["points"], *(p for s in sections.values() for p in s)]
+    return [
+        (i, point, span)
+        for i, point in enumerate(points)
+        if (span := point["citation"]) is not None
+    ]
 
 
-def audit_citations(
-    result: Mapping[str, Any], quotes: Mapping[str, str], document: str
-) -> list[str]:
+def audit_citations(result: ResultRecord, quotes: Mapping[str, str], document: str) -> list[str]:
     """Each cited point whose span fails to hold the model's quote or the document's text.
 
     A span fails when it does not verifiably hold the quote, or is not the
@@ -1528,8 +1837,7 @@ def audit_citations(
     from docsummarizer import provenance
 
     failures: list[str] = []
-    for index, point in _cited_points(result):
-        span = point["citation"]
+    for index, point, span in _cited_points(result):
         if not provenance.is_verified_match(quotes.get(point["text"], ""), span["quote"]):
             failures.append(f"point {index}: the span does not hold the quote")
         elif document[span["start"] : span["end"]] != span["quote"]:
@@ -1548,12 +1856,22 @@ def _case_of(case_id: str) -> Case:
     return cases.Case(doc, summary_type, language, split=split, m12a=m12a)
 
 
-def _call_record(line: Mapping[str, Any]) -> CallRecord:
-    return CallRecord(**{f.name: line[f.name] for f in fields(CallRecord)})
+def _call_record(line: CallLine) -> CallRecord:
+    return CallRecord(
+        seq=line["seq"],
+        messages=line["messages"],
+        kwargs=line["kwargs"],
+        stream=line["stream"],
+        content=line["content"],
+        finish_reason=line["finish_reason"],
+        usage=line["usage"],
+        perf=line["perf"],
+        error=line["error"],
+    )
 
 
 def _replay(
-    case: Case, text: str, n_ctx: int, line: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]
+    case: Case, text: str, n_ctx: int, line: CaseRunLine, calls: Sequence[CallLine]
 ) -> tuple[StructuredSummary | None, str | None]:
     """One arm's replay of a case run: its result or the error it raised.
 
@@ -1575,15 +1893,19 @@ def _replay(
     return result, error
 
 
-def _rescore_documents(eval_dir: Path, header: Mapping[str, Any]) -> dict[str, ManifestDocument]:
+def _rescore_documents(eval_dir: Path, header: Mapping[str, object]) -> dict[str, ManifestDocument]:
     manifest = load_manifest(eval_dir)
+    recorded = _object_dict(header.get("documents"))
+    if recorded is None:
+        msg = "the run's header records no documents"
+        raise _RefusedError(msg)
     documents: dict[str, ManifestDocument] = {}
-    for doc_id, recorded in header["documents"].items():
+    for doc_id, entry in recorded.items():
         doc = manifest.get(doc_id)
         if doc is None:
             msg = f"{doc_id}: not in the manifest (ad-hoc runs are not rescored)"
             raise _RefusedError(msg)
-        if doc.sha256 != recorded["sha256"]:
+        if doc.sha256 != (_object_dict(entry) or {}).get("sha256"):
             msg = f"{doc_id}: the manifest's sha256 differs from the run's"
             raise _RefusedError(msg)
         documents[doc_id] = doc
@@ -1591,12 +1913,23 @@ def _rescore_documents(eval_dir: Path, header: Mapping[str, Any]) -> dict[str, M
     return documents
 
 
-def _arm_sums(m7s: Sequence[Mapping[str, Any]]) -> dict[str, int]:
-    keys = ("points", "cited", "tight", "whole_document", "quotes", "verbatim")
-    return {key: sum(m7[key] for m7 in m7s) for key in keys}
+_M7_SUMS: tuple[
+    Literal["points", "cited", "tight", "whole_document", "quotes", "verbatim"], ...
+] = (
+    "points",
+    "cited",
+    "tight",
+    "whole_document",
+    "quotes",
+    "verbatim",
+)
 
 
-def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
+def _arm_sums(m7s: Sequence[M7Score | None]) -> dict[str, int]:
+    return {key: sum(m7[key] for m7 in m7s if m7 is not None) for key in _M7_SUMS}
+
+
+def print_arms(case_runs: Sequence[RescoredLine]) -> None:
     """M7 per cell and aggregate in both arms, and the cited share the strict check costs."""
     scored = [
         run
@@ -1605,7 +1938,7 @@ def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
     ]
     if not scored:
         return
-    cells: dict[str, list[Mapping[str, Any]]] = {}
+    cells: dict[str, list[RescoredLine]] = {}
     for run in scored:
         cells.setdefault("/".join(run["metrics"]["cell"]), []).append(run)
     for scope, runs in [*sorted(cells.items()), ("aggregate", scored)]:
@@ -1627,12 +1960,12 @@ def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _rescore_one(
-    line: Mapping[str, Any],
-    stored: Sequence[Mapping[str, Any]],
+    line: CaseRunLine,
+    stored: Sequence[CallLine],
     doc: ManifestDocument,
     text: str,
     done: Sequence[CaseRun],
-) -> tuple[CaseRun, dict[str, Any] | None]:
+) -> tuple[CaseRun, M7Score | None]:
     """Replay one case run in both arms: the production case run and the coverage-only M7.
 
     A production-arm mismatch raises ``ReplayMismatchError``; a coverage-only one is
@@ -1649,7 +1982,7 @@ def _rescore_one(
     records = [_call_record(call) for call in stored]
     asked = ScoringInput(case, text, target, line["parts"])
     result, error = _replay(case, text, line["n_ctx"], line, stored)
-    coverage_m7: dict[str, Any] | None = None
+    coverage_m7: M7Score | None = None
     try:
         with accept_every_match():
             covered, _ = _replay(case, text, line["n_ctx"], line, stored)
@@ -1657,34 +1990,30 @@ def _rescore_one(
         print(f"coverage-only arm: replay mismatch: {exc} ({case.id})")
     else:
         coverage_m7 = score_case_run(asked, covered, records)["M7"]
-    result_dict = asdict(result) if result is not None else None
-    if result_dict is not None:
-        result_dict.pop("run_stats", None)
     case_run = CaseRun(
         case=case.id,
         seed=line["seed"],
         repetition=line["repetition"],
         n_ctx=line["n_ctx"],
         parts=line["parts"],
-        result=result_dict,
+        result=_result_record(result) if result is not None else None,
         run_stats=line["run_stats"],
         calls=records,
         tokenized=line["tokenized"],
         contention=line["contention"],
         contended=line["contended"],
         error=error,
+        metrics=score_case_run(asked, result, records),
     )
-    case_run.metrics = score_case_run(asked, result, records)
     if case.m12a:
         case_run.metrics["M12a"] = _m12a(_first_run_of(case, case_run.seed, done), case_run)
     return case_run, coverage_m7
 
 
-def _rescore_header(source: Path, header: Mapping[str, Any]) -> dict[str, Any]:
-    """The generating run's header, plus the tree that scored it again."""
+def _rescore_header(source: Path, header: Mapping[str, object], git: GitState) -> dict[str, object]:
+    """The generating run's header, plus the tree (``git``) that scored it again."""
     from eval import metrics
 
-    git = git_state(_REPO)
     package = _REPO / "src" / _PACKAGE
     scored_by = {
         "commit": git.commit,
@@ -1716,12 +2045,12 @@ def rescore(eval_dir: Path, source: Path) -> int:
         raise _RefusedError(msg)
     documents = _rescore_documents(eval_dir, results.header)
     texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
-    calls_of: dict[int, list[dict[str, Any]]] = {}
+    calls_of: dict[int, list[CallLine]] = {}
     for call in results.calls:
         calls_of.setdefault(call["run"], []).append(call)
 
     done: list[CaseRun] = []
-    lines: list[dict[str, Any]] = []
+    lines: list[RescoredLine] = []
     citations = 0
     failures: list[str] = []
     for line in results.case_runs:
@@ -1739,8 +2068,9 @@ def rescore(eval_dir: Path, source: Path) -> int:
             failures += [f"{case_run.case} {failure}" for failure in audit]
         lines.append({**_case_run_line(line["run"], case_run), "m7_coverage_only": coverage_m7})
 
-    header = _rescore_header(source, results.header)
-    commit = header["scored_by"]["commit"] or "unknown"
+    git = git_state(_REPO)
+    header = _rescore_header(source, results.header, git)
+    commit = git.commit or "unknown"
     plain = results_path(eval_dir, str(header["tier"]), commit[:12], datetime.now(UTC))
     final = plain.with_name(f"{plain.stem}-rescore.jsonl")
     final.parent.mkdir(parents=True, exist_ok=True)
@@ -1767,7 +2097,7 @@ def rescore(eval_dir: Path, source: Path) -> int:
 COMPARE_FIELDS = ("machine_id", "backend", "metric_version", "corpus_hash", "seeds", "cases")
 
 
-def _case_scores(case_runs: Sequence[Mapping[str, Any]]) -> list[CaseScore]:
+def _case_scores(case_runs: Sequence[CaseRunLine]) -> list[CaseScore]:
     """A verdict's view of each repetition-0 case run; repetitions exist for timing only."""
     from eval import metrics
 
@@ -1776,10 +2106,17 @@ def _case_scores(case_runs: Sequence[Mapping[str, Any]]) -> list[CaseScore]:
         if line.get("repetition", 0) != 0:
             continue
         scored = line["metrics"]
+        # Every hard metric by name; a name missing here is a KeyError, never a skip.
+        by_name = {
+            "M1": scored.get("M1"),
+            "M2": scored.get("M2"),
+            "M4": scored.get("M4"),
+            "M12a": scored.get("M12a"),
+        }
         hard = {
-            name: int(scored[name]["violations"])
+            name: int(score["violations"])
             for name in metrics.HARD_METRICS
-            if scored.get(name) is not None
+            if (score := by_name[name]) is not None
         }
         m7 = scored.get("M7")
         proportion = {"M7": (int(m7["tight"]), int(m7["points"]))} if m7 is not None else {}
@@ -2053,11 +2390,11 @@ def self_test_language(path: Path) -> int:
         return 2
     for text_line in raw:
         try:
-            row = json.loads(text_line) if text_line.strip() else None
+            row = _object_dict(cast("object", json.loads(text_line))) if text_line.strip() else None
         except ValueError:
             row = None
-        text = row.get("text") if isinstance(row, dict) else None
-        label = row.get("label") if isinstance(row, dict) else None
+        text = row.get("text") if row is not None else None
+        label = row.get("label") if row is not None else None
         if not isinstance(text, str) or not isinstance(label, str) or not text or not label:
             skipped += 1 if text_line.strip() else 0
             continue
