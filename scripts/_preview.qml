@@ -86,6 +86,8 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+        // Inert behind the modal first-run overlay.
+        enabled: !firstRun.holdsFocus
         TopBar {
             Layout.fillWidth: true
             bridge: root.bridge
@@ -141,6 +143,7 @@ Rectangle {
         }
     }
     FirstRunOverlay {
+        id: firstRun
         anchors.fill: parent
         bridge: root.bridge
         shown: root.firstRun

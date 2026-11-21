@@ -8,7 +8,13 @@ reads. A control is a button, text field, combo box, slider or spin box, or a
 each one also enabled is reached by pressing Tab from the first item that
 takes focus. The colour check reads the ``Theme`` singleton and holds each
 text colour to WCAG AA (4.5:1) on every surface the screens draw, and each
-control part (the focus ring) to 3:1.
+control part (the focus ring) to 3:1, and each text drawn on an accent fill
+to the ink made for it.
+
+The production window (``Main.qml``) checks what the preview shell cannot: the
+first-run overlay keeps Tab and Shift+Tab on its own controls and hands focus
+back to its opener, and the empty Summary screen has one Tab stop for opening a
+file.
 
 ``screen_view`` is the fixture keyboard tests build on: one loaded screen per
 screen and theme, torn down after the test.
@@ -23,9 +29,14 @@ import logging
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from PySide6.QtCore import SIGNAL, QEvent, QEventLoop, QObject, Qt, QTimer
+import shiboken6
+from PySide6.QtCore import SIGNAL, QEvent, QEventLoop, QObject, QPointF, Qt, QTimer
 from PySide6.QtGui import QAccessible, QColor, QGuiApplication, QKeyEvent
+from PySide6.QtQml import QJSValue
+from PySide6.QtQuick import QQuickWindow
 
+from docsummarizer.model_manager import get_model_path
+from docsummarizer.ui.app import create_engine
 from render_qml import SCREENS, THEMES, load_preview
 
 if TYPE_CHECKING:
@@ -69,6 +80,10 @@ _TINTS = ("kpRest", "srcPane", "navOnBg")
 _ON_ACCENT = (("inkOnAccent", "accent"), ("inkOnAccent", "accentDeep"))
 # Control parts drawn in a token: the keyboard focus ring.
 _CONTROL_PART_TOKENS = ("accent",)
+# Fills the inkOnAccent text colour is made for.
+_ACCENT_FILLS = ("accent", "accentDeep")
+# Tab presses each way that would leave a one-control overlay if it let go.
+_TRAP_PRESSES = 3
 
 
 @pytest.fixture(scope="session")
@@ -138,9 +153,14 @@ def _controls_under(item: QQuickItem) -> Iterator[QQuickItem]:
         yield from _controls_under(child)
 
 
-def _controls(view: QQuickView) -> list[QQuickItem]:
-    """The visible controls on the view."""
-    return [item for item in _controls_under(view.rootObject()) if item.isVisible()]
+def _controls(view: QQuickWindow) -> list[QQuickItem]:
+    """The visible controls on the window."""
+    return [item for item in _controls_under(view.contentItem()) if item.isVisible()]
+
+
+def _named(view: QQuickWindow, name: str) -> QQuickItem:
+    (control,) = [item for item in _controls(view) if _name(item) == name]
+    return control
 
 
 def _describe(item: QQuickItem) -> str:
@@ -163,19 +183,19 @@ def _role(item: QQuickItem) -> QAccessible.Role:
     return QAccessible.Role.NoRole if accessible is None else accessible.role()
 
 
-def press(view: QQuickView, key: Qt.Key) -> None:
+def press(view: QQuickWindow, key: Qt.Key) -> None:
     """Press and release ``key`` on ``view``, as the keyboard does."""
     for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
         _ = QGuiApplication.sendEvent(view, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
 
 
-def tab_order(view: QQuickView) -> list[QQuickItem]:
+def tab_order(view: QQuickWindow) -> list[QQuickItem]:
     """The items Tab visits, from the first that takes focus round to it again.
 
     Returns:
         Each focused item once, in Tab order; empty when nothing takes focus.
     """
-    root = view.rootObject()
+    root = view.contentItem()
     first = root.nextItemInFocusChain(forward=True)
     if first == root:
         return []
@@ -315,3 +335,137 @@ def test_theme_colours_meet_wcag_aa(theme_name: str) -> None:
         ]
 
     assert failing == []
+
+
+def _items(item: QQuickItem) -> Iterator[QQuickItem]:
+    """``item`` and every item under it.
+
+    Yields:
+        Each item, parents before children.
+    """
+    yield item
+    for child in item.childItems():
+        yield from _items(child)
+
+
+def _fill(item: QQuickItem) -> list[QColor]:
+    """The colours a rectangle fills with: its colour and its gradient stops, if drawn."""
+    if not item.inherits("QQuickRectangle"):
+        return []
+    colours = [cast("QColor", item.property("color"))]
+    gradient = cast("object", item.property("gradient"))
+    if isinstance(gradient, QJSValue) and gradient.isQObject():
+        stops = gradient.toQObject().children()
+        colours += [cast("QColor", stop.property("color")) for stop in stops]
+    return [colour for colour in colours if colour.alpha() > 0]
+
+
+def _centre(item: QQuickItem) -> QPointF:
+    return item.mapToScene(QPointF(item.width() / 2, item.height() / 2))
+
+
+def test_text_on_an_accent_fill_uses_the_ink_made_for_it(screen_view: QQuickView) -> None:
+    theme = _theme(screen_view)
+    accents = {_color(theme, token).rgba() for token in _ACCENT_FILLS}
+    ink = _color(theme, "inkOnAccent").rgba()
+    shown = [item for item in _items(screen_view.contentItem()) if item.isVisible()]
+    fills = [
+        item.mapRectToScene(item.boundingRect())
+        for item in shown
+        if any(colour.rgba() in accents for colour in _fill(item))
+    ]
+    on_accent = [
+        item
+        for item in shown
+        if item.inherits("QQuickText")
+        and item.property("text")
+        and any(fill.contains(_centre(item)) for fill in fills)
+    ]
+    wrong = [
+        f"{item.property('text')!r} in {colour.name()}"
+        for item in on_accent
+        if (colour := cast("QColor", item.property("color"))).rgba() != ink
+    ]
+
+    _LOG.info("text on an accent fill: %s", [item.property("text") for item in on_accent])
+    # The rail's badge sits on an accent fill on every screen.
+    assert on_accent
+    assert wrong == []
+
+
+@contextlib.contextmanager
+def _main_window(qapp: QGuiApplication, *, model: bool) -> Generator[QQuickWindow, None, None]:
+    """The production window with accessibility on, freed on exit.
+
+    Args:
+        qapp: The running application.
+        model: Whether the model file is on disk; without it the first-run
+            overlay opens with the window.
+
+    Yields:
+        The shown window.
+    """
+    QAccessible.setActive(True)
+    if model:
+        _ = get_model_path().write_bytes(b"")  # the app only checks that the file exists
+    engine, bridge = create_engine(qapp)
+    window = engine.rootObjects()[0]
+    assert isinstance(window, QQuickWindow)
+    try:
+        _spin(_SETTLE_MS)
+        yield window
+    finally:
+        # The engine (and its window) goes while the bridge its bindings read is alive.
+        shiboken6.delete(engine)
+        del bridge
+        _ = gc.collect()
+        _spin(0)
+        QAccessible.setActive(False)
+
+
+def _focus_name(view: QQuickWindow) -> str | None:
+    # The stubs promise an item; a window with nothing focused has none.
+    focused = cast("QQuickItem | None", view.activeFocusItem())
+    return None if focused is None else _name(focused)
+
+
+def test_the_first_run_overlay_keeps_tab_and_shift_tab_on_its_controls(
+    qapp: QGuiApplication,
+) -> None:
+    with _main_window(qapp, model=False) as window:
+        opened_on = _focus_name(window)
+        visited: list[str | None] = []
+        for key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            for _ in range(_TRAP_PRESSES):
+                press(window, key)
+                visited.append(_focus_name(window))
+
+    assert opened_on == "Begin Download"
+    assert visited == ["Begin Download"] * (2 * _TRAP_PRESSES)
+
+
+def test_closing_the_first_run_overlay_returns_focus_to_its_opener(qapp: QGuiApplication) -> None:
+    with _main_window(qapp, model=True) as window:
+        assert window.setProperty("activeScreen", "config")
+        opener = _named(window, "Re-initialize")
+        opener.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+
+        press(window, Qt.Key.Key_Space)
+        opened_on = _focus_name(window)
+        # What the overlay's Enter Console button does.
+        reopen_requested = False
+        assert window.setProperty("forceFirstRun", reopen_requested)
+        closed_on = window.activeFocusItem()
+
+        assert opened_on == "Begin Download"
+        assert closed_on == opener
+
+
+def test_the_empty_summary_screen_has_one_tab_stop_to_open_a_file(qapp: QGuiApplication) -> None:
+    with _main_window(qapp, model=True) as window:
+        drop_zone = _named(window, "Open a document")
+        order = [_name(item) for item in tab_order(window)]
+
+        assert "Select File" in order
+        assert "Open a document" not in order
+        assert _role(drop_zone) == QAccessible.Role.Button

@@ -20,6 +20,30 @@ Item {
     property bool shown: true
     property bool started: false
     property string statusLine: "Awaiting initialization."
+    // True while the overlay is modal: the shell behind binds `enabled` to its
+    // opposite, so Tab and Shift+Tab reach only the overlay's controls.
+    property bool holdsFocus: false
+    // The item that had focus when the overlay opened; it gets focus back.
+    property Item opener: null
+
+    function holdFocus() {
+        screen.opener = Window.activeFocusItem;
+        screen.holdsFocus = true;
+        action.forceActiveFocus(Qt.TabFocusReason);
+    }
+
+    function releaseFocus() {
+        screen.holdsFocus = false;
+        if (screen.opener)
+            screen.opener.forceActiveFocus(Qt.TabFocusReason);
+        screen.opener = null;
+    }
+
+    onShownChanged: screen.shown ? screen.holdFocus() : screen.releaseFocus()
+    Component.onCompleted: {
+        if (screen.shown)
+            screen.holdFocus();
+    }
 
     visible: screen.shown && opacity > 0
     opacity: screen.shown ? 1 : 0

@@ -189,6 +189,8 @@ Item {
             ClickArea {
                 anchors.fill: parent
                 name: "Open a document"
+                // Select File is this action's Tab stop: one action, one stop.
+                activeFocusOnTab: false
                 onActivated: openDialog.open()
             }
         }

@@ -105,6 +105,8 @@ ApplicationWindow {
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+        // Inert behind the modal first-run overlay.
+        enabled: !firstRun.holdsFocus
 
         TopBar {
             Layout.fillWidth: true
@@ -159,6 +161,7 @@ ApplicationWindow {
 
     // One-time model download, shown on first run or when re-initialized.
     FirstRunOverlay {
+        id: firstRun
         anchors.fill: parent
         bridge: win.bridge
         shown: !win.bridge.modelDownloaded || win.forceFirstRun
