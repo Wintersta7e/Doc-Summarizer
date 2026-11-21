@@ -11,7 +11,17 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict, cast, final, overload
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    NoReturn,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    cast,
+    final,
+    overload,
+)
 
 from huggingface_hub import hf_hub_download
 from typing_extensions import override
@@ -775,7 +785,7 @@ def get_model_path(model_config: ModelConfig = DEFAULT_MODEL) -> Path:
     return get_models_directory() / model_config.filename
 
 
-def _build_progress_tqdm(callback: Callable[[float, str], None]) -> "type[tqdm[object]]":
+def _build_progress_tqdm(callback: Callable[[float, str], None]) -> "type[tqdm[NoReturn]]":
     """Build a tqdm subclass that fires `callback` on each whole-MB step.
 
     huggingface_hub instantiates this for `hf_hub_download`. tqdm calls
@@ -786,7 +796,9 @@ def _build_progress_tqdm(callback: Callable[[float, str], None]) -> "type[tqdm[o
     from tqdm.auto import tqdm
 
     # tqdm is generic only in its type stubs; at runtime it is not subscriptable.
-    base = cast("type[tqdm[object]]", tqdm)
+    # NoReturn: the stubs' type for a bar built without an iterable, as
+    # huggingface_hub builds it.
+    base = cast("type[tqdm[NoReturn]]", tqdm)
 
     class _ProgressTqdm(base):
         _last_reported_mb: int = -1
