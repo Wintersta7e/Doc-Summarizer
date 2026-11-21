@@ -19,7 +19,6 @@ import types
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-import docx
 import pytest
 import shiboken6
 from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl, SignalInstance
@@ -143,7 +142,9 @@ def _write_pdf(path: Path) -> None:
 
 
 def _write_docx(path: Path) -> None:
-    document = docx.Document()
+    from docx import Document
+
+    document = Document()
     _ = document.add_paragraph(_DOCUMENT)
     document.save(str(path))
 
@@ -351,7 +352,9 @@ def _check_exports(app: _App, tmp_path: Path, source: Path, summary: dict[str, o
     assert written.endswith(text)
     word = tmp_path / f"out-{summary_type}.docx"
     _save(app, word)
-    paragraphs = [paragraph.text for paragraph in docx.Document(str(word)).paragraphs]
+    from docx import Document
+
+    paragraphs = [paragraph.text for paragraph in Document(str(word)).paragraphs]
     assert paragraphs == [f"Summary: {source.name}", text]
 
 
