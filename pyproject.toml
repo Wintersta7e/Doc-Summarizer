@@ -57,6 +57,7 @@ runtime = [
 # Python 3.11, the lowest supported minor.
 dev = [
     "pytest==9.2.0",
+    "hypothesis==6.170.17",
     "pytest-cov==7.1.0",
     "pytest-randomly==5.1.0",
     "pytest-timeout==2.4.0",
@@ -185,7 +186,7 @@ extend-ignore-names = [
     # 99 hits: an assert compares against the literal the behaviour must
     # produce; a named constant would only restate the expected value.
     "PLR2004",
-    # 26 hits: white-box tests of module-private helpers and bridge state;
+    # 30 hits: white-box tests of module-private helpers and bridge state;
     # making them public would widen the API that later changes rewrite.
     "SLF001",
 ]
@@ -243,7 +244,10 @@ reportUnnecessaryTypeIgnoreComment = true
 
 [[tool.basedpyright.executionEnvironments]]
 root = "tests"
-# 30 hits: white-box tests of module-private helpers and bridge state; making
+# The repository root too: pytest imports the tests as the `tests` package, so
+# one test module can share another's fixture builder.
+extraPaths = [".", "src", "scripts"]
+# 41 hits: white-box tests of module-private helpers and bridge state; making
 # them public would widen the API that later changes rewrite. src, run.py and
 # scripts stay fully checked.
 reportPrivateUsage = false

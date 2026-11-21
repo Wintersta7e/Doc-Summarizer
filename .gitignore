@@ -12,6 +12,7 @@ __pycache__/
 
 # Tooling caches & coverage
 .pytest_cache/
+.hypothesis/
 .mypy_cache/
 .ruff_cache/
 .coverage
