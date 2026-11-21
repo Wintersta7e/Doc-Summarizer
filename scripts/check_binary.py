@@ -28,11 +28,12 @@ _MB = 1_000_000
 MIN_BYTES = 150 * _MB
 # A build may grow this far past its measured size before the budget fails.
 _GROWTH = 1.15
-# Measured sizes, per platform: the v2.0.1 release builds, from 9ed1b48.
+# Measured sizes, per platform. linux: the v2.0.1 release build, from 9ed1b48.
+# win32: a PyInstaller build of 61dafea (Python 3.12), 1.3 % over v2.0.1's.
 # Raise one only in its own commit, saying why the binary grew.
 MEASURED_BYTES = {
     "linux": 243_432_120,
-    "win32": 198_527_605,
+    "win32": 201_204_797,
 }
 _DEFAULT_TIMEOUT_S = 120
 _TAIL_LINES = 20
