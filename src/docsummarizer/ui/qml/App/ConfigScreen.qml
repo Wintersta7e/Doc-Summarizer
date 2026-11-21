@@ -214,7 +214,8 @@ Item {
                                     anchors.fill: parent
                                     enabled: bridge.gpuSupported
                                     cursorShape: bridge.gpuSupported ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: bridge.toggleGpu(!bridge.gpuEnabled)
+                                    onClicked: bridge.toggleGpu()
+
                                 }
                             }
                         }

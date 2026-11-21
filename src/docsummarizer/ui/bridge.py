@@ -18,7 +18,7 @@ import re
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from PySide6.QtCore import Property, QMutex, QObject, QThreadPool, QUrl, Signal, Slot
 
@@ -31,7 +31,7 @@ from docsummarizer.io_helpers import (
     write_summary_docx,
     write_summary_txt,
 )
-from docsummarizer.logger import log_debug, log_error, log_info
+from docsummarizer.logger import get_logger, log_debug, log_error, log_info
 from docsummarizer.model_manager import (
     DEFAULT_MODEL,
     OUTPUT_LANGUAGES,
@@ -40,6 +40,7 @@ from docsummarizer.model_manager import (
     StructuredSummary,
     SummarizationCancelledError,
     Summarizer,
+    SummaryPoint,
     download_model,
     get_model_path,
     gpu_offload_supported,
@@ -53,6 +54,8 @@ from docsummarizer.ui.workers import Worker
 _DEFAULT_CONTEXT = 8192
 
 SummarizerFactory = Callable[[Path, "int | None", int], Summarizer]
+
+_T = TypeVar("_T")
 
 
 def _quant_label(filename: str) -> str:
@@ -68,10 +71,9 @@ _DRIVE_LETTER_RE = re.compile(r"^/([A-Za-z]:)")
 
 
 def _url_to_path(url: str) -> str:
-    """Convert a QML ``file://`` URL — or an already-local path — to a usable
-    local filesystem path, cross-platform.
+    """Convert a QML ``file://`` URL, or an already-local path, to a local path.
 
-    A QML ``FileDialog`` returns ``file:///C:/x`` on Windows and
+    Cross-platform. A QML ``FileDialog`` returns ``file:///C:/x`` on Windows and
     ``file:///home/x`` on POSIX. Qt only strips the leading slash before a
     Windows drive letter on Windows builds, so normalise that ourselves —
     otherwise ``/C:/x`` reaches the parser and the open silently fails.
@@ -81,7 +83,7 @@ def _url_to_path(url: str) -> str:
     return url
 
 
-def _point_to_variant(point: Any) -> dict[str, Any]:
+def _point_to_variant(point: SummaryPoint) -> dict[str, Any]:
     """Marshal a SummaryPoint (+ optional citation) to a QML-friendly dict."""
     citation = point.citation
     return {
@@ -167,6 +169,7 @@ class ConsoleBridge(QObject):
         synchronous: bool = False,
         parent: QObject | None = None,
     ) -> None:
+        """Load the settings; ``synchronous`` runs every operation inline (tests)."""
         super().__init__(parent)
         self._settings: Settings = load_settings()
         self._summarizer: Summarizer | None = None
@@ -197,7 +200,7 @@ class ConsoleBridge(QObject):
         self.modelReadyChanged.connect(self.docChanged)
 
     # -- threading seam ----------------------------------------------------- #
-    def _run(self, work: Callable[[], Any], on_done: Callable[[Any], None]) -> None:
+    def _run(self, work: Callable[[], _T], on_done: Callable[[_T], None]) -> None:
         """Run ``work`` off-thread (or inline in synchronous/test mode).
 
         Logs the operation's start, completion (with duration), and failure —
@@ -213,10 +216,10 @@ class ConsoleBridge(QObject):
         self._active_workers.add(worker)  # keep alive until run() finishes
         log_debug(f"{op}: started")
 
-        def on_success(result: Any) -> None:
+        def on_success(result: object) -> None:
             self._active_workers.discard(worker)
             log_info(f"{op}: done in {time.monotonic() - started:.2f}s")
-            on_done(result)
+            on_done(cast("_T", result))  # the signal carries work()'s own result
 
         def on_failure(message: str) -> None:
             self._active_workers.discard(worker)
@@ -368,9 +371,9 @@ class ConsoleBridge(QObject):
     batchRows = Property(list, _get_batch_rows, notify=batchRowsChanged)
 
     # -- internal state setters (emit on change) --------------------------- #
-    def _set_busy(self, value: bool) -> None:
-        if self._busy != value:
-            self._busy = value
+    def _set_busy(self, *, busy: bool) -> None:
+        if self._busy != busy:
+            self._busy = busy
             self.busyChanged.emit()
 
     def _set_status(self, text: str, color: str = "ok") -> None:
@@ -380,7 +383,7 @@ class ConsoleBridge(QObject):
 
     def _finish(self, status: str, color: str = "ok") -> None:
         """Clear the busy flag and publish a final status (operation done)."""
-        self._set_busy(False)
+        self._set_busy(busy=False)
         self._set_status(status, color)
 
     def _get_summarizer(self) -> Summarizer | None:
@@ -408,6 +411,7 @@ class ConsoleBridge(QObject):
     # -- model lifecycle ---------------------------------------------------- #
     @Slot()
     def checkModel(self) -> None:
+        """Publish whether the model is downloaded, and load it when it is."""
         if is_model_downloaded():
             self._set_status(f"{DEFAULT_MODEL.name} ready", "ok")
             self.loadModel()
@@ -422,7 +426,7 @@ class ConsoleBridge(QObject):
         coexist (avoids VRAM OOM on reload); ``emit_complete`` fires
         ``loadComplete`` for the initial load.
         """
-        self._set_busy(True)
+        self._set_busy(busy=True)
         self._set_status(status, "ok")
         n_threads = self._settings.n_threads
         n_gpu = self._settings.n_gpu_layers
@@ -433,22 +437,27 @@ class ConsoleBridge(QObject):
         def work() -> Summarizer:
             return self._factory(path, n_threads, n_gpu)
 
-        def done(summarizer: Any) -> None:
+        def done(summarizer: Summarizer) -> None:
             self._set_summarizer(summarizer)
             self._finish("Ready")
             if emit_complete:
-                self.loadComplete.emit(True, "")
+                self._emit_load_complete(ok=True)
 
         self._run(work, done)
 
+    def _emit_load_complete(self, *, ok: bool, error: str = "") -> None:
+        self.loadComplete.emit(ok, error)
+
     @Slot()
     def loadModel(self) -> None:
+        """Load the downloaded model off-thread, unless busy."""
         if self._busy or not is_model_downloaded():
             return
         self._build_summarizer_async("Loading model…", free_old=False, emit_complete=True)
 
     @Slot()
     def reloadModel(self) -> None:
+        """Persist the settings and rebuild the model with them, once armed."""
         if not self._reload_armed or self._busy:
             return
         save_settings(self._settings)
@@ -458,6 +467,7 @@ class ConsoleBridge(QObject):
 
     @Slot()
     def beginDownload(self) -> None:
+        """Download the model off-thread, reporting progress, then load it."""
         if self._downloading:
             return
         self._downloading = True
@@ -473,7 +483,7 @@ class ConsoleBridge(QObject):
         def work() -> tuple[Path, str | None]:
             return download_model(progress_callback=on_progress)
 
-        def done(result: Any) -> None:
+        def done(result: tuple[Path, str | None]) -> None:
             _path, error = result
             self._downloading = False
             self.downloadChanged.emit()
@@ -495,20 +505,21 @@ class ConsoleBridge(QObject):
 
     @Slot(str)
     def loadDocument(self, file_path: str) -> None:
+        """Extract the text of the document at ``file_path`` (a URL or a path)."""
         if self._busy:
             return
         path = _url_to_path(file_path)
         self._current_file = Path(path).name
         self._extracted_text = ""
         self._last_summary = None
-        self._set_busy(True)
+        self._set_busy(busy=True)
         self._set_status("Extracting text…", "ok")
         self.docChanged.emit()
 
         def work() -> tuple[str, str | None]:
             return document_parser.extract_text(path)
 
-        def done(result: Any) -> None:
+        def done(result: tuple[str, str | None]) -> None:
             text, error = result
             if error:
                 self._extracted_text = ""
@@ -522,6 +533,7 @@ class ConsoleBridge(QObject):
 
     @Slot()
     def unloadDocument(self) -> None:
+        """Forget the current document, its text and its summary."""
         self._current_file = ""
         self._extracted_text = ""
         self._last_summary = None
@@ -529,6 +541,7 @@ class ConsoleBridge(QObject):
 
     @Slot(str)
     def setSummaryType(self, summary_type: str) -> None:
+        """Switch the summary type and re-summarize a loaded document."""
         # Ignore type changes mid-generation: summarize() would no-op on the busy
         # guard, leaving the label and the shown summary out of sync.
         if self._busy:
@@ -541,6 +554,7 @@ class ConsoleBridge(QObject):
 
     @Slot()
     def summarize(self) -> None:
+        """Summarize the extracted text off-thread with the current settings."""
         summarizer = self._get_summarizer()
         if summarizer is None or not self._extracted_text or self._busy:
             return
@@ -548,7 +562,7 @@ class ConsoleBridge(QObject):
         summary_type = self._summary_type
         language = self._settings.output_language
         self._cancel_requested = False
-        self._set_busy(True)
+        self._set_busy(busy=True)
         self._set_status("Generating summary…", "ok")
 
         def work() -> StructuredSummary | None:
@@ -562,7 +576,7 @@ class ConsoleBridge(QObject):
             except SummarizationCancelledError:
                 return None
 
-        def done(summary: Any) -> None:
+        def done(summary: StructuredSummary | None) -> None:
             if summary is None:  # cancelled cleanly between chunks
                 self._finish("Stopped", "warn")
                 return
@@ -581,10 +595,13 @@ class ConsoleBridge(QObject):
 
     @Slot()
     def regenerate(self) -> None:
+        """Summarize the current document again."""
         self.summarize()
 
-    @Slot(str, bool)
-    def saveSummary(self, file_path: str, as_docx: bool) -> None:
+    @Slot(str)
+    def saveSummary(self, file_path: str) -> None:
+        """Write the summary on screen to ``file_path``: .docx by its suffix, else .txt."""
+        as_docx = file_path.endswith(".docx")
         # Write the summary already on screen — never re-run inference (that both
         # wasted compute and could save text different from what the user saw,
         # and a second concurrent run is unsafe on the shared llama context).
@@ -610,15 +627,16 @@ class ConsoleBridge(QObject):
                     replace=True,
                 )
 
-        def done(_result: Any) -> None:
+        def done(_result: None) -> None:
             self.toast.emit(f"Saved: {Path(path).name}")
 
         self._run(work, done)
 
     # -- settings ----------------------------------------------------------- #
-    @Slot(bool)
-    def toggleGpu(self, enabled: bool) -> None:
-        self._settings.use_gpu = enabled
+    @Slot()
+    def toggleGpu(self) -> None:
+        """Switch GPU offload on or off; persists now, applies on reload."""
+        self._settings.use_gpu = not self._settings.use_gpu
         save_settings(self._settings)  # GPU change persists immediately
         self.settingsChanged.emit()
         self.savedFlash.emit()
@@ -626,6 +644,7 @@ class ConsoleBridge(QObject):
 
     @Slot(int)
     def setThreads(self, n_threads: int) -> None:
+        """Set the inference thread count (at least 1); applies on reload."""
         self._settings.n_threads = max(1, n_threads)
         # Threads persist on reload (not on every slider tick); just arm reload.
         self.settingsChanged.emit()
@@ -633,6 +652,7 @@ class ConsoleBridge(QObject):
 
     @Slot(str)
     def setAppearance(self, mode: str) -> None:
+        """Set the System / Light / Dark appearance; persists and applies now."""
         self._settings.appearance = mode
         save_settings(self._settings)  # appearance persists + applies immediately
         self.settingsChanged.emit()
@@ -704,50 +724,13 @@ class ConsoleBridge(QObject):
         total = len(files)
         targets, self._batch_rows = _plan_batch(files, out, summary_type)
         self.batchRowsChanged.emit()
-        self._set_busy(True)
+        self._set_busy(busy=True)
         self._set_status(f"Processing 0/{total}…", "ok")
 
-        def set_row(index: int, status: str, tokens: int = 0, reason: str = "") -> None:
-            rows = [dict(r) for r in self._batch_rows]
-            rows[index].update(status=status, reason=reason)
-            if tokens:
-                rows[index]["tokens"] = tokens
-            self._batch_rows = rows
-            self.batchRowsChanged.emit()
-
         def work() -> tuple[int, list[dict[str, str]]]:
-            done_count = 0
-            failures: list[dict[str, str]] = []
-            for index, (path, target) in enumerate(zip(files, targets, strict=True)):
-                if self._batch_rows[index]["status"] == "SKIPPED":  # planned skip
-                    continue
-                set_row(index, "PROCESSING")
-                self.batchProgress.emit(index, total, path.name)
-                text, error = document_parser.extract_text(str(path))
-                if error:
-                    set_row(index, "FAILED")
-                    failures.append({"name": path.name, "error": error})
-                    continue
-                try:
-                    summary = summarizer.summarize(text, summary_type, language=language)
-                    written = write_summary_txt(
-                        target,
-                        source_name=path.name,
-                        summary=summary,
-                        summary_type=summary_type,
-                        replace=False,
-                    )
-                    if written:
-                        set_row(index, "DONE", max(len(summary) // 4, 1))
-                        done_count += 1
-                    else:  # another writer created it after the check
-                        set_row(index, "SKIPPED", reason=SKIPPED_APPEARED)
-                except Exception as exc:  # one bad file must not abort the batch
-                    set_row(index, "FAILED")
-                    failures.append({"name": path.name, "error": str(exc)})
-            return done_count, failures
+            return self._run_batch(summarizer, files, targets, summary_type, language)
 
-        def done(result: Any) -> None:
+        def done(result: tuple[int, list[dict[str, str]]]) -> None:
             done_count, failures = result
             color = "ok" if not failures else "warn"
             self._finish(f"Batch complete: {done_count}/{total}", color)
@@ -755,8 +738,60 @@ class ConsoleBridge(QObject):
 
         self._run(work, done)
 
+    def _set_batch_row(self, index: int, status: str, tokens: int = 0, reason: str = "") -> None:
+        rows = [dict(r) for r in self._batch_rows]
+        rows[index].update(status=status, reason=reason)
+        if tokens:
+            rows[index]["tokens"] = tokens
+        self._batch_rows = rows
+        self.batchRowsChanged.emit()
+
+    def _run_batch(
+        self,
+        summarizer: Summarizer,
+        files: list[Path],
+        targets: list[Path],
+        summary_type: str,
+        language: str,
+    ) -> tuple[int, list[dict[str, str]]]:
+        """Summarize each planned input to its target; return the done count and failures."""
+        total = len(files)
+        done_count = 0
+        failures: list[dict[str, str]] = []
+        for index, (path, target) in enumerate(zip(files, targets, strict=True)):
+            if self._batch_rows[index]["status"] == "SKIPPED":  # planned skip
+                continue
+            self._set_batch_row(index, "PROCESSING")
+            self.batchProgress.emit(index, total, path.name)
+            text, error = document_parser.extract_text(str(path))
+            if error:
+                self._set_batch_row(index, "FAILED")
+                failures.append({"name": path.name, "error": error})
+                continue
+            try:
+                summary = summarizer.summarize(text, summary_type, language=language)
+                written = write_summary_txt(
+                    target,
+                    source_name=path.name,
+                    summary=summary,
+                    summary_type=summary_type,
+                    replace=False,
+                )
+                if written:
+                    self._set_batch_row(index, "DONE", max(len(summary) // 4, 1))
+                    done_count += 1
+                else:  # another writer created it after the check
+                    self._set_batch_row(index, "SKIPPED", reason=SKIPPED_APPEARED)
+            except Exception as exc:  # one bad file must not abort the batch
+                logger = get_logger()
+                logger.debug("Batch file failed", exc_info=True)
+                self._set_batch_row(index, "FAILED")
+                failures.append({"name": path.name, "error": str(exc)})
+        return done_count, failures
+
     @Slot()
     def shutdown(self) -> None:
+        """Release the model as the app quits."""
         log_info("UI shutting down; releasing model")
         self._set_summarizer(None)
 

@@ -8,8 +8,10 @@ context object, and loads ``App/Main.qml``. Run with ``python -m docsummarizer.u
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import threading
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,7 @@ from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
 
 from docsummarizer.logger import log_error, log_startup
 from docsummarizer.ui.bridge import ConsoleBridge
+from docsummarizer.ui.fonts import register_fonts
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -59,6 +62,7 @@ class LocalOnlyNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
     """
 
     def __init__(self) -> None:
+        """Start with no refusals counted."""
         super().__init__()
         self._lock = threading.Lock()  # managers run on the engine's loader threads
         self._refused = 0
@@ -70,10 +74,12 @@ class LocalOnlyNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
             return self._refused
 
     def count_refusal(self) -> None:
+        """Count one refused request."""
         with self._lock:
             self._refused += 1
 
     def create(self, parent: QObject) -> QNetworkAccessManager:
+        """Return a local-only manager owned by ``parent``."""
         return _LocalOnlyNetworkAccessManager(self, parent)
 
 
@@ -99,8 +105,6 @@ def create_engine(app: QGuiApplication) -> tuple[QQmlApplicationEngine, ConsoleB
     ``LocalOnlyNetworkAccessManagerFactory``. Raises ``RuntimeError`` if the QML
     failed to instantiate.
     """
-    from docsummarizer.ui.fonts import register_fonts
-
     engine = _LocalOnlyEngine()
     bridge = ConsoleBridge()
     register_fonts()  # so QML resolves Cormorant/Chakra/Saira/Share Tech Mono
@@ -121,8 +125,6 @@ def _install_excepthook(bridge: ConsoleBridge) -> None:
     exception in a Qt slot vanishes silently. Logging it makes the next such
     failure diagnosable from the log file.
     """
-    import contextlib
-    import traceback
 
     def hook(
         exc_type: type[BaseException],

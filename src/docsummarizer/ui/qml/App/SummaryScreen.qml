@@ -623,6 +623,7 @@ Item {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "txt"  // so a name typed without an extension still saves
         nameFilters: ["Text (*.txt)", "Word document (*.docx)"]
-        onAccepted: bridge.saveSummary(selectedFile.toString(), selectedFile.toString().endsWith(".docx"))
+        onAccepted: bridge.saveSummary(selectedFile.toString())
+
     }
 }

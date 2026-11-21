@@ -10,11 +10,11 @@ controller (``self.after(0, ...)``), but with Qt's queued signal/slot delivery.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from docsummarizer.logger import log_error
+from docsummarizer.logger import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -28,24 +28,27 @@ class WorkerSignals(QObject):
 
 
 class Worker(QRunnable):
-    """Run ``fn(*args, **kwargs)`` off the UI thread, reporting via signals.
+    """Run ``fn()`` off the UI thread, reporting via signals.
 
     Emits ``signals.done(result)`` on success or ``signals.failed(message)`` on
     any exception — the pool thread never crashes on a backend error.
     """
 
-    def __init__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    def __init__(self, fn: Callable[[], object]) -> None:
+        """Wrap ``fn``; nothing runs until the pool calls :meth:`run`."""
         super().__init__()
         self._fn = fn
-        self._args = args
-        self._kwargs = kwargs
         self.signals = WorkerSignals()
 
     def run(self) -> None:
+        """Call ``fn`` and emit its result or its error message."""
         try:
-            result = self._fn(*self._args, **self._kwargs)
-        except Exception as exc:
-            log_error(f"Worker failed: {exc!s}")
+            result = self._fn()
+        except Exception as exc:  # the worker thread's edge: report, never crash the pool
+            logger = get_logger()
+            logger.exception("Worker failed")
+
             self.signals.failed.emit(str(exc))
+
         else:
             self.signals.done.emit(result)

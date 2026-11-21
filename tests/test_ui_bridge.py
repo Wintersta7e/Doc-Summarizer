@@ -177,7 +177,7 @@ def test_save_summary_writes_displayed_summary_without_rerunning(
     bridge.summarize()
     assert fake.calls == 1
     out = tmp_path / "out.txt"
-    bridge.saveSummary(out.as_uri(), False)
+    bridge.saveSummary(out.as_uri())
     assert fake.calls == 1  # save must NOT run inference again
     assert out.read_text(encoding="utf-8").strip() != ""
 
@@ -186,7 +186,7 @@ def test_save_summary_without_a_summary_is_a_noop_with_toast(qapp, monkeypatch, 
     bridge, _ = _loaded_bridge(monkeypatch, tmp_path)
     spy = QSignalSpy(bridge.toast)
     out = tmp_path / "out.txt"
-    bridge.saveSummary(out.as_uri(), False)
+    bridge.saveSummary(out.as_uri())
     assert not out.exists()
     assert spy.count() == 1
 
@@ -362,7 +362,7 @@ def test_load_document_from_file_url(qapp, monkeypatch, tmp_path) -> None:
 # --------------------------------------------------------------------------- #
 def test_toggle_gpu_persists_immediately(qapp) -> None:
     bridge = _bridge()
-    bridge.toggleGpu(True)
+    bridge.toggleGpu()  # off by default
     assert bridge._settings.use_gpu is True
     assert load_settings().use_gpu is True
 
