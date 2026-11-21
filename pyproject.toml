@@ -168,6 +168,9 @@ ignore = [
 "src/docsummarizer/ui/*" = ["N802", "N815"]
 # Dev/QA scripts may seed bridge internals for offscreen rendering.
 "scripts/*" = ["SLF001"]
+# The gate runner exists to start the configured tools: its argv is built from
+# constants in the script, never from outside input.
+"scripts/check.py" = ["S603"]
 
 [tool.ruff.format]
 docstring-code-format = true
