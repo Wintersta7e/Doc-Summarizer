@@ -90,6 +90,12 @@ jobs:
           persona: regular
           # Fail on any finding here instead of uploading them to code scanning.
           advanced-security: false
+          # The hardened files. release.yml still has unpinned actions and a pip
+          # cache; it joins this list in the change that hardens it.
+          inputs: >-
+            .github/dependabot.yml
+            .github/workflows/ci.yml
+            .github/workflows/weekly.yml
 
       # Every commit in the history, not only the tree the hook scans.
       - name: gitleaks over the full history
