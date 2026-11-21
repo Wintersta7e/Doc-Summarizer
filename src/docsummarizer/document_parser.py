@@ -10,6 +10,7 @@ below; dialog filters (`SUPPORTED_EXTENSIONS`), the extractor dispatch
 in `extract_text`, and CLI directory scans all derive from it.
 """
 
+import codecs
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypedDict
@@ -69,14 +70,25 @@ def extract_from_rtf(file_path: str) -> str:
     return str(rtf_to_text(rtf_content))
 
 
+def _text_encoding(raw: bytes) -> str:
+    """The encoding plain-text bytes are read with.
+
+    Bytes that are valid UTF-8 are UTF-8 (``UTF-8-SIG`` when a BOM leads, the
+    detector's own spelling), checked strictly before detection: the detector
+    reads valid UTF-8 holding control characters or unassigned code points as
+    UTF-16 or a CJK code page. Anything else gets the detector's guess.
+    """
+    try:
+        _ = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return chardet.detect(raw).get("encoding") or "utf-8"
+    return "UTF-8-SIG" if raw.startswith(codecs.BOM_UTF8) else "utf-8"
+
+
 def extract_from_txt(file_path: str) -> str:
     """Extract text from a plain text file with encoding detection."""
     raw_data = Path(file_path).read_bytes()
-
-    detected = chardet.detect(raw_data)
-    encoding = detected.get("encoding", "utf-8") or "utf-8"
-
-    return raw_data.decode(encoding, errors="replace")
+    return raw_data.decode(_text_encoding(raw_data), errors="replace")
 
 
 _EXTRACTORS: dict[str, Callable[[str], str]] = {
@@ -206,7 +218,7 @@ def _detect_encoding(file_path: str) -> str | None:
         raw = Path(file_path).read_bytes()
     except OSError:
         return None
-    return chardet.detect(raw).get("encoding") or None
+    return _text_encoding(raw)
 
 
 def analyze_document(file_path: str, text: str | None = None) -> DocumentStats:

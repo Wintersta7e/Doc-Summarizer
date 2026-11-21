@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from PySide6.QtCore import QEventLoop, QTimer, QUrl
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtQuick import QQuickView
 
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
@@ -39,6 +39,8 @@ _PREVIEW = REPO / "scripts" / "_preview.qml"
 # Every screen _preview.qml shows, and every theme.
 SCREENS = ("summary", "extract", "batch", "config", "firstrun")
 THEMES = ("dark", "light")
+# How long a screen runs before it is grabbed: its fades have finished.
+SETTLE_MS = 600
 
 SAMPLE_SOURCE = (
     "Most small farm wells today rely on piston pumps that need a skilled mechanic, "
@@ -170,6 +172,20 @@ def load_preview(screen: str, theme: str) -> QQuickView:
     return view
 
 
+def render(screen: str, theme: str) -> QImage:
+    """Show screen in theme, let it settle, and grab it.
+
+    Raises ``RuntimeError`` as ``load_preview`` does.
+    """
+    view = load_preview(screen, theme)
+    loop = QEventLoop()
+    QTimer.singleShot(SETTLE_MS, loop.quit)
+    _ = loop.exec()
+    image = view.grabWindow()
+    _ = view.close()
+    return image
+
+
 def main() -> int:
     """Render the screen and theme the command line names; 0 when the PNG is saved."""
     args = _parse_args()
@@ -177,15 +193,11 @@ def main() -> int:
 
     _app = QGuiApplication(sys.argv)  # kept alive for the view
     try:
-        view = load_preview(args.screen, args.theme)
+        image = render(args.screen, args.theme)
     except RuntimeError as exc:
         print(f"FAILED: {exc}")
         return 1
 
-    loop = QEventLoop()
-    QTimer.singleShot(600, loop.quit)
-    _ = loop.exec()
-    image = view.grabWindow()
     if image.isNull() or image.width() == 0:
         print("FAILED: grabbed image is null/empty")
         return 1

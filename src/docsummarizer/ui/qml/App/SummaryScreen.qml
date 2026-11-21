@@ -186,10 +186,12 @@ Item {
                     }
                 }
             }
-            MouseArea {
+            ClickArea {
                 anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: openDialog.open()
+                name: "Open a document"
+                // Select File is this action's Tab stop: one action, one stop.
+                activeFocusOnTab: false
+                onActivated: openDialog.open()
             }
         }
     }
@@ -220,7 +222,7 @@ Item {
                             id: tag
                             anchors.centerIn: parent
                             text: "PDF"
-                            color: Theme.onAccent
+                            color: Theme.inkOnAccent
                             font.family: Theme.ui
                             font.pixelSize: 9
                             font.weight: Font.Medium
@@ -241,10 +243,10 @@ Item {
                         font.family: Theme.mono
                         font.pixelSize: 9
                         font.letterSpacing: 1
-                        MouseArea {
+                        ClickArea {
                             anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: screen.bridge.unloadDocument()
+                            name: "Unload the document"
+                            onActivated: screen.bridge.unloadDocument()
                         }
                     }
                 }
@@ -466,10 +468,10 @@ Item {
                                     }
                                 }
                             }
-                            MouseArea {
+                            ClickArea {
                                 anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
+                                name: "Point " + (point.index + 1) + ": " + point.modelData.text
+                                onActivated: {
                                     screen.activePoint = point.index;
                                     screen.trace(point.modelData);
                                 }
@@ -531,11 +533,11 @@ Item {
                                         }
                                     }
                                 }
-                                MouseArea {
+                                ClickArea {
                                     anchors.fill: parent
                                     enabled: section.traceable
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
+                                    name: section.modelData.charAt(0) + section.modelData.slice(1).toLowerCase()
+                                    onActivated: {
                                         screen.activeSection = section.modelData;
                                         screen.trace(section.firstPt);
                                     }

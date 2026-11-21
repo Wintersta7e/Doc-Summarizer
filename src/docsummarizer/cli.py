@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NoReturn
 
+from docsummarizer import __version__
 from docsummarizer.document_parser import extract_text, find_documents, get_document_info
 from docsummarizer.io_helpers import (
     SKIPPED_APPEARED,
@@ -216,6 +217,7 @@ Examples:
     _ = parser.add_argument(
         "--download-only", action="store_true", help="Only download the model, do not process files"
     )
+    _ = parser.add_argument("--version", action="version", version=f"DocSummarizer {__version__}")
     return parser
 
 

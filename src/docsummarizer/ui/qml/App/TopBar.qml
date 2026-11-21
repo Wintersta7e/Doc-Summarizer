@@ -154,10 +154,10 @@ Rectangle {
                 color: Theme.label2
                 font.pixelSize: 13
             }
-            MouseArea {
+            ClickArea {
                 anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
+                name: Theme.dark ? "Switch to the light theme" : "Switch to the dark theme"
+                onActivated: {
                     Theme.dark = !Theme.dark;
                     bar.bridge.setAppearance(Theme.dark ? "Dark" : "Light");
                 }

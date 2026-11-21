@@ -1,0 +1,13 @@
+# lychee: the links in the repository's Markdown. CI checks them with --offline
+# on every push and pull request (links between files and their #anchors); the
+# weekly run follows the web links too. Hidden and git-ignored paths (.venv,
+# .dev, mutants) are skipped by lychee's defaults.
+
+# Markdown only: the text fixtures under tests/ are documents to summarize,
+# and their URLs are sample content, not links.
+extensions = ["md"]
+
+# A link to a heading checks that the heading exists.
+include_fragments = "anchor-only"
+
+no_progress = true

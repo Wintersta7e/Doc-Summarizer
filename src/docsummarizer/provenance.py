@@ -12,6 +12,7 @@ verifiably contains yields ``None`` — we never fabricate an offset.
 from __future__ import annotations
 
 import re
+import string
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -76,7 +77,7 @@ _ABBREVIATIONS = frozenset(
         "max",
     }
 )
-_TOKEN_BEFORE_DOT = re.compile(r"([A-Za-z]+)\.\Z")
+_TOKEN_LETTERS = frozenset(string.ascii_letters)
 
 
 @dataclass(frozen=True)
@@ -104,12 +105,15 @@ def _trim(text: str, start: int, end: int) -> tuple[int, int]:
 
 def _is_abbreviation_boundary(text: str, boundary_start: int) -> bool:
     """True if the period just before ``boundary_start`` is an abbreviation dot."""
-    if boundary_start == 0 or text[boundary_start - 1] != ".":
+    dot = boundary_start - 1
+    if dot < 0 or text[dot] != ".":
         return False
-    match = _TOKEN_BEFORE_DOT.search(text[:boundary_start])
-    if match is None:
-        return False
-    token = match.group(1)
+    # Walk back over the word before the dot only: searching the whole text
+    # before each boundary made splitting quadratic in the document's length.
+    start = dot
+    while start > 0 and text[start - 1] in _TOKEN_LETTERS:
+        start -= 1
+    token = text[start:dot]
     return (len(token) == 1 and token.isupper()) or token.lower() in _ABBREVIATIONS
 
 

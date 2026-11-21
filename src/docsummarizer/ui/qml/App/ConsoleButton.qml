@@ -44,10 +44,15 @@ Button {
                 }
             }
         }
+
+        FocusRing {
+            visible: ctrl.visualFocus
+            onAccent: ctrl.primary
+        }
     }
     contentItem: Text {
         text: ctrl.text
-        color: ctrl.primary ? Theme.onAccent : Theme.label
+        color: ctrl.primary ? Theme.inkOnAccent : Theme.label
         font.family: Theme.ui
         font.pixelSize: 11
         font.weight: Font.Medium

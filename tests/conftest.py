@@ -16,14 +16,28 @@ import os
 from typing import TYPE_CHECKING
 
 import pytest
+from hypothesis import settings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+# Property tests: `ci` is the default, deterministic so a red run reproduces;
+# `pytest --hypothesis-profile=fuzz` runs the long weekly profile.
+settings.register_profile("ci", derandomize=True, deadline=None, max_examples=200, database=None)
+settings.register_profile("fuzz", deadline=None, max_examples=10_000)
+settings.load_profile("ci")
+
 # Skip the Qt UI tests where PySide6 isn't installed (keeps a minimal env green).
 if importlib.util.find_spec("PySide6") is None:
-    collect_ignore_glob = ["test_ui_*.py"]
+    collect_ignore_glob = [
+        "test_ui_*.py",
+        "test_qml_screens.py",
+        "test_e2e_flow.py",
+        "test_smoke.py",
+        "test_accessibility.py",
+        "test_visual.py",
+    ]
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no
 # display or GPU/GL is required.

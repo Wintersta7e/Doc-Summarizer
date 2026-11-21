@@ -7,48 +7,61 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# Every job states the token rights it needs; none are granted by default.
+permissions: {}
+
+# A newer push to a pull request cancels its older run; runs on master all finish.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  UV_VERSION: "0.13.9"
+  PRIMARY_PYTHON: "3.12"
+  QT_QPA_PLATFORM: offscreen
+  QT_QUICK_BACKEND: software
+  # The commits this run checks: a pull request's own, or those a push added.
+  # Empty on a manual run, where the subject check reads the head commit alone
+  # and the other range checks do not run.
+  BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
-  lint-and-test:
-    name: Python ${{ matrix.python }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        python: ["3.11", "3.12"]
-
+  check:
+    name: Lint, types, hygiene and supply chain
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-
-      # uv installs the matrix interpreter and the exact dependency set in
-      # uv.lock; the activated .venv puts its tools first on PATH.
-      - name: Set up uv and Python ${{ matrix.python }}
-        uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: "0.13.9"
-          python-version: ${{ matrix.python }}
-          activate-environment: true
+          # gitleaks scans every commit; the subject check reads the pushed range.
+          fetch-depth: 0
+          persist-credentials: false
 
-      # Qt needs a few shared libraries even for the offscreen platform used by
-      # the headless UI tests (no display/GPU required at runtime).
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # Qt needs these shared libraries even on the offscreen platform.
       - name: Install Qt system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
 
-      # llama-cpp-python is gated behind the `runtime` extra and intentionally
-      # NOT installed in CI: tests stub the lazy Llama import. The `gui` extra
-      # (PySide6) IS installed so basedpyright can type-check the ui package,
-      # qmllint can run and the offscreen UI tests can run.
-      - name: Install package + dev/gui extras from uv.lock
+      - name: Install the locked dev and gui environment
         run: uv sync --locked --extra dev --extra gui
 
-      # Each step is one scripts/check.py step, in the order `check.py all`
-      # runs them. The arch step's jscpd runs through the runner's Node.
       - name: Format check (check.py format)
         run: python scripts/check.py format
 
@@ -64,33 +77,309 @@ jobs:
       - name: QML lint (check.py qml)
         run: python scripts/check.py qml
 
-      - name: Tests + coverage gate (check.py test)
-        env:
-          QT_QPA_PLATFORM: offscreen
-          QT_QUICK_BACKEND: software
-        run: python scripts/check.py test
+      # The git hooks' pre-commit stage over every file: ruff, gitleaks over the
+      # tree, typos (its words in pyproject.toml), actionlint and the QML hooks,
+      # at the versions .pre-commit-config.yaml pins.
+      - name: pre-commit hooks
+        run: pre-commit run --all-files --show-diff-on-failure
 
-  windows-tests:
-    name: Windows filesystem tests
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up uv and Python 3.12
-        uses: astral-sh/setup-uv@v7
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
         with:
-          version: "0.13.9"
-          python-version: "3.12"
-          activate-environment: true
+          version: "1.32.0"
+          persona: regular
+          # Fail on any finding here instead of uploading them to code scanning.
+          advanced-security: false
+          # The hardened files. release.yml still has unpinned actions and a pip
+          # cache; it joins this list in the change that hardens it.
+          inputs: >-
+            .github/dependabot.yml
+            .github/workflows/ci.yml
+            .github/workflows/weekly.yml
 
-      - name: Install package + dev/gui extras from uv.lock
+      # Every commit in the history, not only the tree the hook scans.
+      - name: gitleaks over the full history
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" git --redact --verbose .
+
+      - name: osv-scanner over uv.lock
+        uses: google/osv-scanner-action/osv-scanner-action@32d3cd482bdadfb38b186c0ad1b031902d55d932 # v2.7.1
+        with:
+          scan-args: --lockfile=uv.lock
+
+      - name: Export the locked dependencies for pip-audit
+        run: >-
+          uv export --locked --all-extras --no-emit-project --no-hashes
+          --output-file "$RUNNER_TEMP/audit-requirements.txt"
+
+      - name: pip-audit
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: ${{ runner.temp }}/audit-requirements.txt
+          # Every version is pinned by the lock: audit those, resolve nothing.
+          no-deps: true
+          extra-index-urls: https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      # Links between files in the repository; the weekly run follows web links too.
+      - name: lychee (offline)
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --offline --config .lychee.toml --no-progress .
+          jobSummary: false
+
+      - name: Commit subjects
+        run: python scripts/check_commits.py --range "$BASE" "$HEAD_SHA"
+
+  tests:
+    name: Tests, Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # diff-cover compares with the base commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python }}
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Qt system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: Install the locked dev and gui environment
         run: uv sync --locked --extra dev --extra gui
 
-      # Only the tests marked `windows`; no coverage (a subset would trip the
-      # floor). pytest exits 5 when nothing is selected, which fails this job.
-      - name: Tests marked windows
+      # Every test, the windows-marked ones included, with the coverage floors.
+      - name: Tests and coverage (check.py test)
+        run: python scripts/check.py test
+
+      - name: Coverage of the changed lines
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == env.PRIMARY_PYTHON && env.BASE != ''
+        run: |
+          coverage xml -o coverage.xml
+          diff-cover coverage.xml --compare-branch="$BASE" --fail-under=90
+
+  mutation:
+    name: Mutation testing of the changed modules
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The changed modules come from the merge base with the base commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: Install the locked dev and gui environment
+        run: uv sync --locked --extra dev --extra gui
+
+      - name: Mutation score of the changed modules
+        run: python scripts/mutation.py --changed "$BASE"
+
+  package:
+    name: Wheel install and smoke test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: Build the sdist and wheel
+        run: uv build
+
+      # The wheel alone, in a fresh environment holding the locked app and gui
+      # dependencies: what a user's install runs, without the checkout.
+      - name: Install the wheel into a fresh environment
+        run: |
+          uv venv --python "$PRIMARY_PYTHON" "$RUNNER_TEMP/wheel-venv"
+          uv export --locked --extra gui --no-emit-project --output-file "$RUNNER_TEMP/app-requirements.txt"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv" --require-hashes -r "$RUNNER_TEMP/app-requirements.txt"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv" --no-deps dist/*.whl
+
+      - name: CLI version
+        run: '"$RUNNER_TEMP/wheel-venv/bin/docsummarizer-cli" --version'
+
+      - name: GUI smoke test
+        run: '"$RUNNER_TEMP/wheel-venv/bin/docsummarizer" --smoke-test'
+
+  build:
+    name: Binary on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            binary: dist/DocSummarizer
+          - os: windows-latest
+            binary: dist/DocSummarizer.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Qt system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      # Without gui the build succeeds and bundles no Qt; check_binary.py's size
+      # floor catches that.
+      - name: Install the locked gui and runtime environment and PyInstaller
+        run: |
+          uv sync --locked --extra gui --extra runtime
+          uv pip install pyinstaller==6.22.2
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm DocSummarizer.spec
+
+      - name: Smoke test and size budget
         env:
-          QT_QPA_PLATFORM: offscreen
-          QT_QUICK_BACKEND: software
-        run: pytest -m windows -ra
+          BINARY: ${{ matrix.binary }}
+        run: python scripts/check_binary.py "$BINARY"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: DocSummarizer-${{ runner.os }}
+          path: ${{ matrix.binary }}
+          retention-days: 3
+          if-no-files-found: error
+
+  visual:
+    name: Visual regression
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          activate-environment: true
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Qt system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: Install the locked dev and gui environment
+        run: uv sync --locked --extra dev --extra gui
+
+      # A failing screen leaves its render and diff image under the base temp dir.
+      - name: Screens against their baselines
+        run: pytest tests/test_visual.py --basetemp="$RUNNER_TEMP/visual"
+
+      - name: Upload the renders and diffs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-diffs
+          path: ${{ runner.temp }}/visual
+          retention-days: 7
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
+        with:
+          fail-on-severity: moderate
+          # The licences of the locked dependencies (PySide6 under its LGPL
+          # option); a new dependency under any other licence fails review.
+          allow-licenses: >-
+            0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, CC0-1.0,
+            LGPL-3.0-only, MIT, MPL-2.0, PSF-2.0, Zlib
+
+  # The one check a branch ruleset requires: it passes only when every job
+  # above succeeded or was skipped by its own condition.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [check, tests, mutation, package, build, visual, dependency-review]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'to_entries | map(.value.result) | all(. == "success" or . == "skipped")'

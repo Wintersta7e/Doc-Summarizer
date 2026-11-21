@@ -288,6 +288,27 @@ def test_split_sentences_keeps_initials_whole() -> None:
     assert [text[s:e] for s, e in spans] == ["The U.S. economy grew.", "Inflation fell."]
 
 
+@pytest.mark.parametrize(
+    ("text", "sentences"),
+    [
+        # The abbreviation's word starts the text, which ends on a letter.
+        ("Dr. Smith left", ["Dr. Smith left"]),
+        # Only a dot can be an abbreviation's: "?" and "!" always end a sentence.
+        ("Is it plan B? Ask the Dr! Then go.", ["Is it plan B?", "Ask the Dr!", "Then go."]),
+        # One capital is an initial; one small letter or an acronym ends a sentence.
+        (
+            "Pick option a. Then go. I work at NASA. It is fun.",
+            ["Pick option a.", "Then go.", "I work at NASA.", "It is fun."],
+        ),
+    ],
+    ids=["text-start", "not-a-dot", "not-an-initial"],
+)
+def test_split_sentences_keeps_whole_only_at_an_abbreviation_dot(
+    text: str, sentences: list[str]
+) -> None:
+    assert [text[s:e] for s, e in split_sentences(text)] == sentences
+
+
 def test_locate_quote_grounds_sentence_with_abbreviation() -> None:
     source = "Dr. Smith reported a forty percent gain. The study ended early."
     quote = "Dr. Smith reported a forty percent gain."

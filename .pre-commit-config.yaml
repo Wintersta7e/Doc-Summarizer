@@ -1,10 +1,10 @@
 # Hooks that run the project's gate locally; CI runs the same scripts/check.py
-# steps. Install both hook types once, from the activated dev environment
+# steps. Install every hook type once, from the activated dev environment
 # (`uv sync --locked --extra dev --extra gui`, which pins pre-commit too):
 #   pre-commit install
 # The local hooks run `python` from PATH, so commit and push with that
 # environment activated.
-default_install_hook_types: [pre-commit, pre-push]
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_stages: [pre-commit]
 
 repos:
@@ -48,6 +48,12 @@ repos:
         language: system
         files: \.qml$
         pass_filenames: false
+      # The subject rules CI applies to every pushed commit.
+      - id: check-commits
+        name: commit message (check_commits.py)
+        entry: python scripts/check_commits.py
+        language: system
+        stages: [commit-msg]
       # The dev environment's basedpyright, so it resolves the same installed
       # packages as CI; it reads its file list from pyproject.toml.
       - id: basedpyright
