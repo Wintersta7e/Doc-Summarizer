@@ -274,6 +274,21 @@ wheels = [
 ]
 
 [[package]]
+name = "diff-cover"
+version = "11.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "chardet" },
+    { name = "jinja2" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/97/57/6c6d1fafa82c6d32e8a5de02034ee81317a85c1b7450c59eb9ab2590f8ab/diff_cover-11.0.4.tar.gz", hash = "sha256:595b03ab755c49bce82c0dd9572e3d3466dd25e32bf19856e8d101991a536921", size = 110848, upload-time = "2026-11-19T02:49:23.43Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/40/84f847956d78fdc2e5b744e84fcd7f4430354d1a6e5ff9446b329ba1ed94/diff_cover-11.0.4-py3-none-any.whl", hash = "sha256:41555d73bc237dc35e42927feb70729dc2fb0a6d2ece8c14cfb10d5f4a48b551", size = 63972, upload-time = "2026-11-19T02:49:22.24Z" },
+]
+
+[[package]]
 name = "diskcache"
 version = "5.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -311,6 +326,7 @@ dev = [
     { name = "basedpyright" },
     { name = "coverage" },
     { name = "deptry" },
+    { name = "diff-cover" },
     { name = "hypothesis" },
     { name = "import-linter" },
     { name = "mutmut" },
@@ -335,6 +351,7 @@ requires-dist = [
     { name = "chardet", specifier = ">=7.4,<8" },
     { name = "coverage", marker = "extra == 'dev'", specifier = "==7.17.4" },
     { name = "deptry", marker = "extra == 'dev'", specifier = "==0.25.1" },
+    { name = "diff-cover", marker = "extra == 'dev'", specifier = "==11.0.4" },
     { name = "huggingface-hub", specifier = ">=1.21,<2" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = "==6.170.17" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = "==2.17" },

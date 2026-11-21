@@ -62,6 +62,8 @@ dev = [
     "pytest-randomly==5.1.0",
     "pytest-timeout==2.4.0",
     "coverage==7.17.4",
+    # Coverage of the lines a change touches (CI, against the base commit).
+    "diff-cover==11.0.4",
     "ruff==0.17.6",
     "basedpyright==1.40.2",
     "import-linter==2.17",
@@ -198,8 +200,10 @@ extend-ignore-names = [
 # S603 (no option to say so): these files run fixed tool argv lists, never a shell.
 "scripts/check.py" = ["S603"]  # 1 hit
 "scripts/check_binary.py" = ["S603"]  # 1 hit: runs the binary it was asked to check
+"scripts/check_commits.py" = ["S603"]  # 1 hit: git log
 "scripts/mutation.py" = ["S603"]  # 2 hits: git and mutmut
 "tests/test_eval_runner.py" = ["S603"]  # 1 hit
+"tests/test_check_commits.py" = ["S603"]  # 1 hit: git in a throwaway repository
 "tests/test_mutation_script.py" = ["S603"]  # 1 hit: git in a throwaway repository
 "tests/test_release_claims.py" = ["S603"]  # 1 hit
 "tests/test_smoke.py" = ["S603"]  # 1 hit
