@@ -38,6 +38,13 @@ if importlib.util.find_spec("PySide6") is None:
         "test_accessibility.py",
         "test_visual.py",
     ]
+else:
+    # Before any test creates the process's Qt app: Windows PySide6 ships no
+    # font folder, and offscreen Qt's warning about it would fail whichever
+    # test first starts Qt and asserts no warnings, depending on the order.
+    from docsummarizer.ui.fonts import use_bundled_font_dir
+
+    use_bundled_font_dir()
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no
 # display or GPU/GL is required.
