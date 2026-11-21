@@ -83,19 +83,17 @@ jobs:
       - name: pre-commit hooks
         run: pre-commit run --all-files --show-diff-on-failure
 
+      # Through uvx: the zizmor action installs with the active venv's pip, and a
+      # uv venv has none. Fails on any finding. release.yml still has unpinned
+      # actions and a pip cache; it joins this list in the change that hardens it.
       - name: zizmor
-        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
-        with:
-          version: "1.32.0"
-          persona: regular
-          # Fail on any finding here instead of uploading them to code scanning.
-          advanced-security: false
-          # The hardened files. release.yml still has unpinned actions and a pip
-          # cache; it joins this list in the change that hardens it.
-          inputs: >-
-            .github/dependabot.yml
-            .github/workflows/ci.yml
-            .github/workflows/weekly.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uvx zizmor@1.32.0 --persona regular
+          .github/dependabot.yml
+          .github/workflows/ci.yml
+          .github/workflows/weekly.yml
 
       # Every commit in the history, not only the tree the hook scans.
       - name: gitleaks over the full history
