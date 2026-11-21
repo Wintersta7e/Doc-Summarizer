@@ -8,48 +8,73 @@ Exercised against a fake ``llm`` that returns canned JSON, so no llama-cpp.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from dataclasses import FrozenInstanceError
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from typing_extensions import override
 
 from docsummarizer import model_manager
 from docsummarizer.model_manager import (
     SUMMARY_TYPE_BRIEF,
     SUMMARY_TYPE_DETAILED,
     SUMMARY_TYPE_STRUCTURED,
+    ChatModel,
+    CreateChatCompletionResponse,
     StructuredSummary,
     Summarizer,
     SummaryPoint,
 )
 from docsummarizer.provenance import SourceSpan
 
-_SOURCE = (
-    "The spiral-vane pump is a well design that does without a piston entirely. "
-    "It relies on a turning vane to lift water from depths of forty metres. "
-    "In the dry-season field trial it moved 28.4 litres a minute, a new record. "
-    "Assembly took three and a half days with eight workers."
-)
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+_PISTON = "The spiral-vane pump is a well design that does without a piston entirely."
+_VANE = "It relies on a turning vane to lift water from depths of forty metres."
+_RECORD = "In the dry-season field trial it moved 28.4 litres a minute, a new record."
+_ASSEMBLY = "Assembly took three and a half days with eight workers."
+_SOURCE = f"{_PISTON} {_VANE} {_RECORD} {_ASSEMBLY}"
+
+
+@dataclasses.dataclass(frozen=True)
+class _Call:
+    """One ``create_chat_completion`` call a fake received."""
+
+    messages: Sequence[Mapping[str, str]]
+    kwargs: Mapping[str, object]
+
+
+def _completion(content: str) -> CreateChatCompletionResponse:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
+    }
 
 
 class _JsonLLM:
     """Fake llm returning queued payloads (last repeats) from create_chat_completion."""
 
     def __init__(self, *payloads: str) -> None:
-        self.payloads = list(payloads)
-        self.calls: list[dict] = []
+        self.payloads: list[str] = list(payloads)
+        self.calls: list[_Call] = []
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, text: bytes, **_options: bool) -> list[int]:
         return [0] * (len(text) // 3)  # ~3 UTF-8 bytes per token, like the real one
 
-    def create_chat_completion(self, *, messages, **kwargs):
-        self.calls.append({"messages": messages, "kwargs": kwargs})
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], **kwargs: object
+    ) -> CreateChatCompletionResponse:
+        self.calls.append(_Call(messages, kwargs))
         idx = min(len(self.calls) - 1, len(self.payloads) - 1)
-        return {"choices": [{"message": {"content": self.payloads[idx]}}]}
+        return _completion(self.payloads[idx])
 
 
-def _shell(fake_llm, n_ctx: int = 8192) -> Summarizer:
+def _shell(fake_llm: object, n_ctx: int = 8192) -> Summarizer:
+    """A Summarizer around ``fake_llm``, which answers only the calls these tests make."""
     s = object.__new__(Summarizer)
-    s.llm = fake_llm
+    s.llm = cast("ChatModel", fake_llm)
     s.n_ctx = n_ctx
     return s
 
@@ -61,15 +86,15 @@ def _detailed_payload() -> str:
             "points": [
                 {
                     "text": "It drops the piston.",
-                    "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
+                    "quote": _PISTON,
                 },
                 {
                     "text": "It uses a turning vane.",
-                    "quote": "It relies on a turning vane to lift water from depths of forty metres.",
+                    "quote": _VANE,
                 },
                 {
                     "text": "It sets a flow record.",
-                    "quote": "In the dry-season field trial it moved 28.4 litres a minute, a new record.",
+                    "quote": _RECORD,
                 },
             ],
         }
@@ -80,11 +105,10 @@ def _detailed_payload() -> str:
 # Data contract
 # --------------------------------------------------------------------------- #
 def test_summary_point_and_structured_summary_are_frozen() -> None:
-    from dataclasses import FrozenInstanceError
-
     pt = SummaryPoint(text="x", citation=None)
-    with pytest.raises(FrozenInstanceError):
-        pt.text = "y"  # type: ignore[misc]
+    for field in dataclasses.fields(pt):
+        with pytest.raises(FrozenInstanceError):
+            setattr(pt, field.name, "y")
 
 
 # --------------------------------------------------------------------------- #
@@ -103,16 +127,20 @@ def test_detailed_returns_three_grounded_points() -> None:
     for point in result.points:
         assert isinstance(point.citation, SourceSpan)
         # The citation offsets index the *real* source text.
-        assert _SOURCE[point.citation.start : point.citation.end] == point.citation.quote
+        citation = point.citation
+        assert citation is not None
+        assert _SOURCE[citation.start : citation.end] == citation.quote
 
 
 def test_detailed_requests_json_at_low_temperature() -> None:
     fake = _JsonLLM(_detailed_payload())
     s = _shell(fake)
     _ = s.summarize_structured(_SOURCE, SUMMARY_TYPE_DETAILED)
-    kwargs = fake.calls[0]["kwargs"]
+    kwargs = fake.calls[0].kwargs
     assert kwargs["response_format"] == {"type": "json_object"}
-    assert kwargs["temperature"] <= 0.15
+    temperature = kwargs["temperature"]
+    assert isinstance(temperature, float)
+    assert temperature <= 0.15
 
 
 def test_detailed_unmatched_quote_yields_no_citation() -> None:
@@ -144,19 +172,19 @@ def test_structured_returns_sections() -> None:
                 "PURPOSE": [
                     {
                         "text": "Replace the piston with a vane.",
-                        "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
+                        "quote": _PISTON,
                     }
                 ],
                 "METHOD": [
                     {
                         "text": "A turning vane lifts water.",
-                        "quote": "It relies on a turning vane to lift water from depths of forty metres.",
+                        "quote": _VANE,
                     }
                 ],
                 "RESULTS": [
                     {
                         "text": "28.4 litres a minute.",
-                        "quote": "In the dry-season field trial it moved 28.4 litres a minute, a new record.",
+                        "quote": _RECORD,
                     }
                 ],
                 "CONCLUSIONS": [{"text": "A vane suffices."}],
@@ -186,7 +214,7 @@ def test_brief_is_plain_paragraph_without_points() -> None:
     assert result.points == []
     assert result.sections is None
     # Brief uses the plain chat path (not JSON mode).
-    assert "response_format" not in fake.calls[0]["kwargs"]
+    assert "response_format" not in fake.calls[0].kwargs
 
 
 # --------------------------------------------------------------------------- #
@@ -260,7 +288,9 @@ def test_long_document_grounds_points_at_global_offsets() -> None:
     grounded = [p for p in result.points if p.citation is not None]
     assert grounded, "expected at least one grounded point"
     for point in grounded:
-        assert text[point.citation.start : point.citation.end] == point.citation.quote
+        citation = point.citation
+        assert citation is not None
+        assert text[citation.start : citation.end] == citation.quote
     assert len(result.points) <= 3
 
 
@@ -282,7 +312,7 @@ def test_citations_index_source_with_leading_whitespace() -> None:
             "points": [
                 {
                     "text": "drops the piston",
-                    "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
+                    "quote": _PISTON,
                 }
             ],
         }
@@ -292,7 +322,9 @@ def test_citations_index_source_with_leading_whitespace() -> None:
     cited = [p for p in result.points if p.citation is not None]
     assert cited
     for point in cited:
-        assert source[point.citation.start : point.citation.end] == point.citation.quote
+        citation = point.citation
+        assert citation is not None
+        assert source[citation.start : citation.end] == citation.quote
 
 
 # --------------------------------------------------------------------------- #
@@ -303,19 +335,19 @@ def test_detailed_map_reduce_covers_multiple_chunks() -> None:
     text = _multi_chunk_text(marker)
 
     class _IndexedLLM(_JsonLLM):
-        def __init__(self) -> None:
-            self.calls: list[int] = []
-
-        def create_chat_completion(self, *, messages, **kwargs):
+        @override
+        def create_chat_completion(
+            self, *, messages: Sequence[Mapping[str, str]], **kwargs: object
+        ) -> CreateChatCompletionResponse:
             n = len(self.calls)
-            self.calls.append(n)
+            self.calls.append(_Call(messages, kwargs))
             content = json.dumps(
                 {
                     "lead": f"lead{n}",
                     "points": [{"text": f"c{n}p{j}", "quote": marker} for j in range(3)],
                 }
             )
-            return {"choices": [{"message": {"content": content}}]}
+            return _completion(content)
 
     fake = _IndexedLLM()
     s = _shell(fake, n_ctx=1024)
@@ -351,8 +383,9 @@ def test_structured_map_reduce_grounds_sections_at_global_offsets() -> None:
         points = result.sections[name]
         assert len(points) <= 3
         for point in points:
-            if point.citation is not None:
-                assert text[point.citation.start : point.citation.end] == point.citation.quote
+            citation = point.citation
+            if citation is not None:
+                assert text[citation.start : citation.end] == citation.quote
     for point in result.sections["CONCLUSIONS"]:
         assert point.citation is None
 
@@ -388,7 +421,7 @@ def test_prose_wrapped_json_is_extracted() -> None:
             "points": [
                 {
                     "text": "a",
-                    "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
+                    "quote": _PISTON,
                 }
             ],
         }
@@ -468,8 +501,7 @@ def test_structured_render_text_has_ordered_section_headers() -> None:
 
 
 def test_structured_summary_is_frozen() -> None:
-    from dataclasses import FrozenInstanceError
-
     summary = StructuredSummary("brief", "x", [], None, "x")
-    with pytest.raises(FrozenInstanceError):
-        summary.lead = "y"  # type: ignore[misc]
+    for field in dataclasses.fields(summary):
+        with pytest.raises(FrozenInstanceError):
+            setattr(summary, field.name, "y")
