@@ -11,11 +11,11 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        # The dev environment's mypy, so it resolves the same installed
-        # packages as CI; it reads its file list + overrides from pyproject.toml.
-        entry: mypy
+      - id: basedpyright
+        name: basedpyright
+        # The dev environment's basedpyright, so it resolves the same installed
+        # packages as CI; it reads its file list from pyproject.toml.
+        entry: basedpyright
         language: system
         types_or: [python, pyi]
         pass_filenames: false

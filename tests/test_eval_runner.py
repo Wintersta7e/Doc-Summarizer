@@ -154,10 +154,7 @@ def test_language_classifier_is_a_core_dependency() -> None:
     print(f"core entry: {matched}")
     assert "eval" not in project.get("optional-dependencies", {})
     assert len(matched) == 1
-    overrides = config["tool"]["mypy"]["overrides"]
-    modules = [table.get("module", []) for table in overrides]
-    listed = sum(([m] if isinstance(m, str) else m).count("py3langid.*") for m in modules)
-    assert listed == 1
+    assert (_REPO / "typings" / "py3langid" / "langid.pyi").is_file()
 
 
 def test_gated_set_is_derived(tmp_path: Path) -> None:

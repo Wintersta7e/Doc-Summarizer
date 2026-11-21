@@ -43,7 +43,7 @@ jobs:
       # llama-cpp-python is gated behind the `runtime` extra and intentionally
       # NOT installed in CI: it has no wheels for many matrix combos and source
       # builds are slow/fragile. Tests stub the lazy Llama import. The `gui`
-      # extra (PySide6) IS installed so mypy can type-check the ui package and
+      # extra (PySide6) IS installed so basedpyright can type-check the ui package and
       # the offscreen UI tests can run.
       - name: Install package + dev/gui extras
         run: pip install -e ".[dev,gui]"
@@ -54,8 +54,8 @@ jobs:
       - name: Format check (ruff)
         run: ruff format --check .
 
-      - name: Type check (mypy --strict)
-        run: mypy
+      - name: Type check (basedpyright)
+        run: basedpyright
 
       - name: Tests (pytest + coverage gate)
         env:

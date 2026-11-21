@@ -51,7 +51,7 @@ python -c "from docsummarizer.model_manager import is_model_downloaded; print('M
 # Quality gate (matches CI)
 ruff check .
 ruff format --check .
-mypy
+basedpyright
 pytest --cov=docsummarizer
 ```
 
@@ -375,7 +375,7 @@ point's imports, never hand-listed; every results file records their hash.
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes (keep `ruff`, `mypy` and `pytest` green)
+3. Make your changes (keep `ruff`, `basedpyright` and `pytest` green)
 4. Submit a pull request
 
 ## Known Limitations

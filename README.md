@@ -12,7 +12,7 @@ Extract, chunk, and summarize academic papers and long documents entirely on you
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#system-requirements)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Lint: Ruff](https://img.shields.io/badge/lint-ruff-261230)](https://docs.astral.sh/ruff/)
-[![Types: mypy](https://img.shields.io/badge/types-mypy-blue)](https://mypy-lang.org/)
+[![Types: basedpyright](https://img.shields.io/badge/types-basedpyright-blue)](https://docs.basedpyright.com/)
 [![Offline](https://img.shields.io/badge/network-100%25%20offline-success)](#privacy--security)
 
 <img src="assets/screenshot.png" alt="DocSummarizer — Abstract Console" width="820">
@@ -170,12 +170,12 @@ separate from the universal CPU release.
 
 ## Development
 
-Tooling is intentionally strict (broad Ruff ruleset, `mypy --strict`, pytest with a coverage floor).
+Tooling is intentionally strict (broad Ruff ruleset, basedpyright `all`, pytest with a coverage floor).
 See [DEVELOPMENT.md](DEVELOPMENT.md). The quality gate (matches CI):
 
 ```bash
 ruff check . && ruff format --check .
-mypy
+basedpyright
 pytest --cov=docsummarizer
 ```
 

@@ -41,6 +41,8 @@ dependencies = [
     # The language classifier: scores the evaluation metrics now and detects a
     # document's language later.
     "py3langid>=0.4,<0.5",
+    # `override` for Python 3.11, which has no typing.override.
+    "typing-extensions>=4.12,<5",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +59,6 @@ dev = [
     "pytest-cov==7.1.0",
     "coverage==7.17.4",
     "ruff==0.17.6",
-    "mypy==2.4.1",
     "basedpyright==1.40.2",
     "import-linter==2.17",
     "deptry==0.25.1",
@@ -200,45 +201,21 @@ extend-ignore-names = [
 docstring-code-format = true
 
 # --------------------------------------------------------------------------- #
-# mypy: strict static type checking of the shipped code
+# basedpyright: every check on. It replaces mypy: `all` is a superset of mypy
+# --strict, so running both would only duplicate findings.
 # --------------------------------------------------------------------------- #
-[tool.mypy]
-python_version = "3.11"
-strict = true
-warn_unreachable = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-mypy_path = ["src", "scripts"]
-# scripts/ is a package for the linter; its eval package imports as `eval`.
-explicit_package_bases = true
-files = ["src/docsummarizer", "run.py", "scripts/eval"]
-
-[[tool.mypy.overrides]]
-# Third-party libraries without bundled type information. Treat their imports
-# as untyped rather than erroring on the missing stubs.
-module = [
-    "pypdf.*",
-    "llama_cpp.*",
-    "huggingface_hub.*",
-    "docx.*",
-    "chardet.*",
-    "tqdm.*",
-    "psutil.*",
-]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-# striprtf ships no type information and *is* installed in CI, so strict mode
-# would flag calls into it as "untyped". Skip following it — treat it as Any.
-module = ["striprtf.*"]
-ignore_missing_imports = true
-follow_imports = "skip"
-
-[[tool.mypy.overrides]]
-# py3langid ships no type information either; treat it as Any the same way.
-module = ["py3langid.*"]
-ignore_missing_imports = true
-follow_imports = "skip"
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.11"
+include = ["src", "run.py", "scripts", "tests"]
+# scripts/ holds the eval package, imported as `eval` like the tests do.
+extraPaths = ["src", "scripts"]
+stubPath = "typings"
+# Conflicts with ruff's ISC003, which asks for implicit concatenation where
+# basedpyright asks for explicit (12 hits over src, run.py and scripts).
+reportImplicitStringConcatenation = false
+reportIgnoreCommentWithoutRule = true
+reportUnnecessaryTypeIgnoreComment = true
 
 # --------------------------------------------------------------------------- #
 # pytest + coverage
