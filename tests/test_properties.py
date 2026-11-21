@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from docsummarizer.document_parser import _EXTRACTORS, extract_from_txt, extract_text
@@ -80,6 +80,10 @@ _FOREIGN_ALPHABET = "nopqrstuvwxyzNOPQRSTUVWXYZ六七八九十 "
 # The Unicode encodings, each of which the detector reads exactly; legacy code
 # pages are detected heuristically and decode on a best-effort basis.
 _UNICODE_ENCODINGS = ("utf-8", "utf-8-sig", "utf-16", "utf-32")
+# Any text a file can hold: control characters and unassigned code points
+# included, only lone surrogates (which no Unicode encoding can write) left out.
+_ANY_TEXT = st.text(st.characters(exclude_categories=("Cs",)))
+_BOM = "\N{ZERO WIDTH NO-BREAK SPACE}"
 
 
 def _ink(text: str) -> str:
@@ -143,10 +147,15 @@ def test_normalize_language_is_one_bounded_line_and_idempotent(language: str | N
 
 
 @pytest.mark.parametrize("encoding", _UNICODE_ENCODINGS)
-@given(text=_TEXT)
+@given(text=_ANY_TEXT)
 def test_txt_text_round_trips_through_each_unicode_encoding(
     encoding: str, text: str, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
+    # Two openings no reader can tell apart from a BOM: plain UTF-8 starting
+    # with U+FEFF, and UTF-16-LE (BOM FF FE) starting with NUL, whose first four
+    # bytes are the UTF-32-LE BOM.
+    _ = assume(not (encoding == "utf-8" and text.startswith(_BOM)))
+    _ = assume(not (encoding == "utf-16" and text.startswith("\x00")))
     path = tmp_path_factory.mktemp("txt") / "document.txt"
     _ = path.write_bytes(text.encode(encoding))
 

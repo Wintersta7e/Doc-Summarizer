@@ -54,6 +54,22 @@ def test_extract_txt_latin1_encoding_detection(tmp_path: Path) -> None:
     assert "caf" in text.lower()
 
 
+# Valid UTF-8 holding a NUL, C1 controls and unassigned astral code points: the
+# encoding detector reads these bytes as UTF-16-BE.
+_UTF8_WITH_CONTROLS = "\xe4\x00\U00091647q\xb4\x93u\xd6\xf8\U000cef81\xa8\x9435Z\x7f"
+
+
+@pytest.mark.parametrize(("encoding", "label"), [("utf-8", "utf-8"), ("utf-8-sig", "UTF-8-SIG")])
+def test_extract_txt_reads_valid_utf8_with_control_characters_as_utf8(
+    tmp_path: Path, encoding: str, label: str
+) -> None:
+    target = tmp_path / "controls.txt"
+    _ = target.write_bytes(_UTF8_WITH_CONTROLS.encode(encoding))
+
+    assert extract_text(str(target)) == (_UTF8_WITH_CONTROLS, None)
+    assert analyze_document(str(target))["encoding"] == label
+
+
 def test_extract_md_routes_to_txt(tmp_path: Path) -> None:
     target = tmp_path / "notes.md"
     _ = target.write_text("# heading\n\nbody\n", encoding="utf-8")
