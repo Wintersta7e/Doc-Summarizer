@@ -620,10 +620,10 @@ class CaseRun:
 
 def _json_units(content: str) -> list[str] | None:
     """The lead and point texts the app's parser reads from one JSON call."""
-    from docsummarizer.model_manager import _parse_structured_json
+    from docsummarizer.model_manager import parse_structured_json
     from eval import metrics
 
-    parsed = _parse_structured_json(content)
+    parsed = parse_structured_json(content)
     if parsed is None:
         return None
     texts = [str(parsed.get("lead") or ""), *(text for text, _ in _json_points(parsed))]
@@ -632,23 +632,23 @@ def _json_units(content: str) -> list[str] | None:
 
 def _json_points(parsed: Mapping[str, Any]) -> list[tuple[str, str]]:
     """Every ``(text, quote)`` pair of a parsed call: Detailed points and each section."""
-    from docsummarizer.model_manager import _read_raw_points
+    from docsummarizer.model_manager import read_raw_points
 
-    pairs = _read_raw_points(parsed.get("points"))
+    pairs = read_raw_points(parsed.get("points"))
     sections = parsed.get("sections")
     if isinstance(sections, dict):
         for value in sections.values():
-            pairs.extend(_read_raw_points(value))
+            pairs.extend(read_raw_points(value))
     return pairs
 
 
 def _model_quotes(calls: Sequence[CallRecord]) -> dict[str, str]:
     """Each point text's quote as the model wrote it, over every parsed JSON call."""
-    from docsummarizer.model_manager import _parse_structured_json
+    from docsummarizer.model_manager import parse_structured_json
 
     quotes: dict[str, str] = {}
     for call in calls:
-        parsed = _parse_structured_json(call.content) if "response_format" in call.kwargs else None
+        parsed = parse_structured_json(call.content) if "response_format" in call.kwargs else None
         if parsed is not None:
             quotes.update(_json_points(parsed))
     return quotes

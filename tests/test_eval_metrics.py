@@ -236,7 +236,7 @@ def _m7_of_grounded_points() -> metrics.M7:
         "lead": "A ferry serves the village.",
         "points": [{"text": f"Point {i}.", "quote": quote} for i, quote in enumerate(_M7_QUOTES)],
     }
-    parsed = model_manager._parse_structured_json(json.dumps(payload))
+    parsed = model_manager.parse_structured_json(json.dumps(payload))
     assert parsed is not None
     built = model_manager._build_structured(parsed, "detailed", _M7_DOCUMENT, 0)
     quotes = {f"Point {i}.": quote for i, quote in enumerate(_M7_QUOTES)}

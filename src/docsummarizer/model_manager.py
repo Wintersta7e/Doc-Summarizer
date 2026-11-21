@@ -6,13 +6,14 @@ import functools
 import json
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast, final
+from typing import TYPE_CHECKING, Literal, Protocol, cast, final, overload
 
 from huggingface_hub import hf_hub_download
+from typing_extensions import override
 
 from docsummarizer.logger import (
     get_logger,
@@ -23,6 +24,14 @@ from docsummarizer.logger import (
 )
 from docsummarizer.paths import app_data_dir
 from docsummarizer.provenance import SourceSpan, locate_quote, split_sentences
+
+if TYPE_CHECKING:
+    from llama_cpp import (
+        CompletionUsage,
+        CreateChatCompletionResponse,
+        CreateChatCompletionStreamResponse,
+    )
+    from tqdm import tqdm
 
 # Supported summary types. Kept as module-level string constants (rather than
 # enum.StrEnum, which requires Python 3.11+) so callers can keep passing plain
@@ -51,8 +60,49 @@ def gpu_offload_supported() -> bool:
         return False
 
 
+class ChatModel(Protocol):
+    """The part of ``llama_cpp.Llama`` the summarizer calls; the eval runner wraps it."""
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[False] = False,
+        **kwargs: object,
+    ) -> "CreateChatCompletionResponse": ...
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[True],
+        **kwargs: object,
+    ) -> "Iterator[CreateChatCompletionStreamResponse]": ...
+
+    def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
+        """The token ids of ``text``."""
+        ...
+
+
+class _PerfCounters(Protocol):
+    """The fields of llama.cpp's ``llama_perf_context_data`` the stats read."""
+
+    n_p_eval: int
+    n_eval: int
+    t_p_eval_ms: float
+    t_eval_ms: float
+
+
 class SummarizationCancelledError(Exception):
     """Raised between chunks when the caller requests a clean stop."""
+
+
+def _binding(module: object, name: str) -> Callable[..., object] | None:
+    """A function of llama-cpp's low-level binding, or ``None`` on a build without it."""
+    found: object = getattr(module, name, None)
+    return found if callable(found) else None
 
 
 def _raise_if_cancelled(should_cancel: Callable[[], bool] | None) -> None:
@@ -320,6 +370,7 @@ def _perf_delta(before: _PerfSnapshot, after: _PerfSnapshot) -> _PerfSnapshot:
     )
 
 
+@final
 class _RunStatsAccumulator:
     """Sums one request's completions; ``finish`` freezes the result once."""
 
@@ -444,7 +495,7 @@ def _split_into_chunks_with_offsets(text: str, max_chars: int) -> list[tuple[str
     return chunks
 
 
-def _parse_structured_json(raw: str) -> dict[str, Any] | None:
+def parse_structured_json(raw: str) -> dict[str, object] | None:
     """Parse a JSON object from a model response, tolerantly.
 
     Tries a direct parse, then decodes the first ``{...}`` object even when the
@@ -455,20 +506,21 @@ def _parse_structured_json(raw: str) -> dict[str, Any] | None:
     raw = raw.strip()
     if not raw:
         return None
+    data: object
     try:
-        data = json.loads(raw)
+        data = cast("object", json.loads(raw))
     except (json.JSONDecodeError, ValueError):
         start = raw.find("{")
         if start == -1:
             return None
         try:
-            data, _ = json.JSONDecoder().raw_decode(raw, start)
+            data, _ = cast("tuple[object, int]", json.JSONDecoder().raw_decode(raw, start))
         except (json.JSONDecodeError, ValueError):
             return None
-    return data if isinstance(data, dict) else None
+    return cast("dict[str, object]", data) if isinstance(data, dict) else None
 
 
-def _read_raw_points(value: object) -> list[tuple[str, str]]:
+def read_raw_points(value: object) -> list[tuple[str, str]]:
     """Coerce a parsed ``points`` array into ``(text, quote)`` pairs.
 
     Defensive against a small local model's malformed entries: non-string or
@@ -478,13 +530,14 @@ def _read_raw_points(value: object) -> list[tuple[str, str]]:
     if not isinstance(value, list):
         return []
     points: list[tuple[str, str]] = []
-    for item in value:
+    for item in cast("list[object]", value):
         if not isinstance(item, dict):
             continue
-        text = item.get("text")
+        fields = cast("dict[str, object]", item)
+        text = fields.get("text")
         if not isinstance(text, str) or not text.strip():
             continue
-        quote = item.get("quote")
+        quote = fields.get("quote")
         quote = quote.strip() if isinstance(quote, str) else ""
         points.append((text.strip(), quote))
     return points
@@ -513,7 +566,7 @@ def _ground_points(
 
 
 def _build_structured(
-    parsed: dict[str, Any], summary_type: str, text: str, base: int
+    parsed: dict[str, object], summary_type: str, text: str, base: int
 ) -> StructuredSummary:
     """Build a ``StructuredSummary`` from one parsed JSON response over ``text``.
 
@@ -523,14 +576,14 @@ def _build_structured(
     sentences = split_sentences(text)
     if summary_type == SUMMARY_TYPE_DETAILED:
         lead = str(parsed.get("lead", "")).strip() or None
-        points = _ground_points(_read_raw_points(parsed.get("points")), text, base, sentences)[
+        points = _ground_points(read_raw_points(parsed.get("points")), text, base, sentences)[
             :_DETAILED_POINT_COUNT
         ]
         return _make_structured(SUMMARY_TYPE_DETAILED, lead, points, None)
-    raw_sections = parsed.get("sections")
-    raw_sections = raw_sections if isinstance(raw_sections, dict) else {}
+    found = parsed.get("sections")
+    raw_sections = cast("dict[str, object]", found) if isinstance(found, dict) else {}
     sections = {
-        name: _ground_points(_read_raw_points(raw_sections.get(name)), text, base, sentences)[
+        name: _ground_points(read_raw_points(raw_sections.get(name)), text, base, sentences)[
             :_DETAILED_POINT_COUNT
         ]
         for name in _STRUCTURED_SECTIONS
@@ -649,7 +702,7 @@ def get_model_path(model_config: ModelConfig = DEFAULT_MODEL) -> Path:
     return get_models_directory() / model_config.filename
 
 
-def _build_progress_tqdm(callback: Callable[[float, str], None]) -> type[Any]:
+def _build_progress_tqdm(callback: Callable[[float, str], None]) -> "type[tqdm[object]]":
     """Build a tqdm subclass that fires `callback` on each whole-MB step.
 
     huggingface_hub instantiates this for `hf_hub_download`. tqdm calls
@@ -659,20 +712,26 @@ def _build_progress_tqdm(callback: Callable[[float, str], None]) -> type[Any]:
     """
     from tqdm.auto import tqdm
 
-    class _ProgressTqdm(tqdm):  # type: ignore[misc]
-        _last_reported_mb = -1
+    # tqdm is generic only in its type stubs; at runtime it is not subscriptable.
+    base = cast("type[tqdm[object]]", tqdm)
 
-        def update(self, n: int = 1) -> bool | None:
-            ret: bool | None = super().update(n)
+    class _ProgressTqdm(base):
+        _last_reported_mb: int = -1
+
+        @override
+        def update(self, n: float | None = 1) -> bool | None:
+            ret = super().update(n)
             try:
-                if not self.total or self.total <= 0:
+                total = cast("float | None", self.total)
+                done = cast("float", self.n)
+                if not total or total <= 0:
                     return ret
-                mb_done = int(self.n / (1024 * 1024))
+                mb_done = int(done / (1024 * 1024))
                 if mb_done == self._last_reported_mb:
                     return ret
                 self._last_reported_mb = mb_done
-                pct = (self.n / self.total) * 100.0
-                mb_total = self.total / (1024 * 1024)
+                pct = (done / total) * 100.0
+                mb_total = total / (1024 * 1024)
                 callback(pct, f"Downloading {mb_done} / {mb_total:.0f} MB")
             except Exception:
                 # Progress reporting must never break the download itself.
@@ -822,7 +881,7 @@ class Summarizer:
 
         start_time = time.time()
 
-        self.llm: Llama | None = Llama(
+        self.llm: ChatModel | None = Llama(
             model_path=str(model_path),
             n_ctx=n_ctx,
             n_threads=self.n_threads,
@@ -841,8 +900,8 @@ class Summarizer:
         self._language: str = LANGUAGE_AUTO
         # ctypes callback objects must stay strongly referenced while llama.cpp
         # owns the callback pointer. These are cleared after each completion.
-        self._llama_abort_callback: Any | None = None
-        self._llama_abort_callback_user_data: Any | None = None
+        self._llama_abort_callback: object | None = None
+        self._llama_abort_callback_user_data: ctypes.c_void_p | None = None
 
     def _llama_context(self) -> object | None:
         """Return the low-level llama_context pointer, if this backend exposes it."""
@@ -858,7 +917,7 @@ class Summarizer:
         if ctx is not None:
             return ctx
         try:
-            internal_ctx = getattr(llm, "_ctx", None)
+            internal_ctx: object = getattr(llm, "_ctx", None)
             if internal_ctx is not None:
                 ctx = cast("object | None", getattr(internal_ctx, "ctx", None))
         except Exception as exc:  # the optional binding varies by build
@@ -881,8 +940,8 @@ class Summarizer:
             logger.debug("llama abort callback unavailable: %s", exc, exc_info=True)
             return False
 
-        set_abort_callback = getattr(llama_cpp, "llama_set_abort_callback", None)
-        callback_type = getattr(llama_cpp, "ggml_abort_callback", None)
+        set_abort_callback = _binding(llama_cpp, "llama_set_abort_callback")
+        callback_type = _binding(llama_cpp, "ggml_abort_callback")
         ctx = self._llama_context()
         if not callable(set_abort_callback) or not callable(callback_type) or ctx is None:
             return False
@@ -901,7 +960,7 @@ class Summarizer:
         self._llama_abort_callback = c_callback
         self._llama_abort_callback_user_data = user_data
         try:
-            set_abort_callback(ctx, c_callback, user_data)
+            _ = set_abort_callback(ctx, c_callback, user_data)
         except Exception as exc:  # the optional binding varies by build
             self._llama_abort_callback = None
             self._llama_abort_callback_user_data = None
@@ -917,11 +976,11 @@ class Summarizer:
         try:
             from llama_cpp import llama_cpp
 
-            set_abort_callback = getattr(llama_cpp, "llama_set_abort_callback", None)
-            callback_type = getattr(llama_cpp, "ggml_abort_callback", None)
+            set_abort_callback = _binding(llama_cpp, "llama_set_abort_callback")
+            callback_type = _binding(llama_cpp, "ggml_abort_callback")
             ctx = self._llama_context()
             if callable(set_abort_callback) and callable(callback_type) and ctx is not None:
-                set_abort_callback(ctx, callback_type(), ctypes.c_void_p())
+                _ = set_abort_callback(ctx, callback_type(), ctypes.c_void_p())
         except Exception as exc:  # the optional binding varies by build
             logger = get_logger()
             logger.debug("Unable to clear llama abort callback: %s", exc, exc_info=True)
@@ -930,7 +989,7 @@ class Summarizer:
             self._llama_abort_callback_user_data = None
 
     @contextmanager
-    def _llama_abort_callback_guard(self, check: Callable[[], bool]) -> Iterator[None]:
+    def _llama_abort_callback_guard(self, check: Callable[[], bool]) -> Generator[None, None, None]:
         """Temporarily install llama.cpp decode cancellation for one completion."""
         installed = self._install_llama_abort_callback(check)
         try:
@@ -956,12 +1015,12 @@ class Summarizer:
         if check is not None:
             _raise_if_cancelled(check)
         before = self.perf_snapshot()
-        finish_reason: object = None
-        usage: Any = None
+        finish_reason: str | None = None
+        usage: CompletionUsage | None = None
         content = ""
         try:
             if check is None:
-                response = llm.create_chat_completion(messages=messages, **kwargs)
+                response = llm.create_chat_completion(messages=messages, stream=False, **kwargs)
                 choice = response["choices"][0]
                 finish_reason = choice.get("finish_reason")
                 usage = response.get("usage")
@@ -990,7 +1049,7 @@ class Summarizer:
             self._record_call(before, finish_reason, usage, content)
 
     @contextmanager
-    def _request_stats(self) -> Iterator[_RunStatsAccumulator]:
+    def _request_stats(self) -> Generator[_RunStatsAccumulator, None, None]:
         """The request's accumulator: the outermost entry point opens it, nested calls share it."""
         current = self._run_stats
         if current is not None:
@@ -1012,10 +1071,10 @@ class Summarizer:
         try:
             from llama_cpp import llama_cpp
 
-            perf_context = getattr(llama_cpp, "llama_perf_context", None)
+            perf_context = _binding(llama_cpp, "llama_perf_context")
             if not callable(perf_context):
                 return None
-            data = perf_context(ctx)
+            data = cast("_PerfCounters", perf_context(ctx))
             return _PerfSnapshot(
                 int(data.n_p_eval),
                 int(data.n_eval),
@@ -1028,7 +1087,11 @@ class Summarizer:
             return None
 
     def _record_call(
-        self, before: _PerfSnapshot | None, finish_reason: object, usage: object, content: str
+        self,
+        before: _PerfSnapshot | None,
+        finish_reason: str | None,
+        usage: "Mapping[str, object] | None",
+        content: str,
     ) -> None:
         """Add one completion to the open request's stats, if a request is open."""
         stats = self._run_stats
@@ -1039,7 +1102,7 @@ class Summarizer:
             after = self.perf_snapshot() if before is not None else None
             perf = _perf_delta(before, after) if before is not None and after is not None else None
             usage_prompt = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-            n_tokens = getattr(self.llm, "n_tokens", None)
+            n_tokens: object = getattr(self.llm, "n_tokens", None)
             stats.add_call(
                 finish_reason=finish_reason,
                 perf=perf,
@@ -1135,7 +1198,7 @@ class Summarizer:
             # Document exceeds the context budget: map-reduce.
             log_info(f"Document exceeds context budget; summarizing in {len(chunks)} chunks")
 
-            partials = []
+            partials: list[str] = []
             for i, chunk in enumerate(chunks, 1):
                 _raise_if_cancelled(should_cancel)
                 log_info(f"Summarizing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
@@ -1226,7 +1289,7 @@ class Summarizer:
         )
 
         if len(chunks) == 1:
-            parsed = _parse_structured_json(
+            parsed = parse_structured_json(
                 self._chat_json(f"{instruction}\n\nDocument:\n{text}", max_tokens)
             )
             if parsed is None:
@@ -1240,7 +1303,7 @@ class Summarizer:
         partials: list[StructuredSummary] = []
         for chunk_text, base in chunks:
             _raise_if_cancelled(should_cancel)
-            parsed = _parse_structured_json(
+            parsed = parse_structured_json(
                 self._chat_json(f"{instruction}\n\nDocument:\n{chunk_text}", max_tokens)
             )
             if parsed is not None:
