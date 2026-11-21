@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 import shiboken6
-from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl, SignalInstance
+from PySide6.QtCore import QEventLoop, QObject, QThreadPool, QTimer, QUrl, SignalInstance
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlEngine, QQmlExpression
 from PySide6.QtQuick import QQuickItem, QQuickWindow
@@ -220,15 +220,38 @@ def app(qapp: QGuiApplication, monkeypatch: pytest.MonkeyPatch) -> Iterator[_App
     engine, bridge = create_engine(qapp)
     window = engine.rootObjects()[0]
     assert isinstance(window, QQuickWindow)
-    _wait_for(bridge.loadComplete, lambda: bridge.property("modelReady") is True, bridge.checkModel)
+    _wait_for(
+        bridge.loadComplete,
+        lambda: bridge.property("modelReady") is True,
+        bridge.checkModel,
+        bridge,
+    )
     yield _App(window, bridge, prompts)
     # Delete the engine (and its window) while the bridge its bindings read is alive.
     shiboken6.delete(engine)
     gpu_offload_supported.cache_clear()
 
 
+def _bridge_state(bridge: ConsoleBridge) -> dict[str, object]:
+    """What a timed-out wait reports: the bridge's state and the thread pool's load.
+
+    Returns:
+        The state, by name.
+    """
+    pool = QThreadPool.globalInstance()
+    state: dict[str, object] = {
+        name: bridge.property(name) for name in ("busy", "hasDoc", "modelReady", "statusText")
+    }
+    state["poolActive"] = pool.activeThreadCount()
+    state["poolMax"] = pool.maxThreadCount()
+    return state
+
+
 def _wait_for(
-    signal: SignalInstance, done: Callable[[], bool], start: Callable[[], object]
+    signal: SignalInstance,
+    done: Callable[[], bool],
+    start: Callable[[], object],
+    bridge: ConsoleBridge,
 ) -> None:
     """Run ``start``, then spin the event loop until ``done`` holds after ``signal``."""
     loop = QEventLoop()
@@ -243,7 +266,7 @@ def _wait_for(
     if not done():
         _ = loop.exec()
     _ = signal.disconnect(check)
-    assert done(), "the app did not reach the expected state in time"
+    assert done(), f"not there after {_TIMEOUT_MS} ms: {_bridge_state(bridge)}"
 
 
 def _items(root: QQuickItem) -> Iterator[QQuickItem]:
@@ -311,7 +334,7 @@ def _summarize(app: _App, start: Callable[[], object]) -> dict[str, object]:
     received: list[dict[str, object]] = []
     _ = app.bridge.summaryReady.connect(received.append)
     try:
-        _wait_for(app.bridge.summaryReady, lambda: bool(received), start)
+        _wait_for(app.bridge.summaryReady, lambda: bool(received), start, app.bridge)
     finally:
         _ = app.bridge.summaryReady.disconnect(received.append)
     return received[-1]
@@ -326,6 +349,7 @@ def _save(app: _App, target: Path) -> None:
             app.bridge.toast,
             lambda: f"Saved: {target.name}" in toasts,
             functools.partial(_pick, app, "Save Summary", "saveDialog", target),
+            app.bridge,
         )
     finally:
         _ = app.bridge.toast.disconnect(toasts.append)
@@ -338,6 +362,7 @@ def _open(app: _App, source: Path) -> None:
         bridge.docChanged,
         lambda: bridge.property("hasDoc") is True and bridge.property("busy") is False,
         functools.partial(_pick, app, "Select File", "openDialog", source),
+        bridge,
     )
 
 
