@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import App
@@ -6,6 +7,9 @@ import App
 // model/compute readout + theme toggle. Model strings come from the bridge.
 Rectangle {
     id: bar
+
+    // The ConsoleBridge, passed down from Main.qml.
+    required property var bridge
     height: 66
     color: "transparent"
 
@@ -103,7 +107,7 @@ Rectangle {
             spacing: 0
             Layout.alignment: Qt.AlignVCenter
             Text {
-                text: bridge.modelName.toUpperCase()
+                text: bar.bridge.modelName.toUpperCase()
                 color: Theme.faint
                 font.family: Theme.mono
                 font.pixelSize: 10
@@ -116,7 +120,7 @@ Rectangle {
                 font.pixelSize: 10
             }
             Text {
-                text: bridge.computeLabel
+                text: bar.bridge.computeLabel
                 color: Theme.accent
                 font.family: Theme.mono
                 font.pixelSize: 10
@@ -155,7 +159,7 @@ Rectangle {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     Theme.dark = !Theme.dark;
-                    bridge.setAppearance(Theme.dark ? "Dark" : "Light");
+                    bar.bridge.setAppearance(Theme.dark ? "Dark" : "Light");
                 }
             }
         }

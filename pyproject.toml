@@ -8,14 +8,19 @@ version = "2.0.1"
 description = "Offline document summarization powered by a local LLM"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+# Upper bound measured 2026-11-21: CPython 3.11-3.15 resolve the core and gui
+# dependencies from wheels alone on Linux, Windows and macOS; 3.16 does not
+# (lxml, through python-docx, and PySide6 ship no 3.16 wheel).
+requires-python = ">=3.11,<3.16"
 authors = [{ name = "Wintersta7e" }]
 keywords = ["llm", "summarization", "offline", "pdf", "docx", "qwen", "llama-cpp"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Operating System :: OS Independent",
     "Environment :: Console",
     "Environment :: X11 Applications",
@@ -36,6 +41,8 @@ dependencies = [
     # The language classifier: scores the evaluation metrics now and detects a
     # document's language later.
     "py3langid>=0.4,<0.5",
+    # `override` for Python 3.11, which has no typing.override.
+    "typing-extensions>=4.12,<5",
 ]
 
 [project.optional-dependencies]
@@ -44,11 +51,22 @@ dependencies = [
 runtime = [
     "llama-cpp-python>=0.3.31,<0.4",
 ]
+# Exact pins, so every place the gate runs uses the same tool versions; uv.lock
+# pins everything else. Each is the newest release that still installs on
+# Python 3.11, the lowest supported minor.
 dev = [
-    "pytest>=9.0,<10",
-    "pytest-cov>=7.0,<8",
-    "ruff>=0.15,<0.17",
-    "mypy>=2.4,<3",
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "pytest-randomly==5.1.0",
+    "pytest-timeout==2.4.0",
+    "coverage==7.17.4",
+    "ruff==0.17.6",
+    "basedpyright==1.40.2",
+    "import-linter==2.17",
+    "deptry==0.25.1",
+    "vulture==2.16",
+    # In the dev environment, so the git hooks' local steps see its tools.
+    "pre-commit==4.7.0",
 ]
 gui = [
     # Native Qt/QML desktop UI (the "Abstract Console" redesign). Optional so a
@@ -68,6 +86,19 @@ Homepage = "https://github.com/Wintersta7e/Doc-Summarizer"
 Issues = "https://github.com/Wintersta7e/Doc-Summarizer/issues"
 Releases = "https://github.com/Wintersta7e/Doc-Summarizer/releases"
 
+[tool.uv]
+# llama-cpp-python comes only from its prebuilt CPU wheels: its source build
+# fails on the supported platforms.
+no-build-package = ["llama-cpp-python"]
+
+[[tool.uv.index]]
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cpu" }
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/docsummarizer"]
 
@@ -77,7 +108,6 @@ include = [
     "run.py",
     "README.md",
     "LICENSE",
-    "DEVELOPMENT.md",
     "DocSummarizer.spec",
 ]
 
@@ -86,124 +116,257 @@ include = [
 # --------------------------------------------------------------------------- #
 [tool.ruff]
 line-length = 100
-target-version = "py310"
-src = ["src"]
+target-version = "py311"
+src = ["src", "scripts"]
 
 [tool.ruff.lint]
-select = [
-    "E", "W",   # pycodestyle
-    "F",        # pyflakes
-    "I",        # isort
-    "N",        # pep8-naming
-    "UP",       # pyupgrade
-    "B",        # flake8-bugbear
-    "A",        # flake8-builtins
-    "C4",       # flake8-comprehensions
-    "EM",       # flake8-errmsg
-    "FA",       # flake8-future-annotations
-    "G",        # flake8-logging-format
-    "ICN",      # flake8-import-conventions
-    "ISC",      # flake8-implicit-str-concat
-    "LOG",      # flake8-logging
-    "PIE",      # flake8-pie
-    "PT",       # flake8-pytest-style
-    "PTH",      # flake8-use-pathlib
-    "Q",        # flake8-quotes
-    "RSE",      # flake8-raise
-    "RET",      # flake8-return
-    "SLF",      # flake8-self
-    "SIM",      # flake8-simplify
-    "TID",      # flake8-tidy-imports
-    "TRY",      # tryceratops
-    "PERF",     # perflint
-    "FURB",     # refurb
-    "PL",       # pylint
-    "S",        # flake8-bandit (security)
-    "RUF",      # ruff-specific
-]
+select = ["ALL"]
 ignore = [
-    "E501",    # line length — handled by the formatter
-    "ISC001",  # conflicts with the formatter
-    "TRY003",  # long messages outside exception class — too noisy for an app
-    "PLR2004", # "magic value" comparisons — noisy and low value here
-    "PLR0913", # too many arguments — constructors / argparse wiring need them
-    "PLC0415", # import outside top level — intentional lazy imports for heavy/optional deps
-    "G004",    # the log_* wrappers take pre-formatted strings; lazy %-formatting doesn't apply
-    "EM",      # assigning exception messages to a variable first is verbose, not clearer
+    # Conflicts with `ruff format`, which owns trailing commas (130 hits).
+    "COM812",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 12
+max-returns = 6
+max-statements = 50
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+# Optional, heavy or platform-only modules: imported inside the function that
+# needs them, so a module-level import is an error and the lazy one is allowed.
+banned-module-level-imports = [
+    "docx",
+    "llama_cpp",
+    "psutil",
+    "py3langid",
+    "pypdf",
+    "resource",
+    "striprtf",
+    "tqdm",
+]
+
+[tool.ruff.lint.flake8-copyright]
+notice-rgx = "SPDX-License-Identifier: MIT"
+
+[tool.ruff.lint.pep8-naming]
+# Qt overrides and the bridge's QML-facing signals, properties and slots: QML
+# binds these exact camelCase names.
+extend-ignore-names = [
+    "batchComplete", "batchProcess", "batchProgress", "batchRows", "batchRowsChanged", "beginDownload",
+    "busyChanged", "canSummarize", "cancelSummarize", "checkModel", "computeLabel", "contextSize",
+    "cpuCount", "createRequest", "currentFileName", "docChanged", "downloadChanged", "downloadPercent",
+    "extractedText", "gpuEnabled", "gpuSupported", "hasDoc", "loadComplete", "loadDocument",
+    "loadModel", "modelDownloaded", "modelName", "modelQuant", "modelReady", "modelReadyChanged",
+    "modelSizeGb", "outgoingData", "outputLanguage", "outputLanguages", "reloadArmed", "reloadArmedChanged", "reloadModel",
+    "saveSummary", "savedFlash", "setAppearance", "setOutputLanguage", "setSummaryType", "setThreads",
+    "settingsChanged", "statusChanged", "statusColor", "statusText", "summaryError", "summaryReady",
+    "summaryType", "summaryTypeChanged", "summaryTypes", "toggleGpu", "unloadDocument", "urlToPath",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests legitimately assert (S101), reach into private helpers (SLF001),
-# and use bugbear-flagged fixture patterns (B).
-"tests/*" = ["S101", "SLF001", "B"]
-# Qt requires camelCase for QObject signals/slots/properties so QML can bind
-# them; pep8-naming (N802/N815) does not apply to the Qt UI bridge.
-"src/docsummarizer/ui/*" = ["N802", "N815"]
-# Dev/QA scripts may seed bridge internals for offscreen rendering.
-"scripts/*" = ["SLF001"]
+"tests/**" = [
+    # pytest's assert is the test mechanism.
+    "S101",
+    # 189 hits: a test's name states the behaviour it checks; a docstring that
+    # repeats it adds nothing.
+    "D103",
+    # 99 hits: an assert compares against the literal the behaviour must
+    # produce; a named constant would only restate the expected value.
+    "PLR2004",
+    # 26 hits: white-box tests of module-private helpers and bridge state;
+    # making them public would widen the API that later changes rewrite.
+    "SLF001",
+]
+# Standard output is the interface of the CLI and of the dev scripts.
+"src/docsummarizer/cli.py" = ["T201"]
+"scripts/**" = ["T201"]
+# S603 (no option to say so): these files run fixed tool argv lists, never a shell.
+"scripts/check.py" = ["S603"]  # 1 hit
+"tests/test_eval_runner.py" = ["S603"]  # 1 hit
+"tests/test_release_claims.py" = ["S603"]  # 1 hit
+"scripts/eval/run.py" = [
+    "S603",  # 3 hits: fixed tool argv lists, never a shell
+    # 24 hits: bootstrap() must pin sys.path and app data before any first-party
+    # import (test_bootstrap_points_app_data_at_the_eval_dir).
+    "PLC0415",
+    # 1 hit: a seeded random.Random for reproducible sampling, never security;
+    # another sampler would change the language self-test's reported rates.
+    "S311",
+    # 2 hits: a failed case run is a measured outcome recorded in the results
+    # file; its exception text may hold document or model text, so it is never
+    # logged.
+    "BLE001",
+]
+# 7 hits: sys.path must point at this checkout's src before the PySide6 and
+# first-party imports.
+"scripts/render_qml.py" = ["E402"]
+"tests/test_eval_metrics.py" = [
+    # 1 hit: seeded random.Random test data, never security.
+    "S311",
+    # 8 hits: the CJK fixtures use full-width punctuation on purpose; the
+    # classifier under test must see real CJK text.
+    "RUF001",
+]
 
 [tool.ruff.format]
 docstring-code-format = true
 
 # --------------------------------------------------------------------------- #
-# mypy: strict static type checking of the shipped code
+# basedpyright: every check on. It replaces mypy: `all` is a superset of mypy
+# --strict, so running both would only duplicate findings.
 # --------------------------------------------------------------------------- #
-[tool.mypy]
-python_version = "3.10"
-strict = true
-warn_unreachable = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-mypy_path = "src"
-files = ["src/docsummarizer", "run.py", "scripts/eval"]
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.11"
+include = ["src", "run.py", "scripts", "tests"]
+# scripts/ holds the eval package, imported as `eval` like the tests do.
+extraPaths = ["src", "scripts"]
+stubPath = "typings"
+# Conflicts with ruff's ISC003, which asks for implicit concatenation where
+# basedpyright asks for explicit (12 hits over src, run.py and scripts).
+reportImplicitStringConcatenation = false
+reportIgnoreCommentWithoutRule = true
+reportUnnecessaryTypeIgnoreComment = true
 
-[[tool.mypy.overrides]]
-# Third-party libraries without bundled type information. Treat their imports
-# as untyped rather than erroring on the missing stubs.
-module = [
-    "pypdf.*",
-    "llama_cpp.*",
-    "huggingface_hub.*",
-    "docx.*",
-    "chardet.*",
-    "tqdm.*",
-    "psutil.*",
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+# 30 hits: white-box tests of module-private helpers and bridge state; making
+# them public would widen the API that later changes rewrite. src, run.py and
+# scripts stay fully checked.
+reportPrivateUsage = false
+
+# --------------------------------------------------------------------------- #
+# import-linter: the package's layers, from its real import graph
+# (ui | cli -> settings -> model_manager -> parsing/provenance/io -> logger
+# -> paths). PySide6 is an external package, so it must be in the graph.
+# --------------------------------------------------------------------------- #
+[tool.importlinter]
+root_packages = ["docsummarizer"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Front ends above settings, above the summarizer, above parsing, above logging"
+type = "layers"
+containers = ["docsummarizer"]
+exhaustive = true
+# settings validates the saved output language through the summarizer's
+# normalize_language, so it sits above model_manager.
+layers = [
+    "ui | cli",
+    "settings",
+    "model_manager",
+    "document_parser | provenance | io_helpers",
+    "logger",
+    "paths",
 ]
-ignore_missing_imports = true
 
-[[tool.mypy.overrides]]
-# striprtf ships no type information and *is* installed in CI, so strict mode
-# would flag calls into it as "untyped". Skip following it — treat it as Any.
-module = ["striprtf.*"]
-ignore_missing_imports = true
-follow_imports = "skip"
+[[tool.importlinter.contracts]]
+name = "The core never imports a front end or Qt"
+type = "forbidden"
+source_modules = [
+    "docsummarizer.document_parser",
+    "docsummarizer.io_helpers",
+    "docsummarizer.logger",
+    "docsummarizer.model_manager",
+    "docsummarizer.paths",
+    "docsummarizer.provenance",
+    "docsummarizer.settings",
+]
+forbidden_modules = ["docsummarizer.ui", "docsummarizer.cli", "PySide6"]
 
-[[tool.mypy.overrides]]
-# py3langid ships no type information either; treat it as Any the same way.
-module = ["py3langid.*"]
-ignore_missing_imports = true
-follow_imports = "skip"
+[[tool.importlinter.contracts]]
+name = "The GUI and the CLI are independent"
+type = "independence"
+modules = ["docsummarizer.ui", "docsummarizer.cli"]
+
+[[tool.importlinter.contracts]]
+name = "No import cycle between sibling modules"
+type = "acyclic_siblings"
+ancestors = ["docsummarizer"]
+
+# --------------------------------------------------------------------------- #
+# deptry: every import declared, every declared dependency used
+# --------------------------------------------------------------------------- #
+[tool.deptry]
+# scripts/ is on the path of the scripts and the tests, so check.py and the
+# eval package import as top-level `check` and `eval`.
+known_first_party = ["docsummarizer", "check", "eval"]
+# The gate tools in the dev extra are run, never imported.
+optional_dependencies_dev_groups = ["dev"]
+
+[tool.deptry.package_module_name_map]
+llama-cpp-python = "llama_cpp"
+
+[tool.deptry.per_rule_ignores]
+# 1 hit: model_manager loads llama_cpp through importlib.import_module, so the
+# type checker reads its protocol instead of the uninstalled package; deptry
+# cannot see a by-name import.
+DEP002 = ["llama-cpp-python"]
+
+# --------------------------------------------------------------------------- #
+# vulture: dead code. At 80 it reports unused imports, variables and
+# unreachable code; the Qt slots and properties QML calls score 60, below it.
+# --------------------------------------------------------------------------- #
+[tool.vulture]
+paths = ["src", "run.py", "scripts", "tests"]
+min_confidence = 80
+
+# --------------------------------------------------------------------------- #
+# typos: spelling, run by the pre-commit hook. Each word below is correct
+# where it stands and is accepted as written, with its measured hit count.
+# --------------------------------------------------------------------------- #
+[tool.typos.default.extend-words]
+# PyInstaller's spec keyword (DocSummarizer.spec): 4.
+datas = "datas"
+# German, Spanish and French sentences in the multilingual test fixtures: 10.
+alle = "alle"
+vor = "vor"
+ein = "ein"
+sie = "sie"
+ist = "ist"
+hace = "hace"
+abord = "abord"
+# "café" as Latin-1 bytes; the check reads its ASCII prefix: 2.
+caf = "caf"
 
 # --------------------------------------------------------------------------- #
 # pytest + coverage
 # --------------------------------------------------------------------------- #
-[tool.pytest.ini_options]
+[tool.pytest]
+# strict = strict config, markers, parametrize ids and xfail.
+strict = true
 testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
-addopts = ["-ra", "--strict-markers", "--strict-config"]
+addopts = ["-ra"]
+filterwarnings = ["error"]
+# Tests log the evidence they measured (files scanned, counts seen) at INFO;
+# pytest shows it beside a failure, or live with `-o log_cli=true`.
+log_level = "INFO"
+# pytest-timeout: a hung test fails instead of stalling the gate (seconds;
+# the plugin declares the option as a string).
+timeout = "120"
 markers = ["windows: also run by the windows-latest CI job (Windows filesystem semantics)"]
 
 [tool.coverage.run]
 source = ["docsummarizer"]
 branch = true
-# ui/app.py launches the Qt event loop and needs a display; it's validated
-# manually (its engine wiring is covered by the QML load test), so it's
-# excluded from the coverage gate.
+# ui/app.py launches the Qt event loop and needs a display; its engine wiring
+# is covered by the QML load tests, its event loop only by the exe boot check.
+# It joins the gate once the application smoke run covers main().
 omit = ["*/ui/app.py"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 60
+# The total; scripts/check.py --per-file-floor holds every file to 80.
+fail_under = 90
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",

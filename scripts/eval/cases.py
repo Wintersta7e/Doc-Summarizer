@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The evaluation corpus by shape, and the cases each tier runs.
 
 Documents are named here only by an anonymous id and their shape. The texts,
@@ -41,6 +42,7 @@ class Case:
 
     @property
     def id(self) -> str:
+        """The case's report id: ``doc/type/language``, plus its run-mode suffixes."""
         suffix = ("@split" if self.split else "") + ("#m12a" if self.m12a else "")
         return f"{self.doc}/{self.summary_type}/{self.language}{suffix}"
 
@@ -98,7 +100,8 @@ _SMOKE_M12A = (
 )
 
 
-def _auto(doc_ids: tuple[str, ...], types: tuple[str, ...], split: bool = False) -> list[Case]:
+def _auto(doc_ids: tuple[str, ...], types: tuple[str, ...], *, split: bool = False) -> list[Case]:
+
     return [Case(doc, t, LANGUAGE_AUTO, split=split) for doc in doc_ids for t in types]
 
 

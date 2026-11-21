@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Register the bundled UI fonts with Qt so QML can resolve them by family name.
 
 The four design families (Cormorant Garamond, Chakra Petch, Share Tech Mono,

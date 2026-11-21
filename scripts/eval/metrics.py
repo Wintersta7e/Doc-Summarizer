@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Scoring for evaluation runs: pure functions over stored text, no model and no I/O.
 
 M1 output presence, M2 language compliance (per call and on the result), M4
@@ -11,9 +12,16 @@ from __future__ import annotations
 import functools
 import math
 import re
-from collections.abc import Mapping, Sequence
+import sys
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from docsummarizer import provenance
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from py3langid.langid import LanguageIdentifier
 
 METRIC_VERSION: int = 1
 
@@ -122,10 +130,15 @@ _AUTO = "auto"  # the runner's name for "match the document"
 
 # Sentence ends: the CJK full stop, exclamation and question marks end a unit at
 # once; their ASCII forms only before whitespace.
-_UNIT_END = re.compile("(?<=[。！？])|(?<=[.!?])\\s+")  # noqa: RUF001 - CJK punctuation
+_UNIT_END = re.compile("(?<=[\u3002\uff01\uff1f])|(?<=[.!?])\\s+")
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 _MIN_LETTERS = 25
 _MIN_CJK = 10
+# Script shares of a unit's letters that decide its language before the identifier.
+_JA_KANA_SHARE = 0.05  # any real kana share is Japanese
+_KO_HANGUL_SHARE = 0.30
+_ZH_HAN_KANA_SHARE = 0.30
+_MAJORITY_SHARE = 0.50  # Arabic, Devanagari
 
 
 @dataclass(frozen=True)
@@ -140,42 +153,66 @@ def target_for(language: str, label: str, script: str | None) -> Target:
     """The target for a run: the document's label for ``auto``, else the named language."""
     if language == _AUTO:
         if label not in LANGUAGE_CODES.values():
-            raise ValueError(f"no classifier code for the label {label!r}")
+            msg = f"no classifier code for the label {label!r}"
+            raise ValueError(msg)
         return Target(label, script if label == "zh" else None)
     code = LANGUAGE_CODES.get(language)
     if code is None:
-        raise ValueError(f"no classifier code for the language {language!r}")
+        msg = f"no classifier code for the language {language!r}"
+        raise ValueError(msg)
     return Target(code, TARGET_SCRIPT.get(language))
 
 
-def _is_han(c: str) -> bool:
+# Unicode blocks, as inclusive (first, last) code point ranges.
+_HAN_BLOCKS = (
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0x3400, 0x4DBF),  # Extension A
+    (0xF900, 0xFAFF),  # Compatibility Ideographs
+    (0x20000, sys.maxunicode),  # the supplementary ideographic planes and beyond
+)
+_KANA_BLOCKS = (
+    (0x3040, 0x30FF),  # Hiragana, Katakana
+    (0x31F0, 0x31FF),  # Katakana Phonetic Extensions
+    (0xFF66, 0xFF9F),  # halfwidth Katakana
+)
+_HANGUL_BLOCKS = (
+    (0xAC00, 0xD7AF),  # Hangul Syllables
+    (0x1100, 0x11FF),  # Hangul Jamo
+    (0x3130, 0x318F),  # Hangul Compatibility Jamo
+)
+_ARABIC_BLOCKS = (
+    (0x0600, 0x06FF),  # Arabic
+    (0x0750, 0x077F),  # Arabic Supplement
+    (0x08A0, 0x08FF),  # Arabic Extended-A
+    (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
+    (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
+)
+_DEVANAGARI_BLOCKS = ((0x0900, 0x097F),)
+
+
+def _in_blocks(c: str, blocks: tuple[tuple[int, int], ...]) -> bool:
     o = ord(c)
-    return 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF or o >= 0x20000
+    return any(first <= o <= last for first, last in blocks)
+
+
+def _is_han(c: str) -> bool:
+    return _in_blocks(c, _HAN_BLOCKS)
 
 
 def _is_kana(c: str) -> bool:
-    o = ord(c)
-    return 0x3040 <= o <= 0x30FF or 0x31F0 <= o <= 0x31FF or 0xFF66 <= o <= 0xFF9F
+    return _in_blocks(c, _KANA_BLOCKS)
 
 
 def _is_hangul(c: str) -> bool:
-    o = ord(c)
-    return 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F
+    return _in_blocks(c, _HANGUL_BLOCKS)
 
 
 def _is_arabic(c: str) -> bool:
-    o = ord(c)
-    return (
-        0x0600 <= o <= 0x06FF
-        or 0x0750 <= o <= 0x077F
-        or 0x08A0 <= o <= 0x08FF
-        or 0xFB50 <= o <= 0xFDFF
-        or 0xFE70 <= o <= 0xFEFF
-    )
+    return _in_blocks(c, _ARABIC_BLOCKS)
 
 
 def _is_devanagari(c: str) -> bool:
-    return 0x0900 <= ord(c) <= 0x097F
+    return _in_blocks(c, _DEVANAGARI_BLOCKS)
 
 
 def _is_cjk(c: str) -> bool:
@@ -199,7 +236,7 @@ def is_scored(unit: str) -> bool:
 
 
 @functools.cache
-def _identifier() -> Any:
+def _identifier() -> LanguageIdentifier:
     """The language identifier, restricted to the output languages' codes."""
     from py3langid.langid import MODEL_FILE, LanguageIdentifier
 
@@ -219,15 +256,15 @@ def classify_unit(unit: str) -> str:
         kana = sum(1 for c in alpha if _is_kana(c)) / total
         hangul = sum(1 for c in alpha if _is_hangul(c)) / total
         han = sum(1 for c in alpha if _is_han(c)) / total
-        if kana >= 0.05:
+        if kana >= _JA_KANA_SHARE:
             return "ja"
-        if hangul >= 0.30:
+        if hangul >= _KO_HANGUL_SHARE:
             return "ko"
-        if han + kana >= 0.30:
+        if han + kana >= _ZH_HAN_KANA_SHARE:
             return "zh"
-        if sum(1 for c in alpha if _is_arabic(c)) / total >= 0.50:
+        if sum(1 for c in alpha if _is_arabic(c)) / total >= _MAJORITY_SHARE:
             return "ar"
-        if sum(1 for c in alpha if _is_devanagari(c)) / total >= 0.50:
+        if sum(1 for c in alpha if _is_devanagari(c)) / total >= _MAJORITY_SHARE:
             return "hi"
     code, _ = _identifier().classify(unit)
     return str(code)
@@ -331,11 +368,11 @@ class M12a:
 def m12a(first: str, rerun: str) -> M12a:
     """Byte-identical check; on a difference, the index of the first differing char."""
     if first == rerun:
-        return M12a(True, None)
+        return M12a(identical=True, first_diff=None)
     for index, (a, b) in enumerate(zip(first, rerun, strict=False)):
         if a != b:
-            return M12a(False, index)
-    return M12a(False, min(len(first), len(rerun)))
+            return M12a(identical=False, first_diff=index)
+    return M12a(identical=False, first_diff=min(len(first), len(rerun)))
 
 
 class _SpanLike(Protocol):
@@ -386,13 +423,12 @@ class M7:
 
     @property
     def hit_rate(self) -> float:
+        """Tight citations per point; 0.0 with no points."""
         return self.tight / self.points if self.points else 0.0
 
 
 def m7(points: Sequence[PointRecord], document: str) -> M7:
     """Score the citations the production grounding returned; never re-locate a quote."""
-    from docsummarizer import provenance
-
     cited = [point.citation for point in points if point.citation is not None]
     whole = document.strip()
     quotes = [point.quote for point in points if point.quote]
@@ -473,6 +509,7 @@ class Verdict:
 
     @property
     def regressed(self) -> bool:
+        """Whether any flip or row is a regression."""
         return bool(self.regressions) or any(row.status == "regression" for row in self.rows)
 
 

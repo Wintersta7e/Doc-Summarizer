@@ -1,22 +1,28 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.document_parser`."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import importlib.util
+from typing import TYPE_CHECKING
 
 import pytest
 
 from docsummarizer.document_parser import (
     SUPPORTED_EXTENSION_SET,
+    analyze_document,
     extract_text,
     find_documents,
     get_document_info,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 def test_extract_unsupported_extension(tmp_path: Path) -> None:
     target = tmp_path / "thing.xyz"
-    target.write_text("doesn't matter")
+    _ = target.write_text("doesn't matter")
     text, error = extract_text(str(target))
     assert text == ""
     assert error is not None
@@ -32,7 +38,7 @@ def test_extract_missing_file(tmp_path: Path) -> None:
 
 def test_extract_txt_utf8(tmp_path: Path) -> None:
     target = tmp_path / "hello.txt"
-    target.write_text("hello world\n", encoding="utf-8")
+    _ = target.write_text("hello world\n", encoding="utf-8")
     text, error = extract_text(str(target))
     assert error is None
     assert "hello world" in text
@@ -40,7 +46,7 @@ def test_extract_txt_utf8(tmp_path: Path) -> None:
 
 def test_extract_txt_latin1_encoding_detection(tmp_path: Path) -> None:
     target = tmp_path / "latin.txt"
-    target.write_bytes("caf\xe9 m\xfcnchen\n".encode("latin-1"))
+    _ = target.write_bytes("caf\xe9 m\xfcnchen\n".encode("latin-1"))
     text, error = extract_text(str(target))
     assert error is None
     # We don't promise exact decoding — only that we got *something*
@@ -50,18 +56,21 @@ def test_extract_txt_latin1_encoding_detection(tmp_path: Path) -> None:
 
 def test_extract_md_routes_to_txt(tmp_path: Path) -> None:
     target = tmp_path / "notes.md"
-    target.write_text("# heading\n\nbody\n", encoding="utf-8")
+    _ = target.write_text("# heading\n\nbody\n", encoding="utf-8")
     text, error = extract_text(str(target))
     assert error is None
     assert "heading" in text
 
 
 def test_extract_docx_basic(tmp_path: Path) -> None:
-    docx = pytest.importorskip("docx")
+    if importlib.util.find_spec("docx") is None:
+        pytest.skip("python-docx is not installed")
+    from docx import Document
+
     target = tmp_path / "doc.docx"
-    document = docx.Document()
-    document.add_paragraph("first paragraph")
-    document.add_paragraph("second paragraph")
+    document = Document()
+    _ = document.add_paragraph("first paragraph")
+    _ = document.add_paragraph("second paragraph")
     document.save(str(target))
 
     text, error = extract_text(str(target))
@@ -73,7 +82,7 @@ def test_extract_docx_basic(tmp_path: Path) -> None:
 def test_extract_rtf_basic(tmp_path: Path) -> None:
     pytest.importorskip("striprtf")
     target = tmp_path / "doc.rtf"
-    target.write_text(r"{\rtf1\ansi hello rtf body}", encoding="utf-8")
+    _ = target.write_text(r"{\rtf1\ansi hello rtf body}", encoding="utf-8")
     text, error = extract_text(str(target))
     assert error is None
     assert "hello rtf body" in text
@@ -82,7 +91,7 @@ def test_extract_rtf_basic(tmp_path: Path) -> None:
 def test_legacy_doc_not_supported(tmp_path: Path) -> None:
     """`.doc` (binary OLE) was dropped: python-docx can't read it."""
     target = tmp_path / "old.doc"
-    target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")  # OLE magic
+    _ = target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")  # OLE magic
     text, error = extract_text(str(target))
     assert text == ""
     assert error is not None
@@ -90,8 +99,10 @@ def test_legacy_doc_not_supported(tmp_path: Path) -> None:
 
 
 def test_supported_extension_set_canonical() -> None:
-    """The canonical set is the single source of truth — assert against it
-    directly rather than parsing the dialog-filter strings."""
+    """The canonical set is the single source of truth.
+
+    Assert against it directly rather than parsing the dialog-filter strings.
+    """
     assert ".doc" not in SUPPORTED_EXTENSION_SET
     assert ".docx" in SUPPORTED_EXTENSION_SET
     assert {".pdf", ".docx", ".rtf", ".txt", ".md", ".text"} == SUPPORTED_EXTENSION_SET
@@ -99,7 +110,7 @@ def test_supported_extension_set_canonical() -> None:
 
 def test_get_document_info_existing(tmp_path: Path) -> None:
     target = tmp_path / "f.txt"
-    target.write_bytes(b"x" * 2048)
+    _ = target.write_bytes(b"x" * 2048)
 
     info = get_document_info(str(target))
     assert info["name"] == "f.txt"
@@ -116,22 +127,98 @@ def test_get_document_info_missing(tmp_path: Path) -> None:
 
 def test_find_documents_on_single_supported_file(tmp_path: Path) -> None:
     target = tmp_path / "report.pdf"
-    target.write_bytes(b"%PDF-")
+    _ = target.write_bytes(b"%PDF-")
     assert find_documents(target) == [target]
 
 
 def test_find_documents_on_single_unsupported_file(tmp_path: Path) -> None:
     target = tmp_path / "thing.xyz"
-    target.write_text("nope")
+    _ = target.write_text("nope")
     assert find_documents(target) == []
 
 
 def test_find_documents_in_directory_filters_to_supported(tmp_path: Path) -> None:
-    (tmp_path / "a.pdf").write_bytes(b"")
-    (tmp_path / "b.docx").write_bytes(b"")
-    (tmp_path / "c.exe").write_bytes(b"")
+    _ = (tmp_path / "a.pdf").write_bytes(b"")
+    _ = (tmp_path / "b.docx").write_bytes(b"")
+    _ = (tmp_path / "c.exe").write_bytes(b"")
     (tmp_path / "subdir").mkdir()
-    (tmp_path / "subdir" / "ignored.pdf").write_bytes(b"")  # non-recursive
+    _ = (tmp_path / "subdir" / "ignored.pdf").write_bytes(b"")  # non-recursive
 
     found = {p.name for p in find_documents(tmp_path)}
     assert found == {"a.pdf", "b.docx"}
+
+
+def _write_pdf(target: Path, *pages: str) -> None:
+    """Write a minimal PDF whose pages each draw one line of text."""
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(len(pages)))
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode())
+    font = 3 + 2 * len(pages)
+    for i, line in enumerate(pages):
+        stream = f"BT /F1 12 Tf 72 720 Td ({line}) Tj ET".encode()
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 {font} 0 R >> >> /Contents {4 + 2 * i} 0 R >>".encode()
+        )
+        objects.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+    _ = target.write_bytes(bytes(out))
+
+
+def test_extract_pdf_joins_the_text_of_every_page(tmp_path: Path) -> None:
+    target = tmp_path / "doc.pdf"
+    _write_pdf(target, "first page", "second page")
+
+    text, error = extract_text(str(target))
+
+    assert error is None
+    assert text == "first page\n\nsecond page"
+    assert analyze_document(str(target), text)["pages"] == 2
+
+
+def test_a_corrupt_pdf_is_an_error_message_not_a_crash(tmp_path: Path) -> None:
+    target = tmp_path / "broken.pdf"
+    _ = target.write_bytes(b"not a pdf at all")
+
+    text, error = extract_text(str(target))
+
+    assert text == ""
+    assert error is not None
+    assert error.startswith("Error extracting text: ")
+    assert analyze_document(str(target), "")["pages"] is None
+
+
+def test_extract_docx_reads_table_rows(tmp_path: Path) -> None:
+    from docx import Document
+
+    target = tmp_path / "table.docx"
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    for row, cells in zip(table.rows, (("name", "size"), ("report", "")), strict=True):
+        for cell, value in zip(row.cells, cells, strict=True):
+            cell.text = value
+    _ = document.add_table(rows=1, cols=1)  # an empty row adds no line
+    document.save(str(target))
+
+    text, error = extract_text(str(target))
+
+    assert error is None
+    assert text == "name | size\n\nreport"
+
+
+def test_analyze_document_without_a_readable_file_has_no_encoding(tmp_path: Path) -> None:
+    stats = analyze_document(str(tmp_path / "gone.txt"), "")
+
+    assert stats["encoding"] is None

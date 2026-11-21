@@ -4,6 +4,7 @@ import App
 
 // Eyebrow/section label: a short accent tick + uppercase Chakra-Petch text.
 RowLayout {
+    id: sectionLabel
     property alias text: label.text
     property color tickColor: Theme.accent
     spacing: 8
@@ -11,7 +12,7 @@ RowLayout {
     Rectangle {
         Layout.preferredWidth: 2
         Layout.preferredHeight: 12
-        color: tickColor
+        color: sectionLabel.tickColor
     }
     Text {
         id: label

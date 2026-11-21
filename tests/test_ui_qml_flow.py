@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Behavioural QML tests through the production engine (``create_engine`` + ``Main.qml``).
 
 Runs offscreen (conftest). Each test drives the real bridge and the real screens;
@@ -7,9 +8,10 @@ nothing here instantiates a QML file on its own.
 from __future__ import annotations
 
 import http.server
+import logging
 import threading
-from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import shiboken6
@@ -26,10 +28,16 @@ from PySide6.QtGui import QGuiApplication, QTextDocument
 from PySide6.QtNetwork import QNetworkReply, QNetworkRequest
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent, QQmlEngine, QQmlExpression
 from PySide6.QtQuick import QQuickItem, QQuickWindow
+from typing_extensions import override
 
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
-from docsummarizer.ui.app import create_engine
+from docsummarizer.ui.app import LocalOnlyNetworkAccessManagerFactory, create_engine
 from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
+
+_LOG = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 _APP_QML = Path(__file__).resolve().parents[1] / "src" / "docsummarizer" / "ui" / "qml" / "App"
 
@@ -52,7 +60,9 @@ _EXPECTED_FORMAT = {
 
 @pytest.fixture(scope="session")
 def qapp() -> QGuiApplication:
-    return QGuiApplication.instance() or QGuiApplication([])
+    app = QGuiApplication.instance() or QGuiApplication([])
+    assert isinstance(app, QGuiApplication)
+    return app
 
 
 @pytest.fixture
@@ -66,7 +76,8 @@ def loopback() -> Iterator[tuple[int, list[str]]]:
             self.send_response(404)
             self.end_headers()
 
-        def log_message(self, *args: object) -> None:
+        @override
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -91,7 +102,7 @@ def console(
 def _spin(ms: int) -> None:
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    _ = loop.exec()
 
 
 def _items(window: QQuickWindow) -> Iterator[QQuickItem]:
@@ -111,19 +122,21 @@ def _payload(port: int, tag: str) -> str:
 def _render_everything(
     bridge: ConsoleBridge, window: QQuickWindow, port: int, after_each: Callable[[], None]
 ) -> None:
-    """Show a payload in every renderer of model output, document text and file names
-    (Summary, Extract and Batch screens, the toast) through today's production paths,
-    calling ``after_each`` once each view has laid out and painted."""
+    """Show a payload in every renderer of model output, document text and file names.
+
+    Covers the Summary, Extract and Batch screens and the toast through today's
+    production paths, calling ``after_each`` once each view has laid out and painted.
+    """
 
     def settle() -> None:
-        window.grabWindow()
+        _ = window.grabWindow()
         _spin(500)  # loader threads issue image requests after layout
         after_each()
 
     bridge._current_file = _payload(port, "FILEMARK")
     bridge._extracted_text = f"{_payload(port, 'DOCMARK')}\nsecond line"
     bridge.docChanged.emit()
-    window.setProperty("activeScreen", "summary")
+    _ = window.setProperty("activeScreen", "summary")
     for summary in (
         StructuredSummary(
             "detailed",
@@ -139,13 +152,13 @@ def _render_everything(
     ):
         bridge.summaryReady.emit(summary_to_variant(summary))
         settle()
-    window.setProperty("activeScreen", "extract")
+    _ = window.setProperty("activeScreen", "extract")
     settle()
     bridge._batch_rows = [{"name": _payload(port, "ROWMARK"), "status": "QUEUED", "tokens": 0}]
     bridge.batchRowsChanged.emit()
     batch = next(i for i in _items(window) if "BatchScreen" in i.metaObject().className())
-    batch.setProperty("outDir", _payload(port, "OUTDIRMARK"))
-    window.setProperty("activeScreen", "batch")
+    _ = batch.setProperty("outDir", _payload(port, "OUTDIRMARK"))
+    _ = window.setProperty("activeScreen", "batch")
     bridge.toast.emit(_payload(port, "TOASTMARK"))
     settle()
 
@@ -175,26 +188,26 @@ def test_rendered_text_fetches_nothing(
     assert isinstance(image, QQuickItem), component.errorString()
     image.setParentItem(window.contentItem())
     _render_everything(bridge, window, port, lambda: None)
-    print(f"requests={len(hits)} {sorted(hits)}")
+    _LOG.info("requests=%s %s", len(hits), sorted(hits))
     assert hits == [], f"rendering fetched {sorted(hits)}"
     guard = engine.networkAccessManagerFactory()
-    print(f"refused={guard.refused}")
+    assert isinstance(guard, LocalOnlyNetworkAccessManagerFactory)
+    _LOG.info("refused=%s", guard.refused)
     assert guard.refused > 0, "no payload reached a renderer: the test proves nothing"
 
 
+@pytest.mark.usefixtures("qapp")
 def test_local_only_manager_refuses_remote_schemes(
-    qapp: QGuiApplication, loopback: tuple[int, list[str]], tmp_path: Path
+    loopback: tuple[int, list[str]], tmp_path: Path
 ) -> None:
     """Every scheme but ``file:`` and ``qrc:`` is refused before a socket opens.
 
     Mutation caught: a scheme check that lets ``http`` through (the loopback
     server records the GET) or one that refuses ``file:`` (the local read fails).
     """
-    from docsummarizer.ui.app import LocalOnlyNetworkAccessManagerFactory
-
     port, hits = loopback
     local = tmp_path / "local.txt"
-    local.write_text("local bytes", encoding="utf-8")
+    _ = local.write_text("local bytes", encoding="utf-8")
     factory = LocalOnlyNetworkAccessManagerFactory()
     parent = QObject()
     manager = factory.create(parent)
@@ -203,14 +216,14 @@ def test_local_only_manager_refuses_remote_schemes(
         reply = manager.get(QNetworkRequest(url))
         if not reply.isFinished():
             loop = QEventLoop()
-            reply.finished.connect(loop.quit)
+            _ = reply.finished.connect(loop.quit)
             QTimer.singleShot(5000, loop.quit)
-            loop.exec()
+            _ = loop.exec()
         return reply
 
     remote = [fetch(QUrl(f"{scheme}://127.0.0.1:{port}/x.png")) for scheme in ("http", "https")]
     local_reply = fetch(QUrl.fromLocalFile(str(local)))
-    print(f"requests={len(hits)} refused={factory.refused}")
+    _LOG.info("requests=%s refused=%s", len(hits), factory.refused)
     assert hits == []
     assert factory.refused == 2
     assert all(r.error() != QNetworkReply.NetworkError.NoError for r in remote)
@@ -221,8 +234,9 @@ def test_local_only_manager_refuses_remote_schemes(
 def _text_format(item: QQuickItem) -> int:
     # PySide has no converter for QQuickText::TextFormat; QML evaluates it to a number.
     expr = QQmlExpression(QQmlEngine.contextForObject(item), item, "textFormat")
-    value, undefined = expr.evaluate()
+    value, undefined = cast("tuple[object, bool]", expr.evaluate())
     assert not undefined
+    assert isinstance(value, int | float)
     return int(value)
 
 
@@ -230,8 +244,9 @@ def test_content_text_formats_are_explicit(
     console: tuple[QQmlApplicationEngine, ConsoleBridge, QQuickWindow],
     loopback: tuple[int, list[str]],
 ) -> None:
-    """Model output renders as Markdown, file names as plain text and document text as
-    escaped rich text; none of their renderers is left on ``AutoText``.
+    """Model output renders as Markdown, file names as plain text, document text as rich text.
+
+    Document text is escaped first; none of the renderers is left on ``AutoText``.
 
     Mutation caught: deleting ``textFormat`` from the lead, a point, a section point,
     a file-name line, a Batch row, the Batch output line or the toast - that
@@ -257,7 +272,7 @@ def test_content_text_formats_are_explicit(
                     wrong.append(f"{tag} in {name}: textFormat {actual}, expected {expected}")
 
     _render_everything(bridge, window, port, check)
-    print(f"renderers checked per payload: {seen}")
+    _LOG.info("renderers checked per payload: %s", seen)
     assert all(seen.values()), f"a payload reached no renderer: {seen}"
     assert wrong == []
 
@@ -275,7 +290,7 @@ def test_no_qml_opens_a_link() -> None:
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if "LinkActivated" in line
     ]
-    print(f"qml files scanned={len(files)} offenders={offenders}")
+    _LOG.info("qml files scanned=%s offenders=%s", len(files), offenders)
     assert files, "scanned no QML file"
     assert offenders == []
 
@@ -311,7 +326,7 @@ def test_summary_text_loads_no_local_file_image(
     bridge._current_file = "local.txt"
     bridge._extracted_text = "document text"
     bridge.docChanged.emit()
-    window.setProperty("activeScreen", "summary")
+    _ = window.setProperty("activeScreen", "summary")
     previous = qInstallMessageHandler(handler)
     try:
         for summary in (
@@ -331,7 +346,7 @@ def test_summary_text_loads_no_local_file_image(
             ),
         ):
             bridge.summaryReady.emit(summary_to_variant(summary))
-            window.grabWindow()
+            _ = window.grabWindow()
             _spin(500)
             for item in _items(window):
                 if not item.metaObject().className().startswith("QQuickText"):
@@ -343,9 +358,9 @@ def test_summary_text_loads_no_local_file_image(
                         document.setMarkdown(text)
                         shown[tag].append(document.toPlainText())
     finally:
-        qInstallMessageHandler(previous)
+        _ = qInstallMessageHandler(previous)
     opened = sorted({m for m in messages if "example.invalid" in m})
-    print(f"opened={opened} shown={shown}")
+    _LOG.info("opened=%s shown=%s", opened, shown)
     assert opened == []
     assert all(shown.values()), f"a payload reached no Markdown renderer: {shown}"
     hidden = [tag for tag, texts in shown.items() for t in texts if t.count("![") != 2]

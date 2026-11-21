@@ -8,11 +8,11 @@ Extract, chunk, and summarize academic papers and long documents entirely on you
 
 [![CI](https://github.com/Wintersta7e/Doc-Summarizer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Wintersta7e/Doc-Summarizer/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Wintersta7e/Doc-Summarizer?label=release&sort=semver)](https://github.com/Wintersta7e/Doc-Summarizer/releases/latest)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#system-requirements)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Lint: Ruff](https://img.shields.io/badge/lint-ruff-261230)](https://docs.astral.sh/ruff/)
-[![Types: mypy](https://img.shields.io/badge/types-mypy-blue)](https://mypy-lang.org/)
+[![Types: basedpyright](https://img.shields.io/badge/types-basedpyright-blue)](https://docs.basedpyright.com/)
 [![Offline](https://img.shields.io/badge/network-100%25%20offline-success)](#privacy--security)
 
 <img src="assets/screenshot.png" alt="DocSummarizer — Abstract Console" width="820">
@@ -75,7 +75,7 @@ flowchart TD
 | RAM | 8 GB | 16 GB+ |
 | Storage | 4 GB free | 8 GB free |
 | CPU | 4 cores | 8+ performance cores |
-| Python (from source) | 3.10 | 3.11+ |
+| Python (from source) | 3.11 | 3.12 |
 
 The prebuilt executables run on the **CPU** and require no GPU. GPU acceleration is a build-from-source
 option — see [Building from source](#building-from-source).
@@ -170,13 +170,12 @@ separate from the universal CPU release.
 
 ## Development
 
-Tooling is intentionally strict (broad Ruff ruleset, `mypy --strict`, pytest with a coverage floor).
-See [DEVELOPMENT.md](DEVELOPMENT.md). The quality gate (matches CI):
+Tooling is intentionally strict (broad Ruff ruleset, basedpyright `all`, pytest with a coverage floor).
+The quality gate (matches CI):
 
 ```bash
-ruff check . && ruff format --check .
-mypy
-pytest --cov=docsummarizer
+uv sync --locked --extra dev --extra gui
+python scripts/check.py all
 ```
 
 ## License

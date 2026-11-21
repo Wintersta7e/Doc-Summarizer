@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import App
@@ -40,9 +41,10 @@ ColumnLayout {
     Repeater {
         model: 5
         delegate: Rectangle {
+            id: bar
             required property int index
             Layout.fillWidth: true
-            Layout.rightMargin: [0, 60, 20, 120, 40][index]
+            Layout.rightMargin: [0, 60, 20, 120, 40][bar.index]
             Layout.preferredHeight: 14
             radius: 3
             color: Theme.block
@@ -68,8 +70,8 @@ ColumnLayout {
                 NumberAnimation on x {
                     running: skel.visible
                     loops: Animation.Infinite
-                    from: -parent.width * 0.4
-                    to: parent.width
+                    from: -bar.width * 0.4
+                    to: bar.width
                     duration: 1250
                 }
             }

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `document_parser.analyze_document` — the metadata strip data.
 
 The Summary/Extract screens show "N PAGES · N WORDS · N CHARS · ENC · parser".
@@ -7,15 +8,20 @@ encoding is plain-text-only, words/chars come from the extracted text.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from docsummarizer import document_parser
 from docsummarizer.document_parser import analyze_document
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
+
 
 def test_txt_stats_from_real_file(tmp_path: Path) -> None:
     f = tmp_path / "note.txt"
-    f.write_text("Hello world. Foo bar baz.", encoding="utf-8")
+    _ = f.write_text("Hello world. Foo bar baz.", encoding="utf-8")
 
     stats = analyze_document(str(f))
 
@@ -30,7 +36,7 @@ def test_txt_stats_from_real_file(tmp_path: Path) -> None:
 
 def test_md_uses_text_parser_label(tmp_path: Path) -> None:
     f = tmp_path / "readme.md"
-    f.write_text("# Title\n\nSome body text here.", encoding="utf-8")
+    _ = f.write_text("# Title\n\nSome body text here.", encoding="utf-8")
     stats = analyze_document(str(f))
     assert stats["parser"] == "chardet"
     assert stats["pages"] is None
@@ -52,8 +58,12 @@ def test_rtf_parser_label() -> None:
     assert stats["parser"] == "striprtf"
 
 
-def test_pdf_reports_pages(monkeypatch) -> None:
-    monkeypatch.setattr(document_parser, "_pdf_page_count", lambda _p: 12)
+def _twelve_pages(_file_path: str) -> int:
+    return 12
+
+
+def test_pdf_reports_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(document_parser, "_pdf_page_count", _twelve_pages)
     stats = analyze_document("paper.pdf", text="extracted body text")
     assert stats["pages"] == 12
     assert stats["parser"] == "pypdf"
@@ -62,11 +72,11 @@ def test_pdf_reports_pages(monkeypatch) -> None:
 
 def test_analyze_extracts_when_text_not_supplied(tmp_path: Path) -> None:
     f = tmp_path / "doc.txt"
-    f.write_text("alpha beta gamma delta", encoding="utf-8")
+    _ = f.write_text("alpha beta gamma delta", encoding="utf-8")
     stats = analyze_document(str(f))  # no text= → extracts internally
     assert stats["words"] == 4
 
 
 def test_pdf_page_count_handles_unreadable_file() -> None:
     # Missing/corrupt PDF must not raise — analyze should degrade to None pages.
-    assert document_parser._pdf_page_count("does-not-exist.pdf") is None
+    assert analyze_document("does-not-exist.pdf", text="body")["pages"] is None

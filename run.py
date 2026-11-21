@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""
-DocSummarizer - Offline Document Summarization Tool
+# SPDX-License-Identifier: MIT
+"""DocSummarizer - Offline Document Summarization Tool.
+
 Main entry point.
 """
 
@@ -36,4 +37,4 @@ except ImportError:
 
 
 if __name__ == "__main__":
-    main()
+    _ = main()

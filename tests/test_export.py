@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for publishing summary files: temp file, create-if-absent, path identity.
 
 Every summary write renders into a temp file beside its target and hands it to
@@ -11,19 +12,25 @@ refusals.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import socket
 import stat
 import sys
 import threading
-from collections.abc import Callable, Iterator
-from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
 from docsummarizer import cli, io_helpers
+from docsummarizer.document_parser import find_documents
 from docsummarizer.io_helpers import publish, same_file, write_summary_txt
+
+_LOG = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
 
 SENTINEL = b"a file the user wrote\n"
 
@@ -36,7 +43,7 @@ def _partials(folder: Path) -> list[Path]:
 
 def _temp(folder: Path, content: bytes) -> Path:
     tmp = folder / "out.txt.0123456789abcdef.partial"
-    tmp.write_bytes(content)
+    _ = tmp.write_bytes(content)
     return tmp
 
 
@@ -56,7 +63,7 @@ def test_publish_create_if_absent_writes_absent_target(tmp_path: Path) -> None:
 def test_publish_create_if_absent_keeps_existing_target(tmp_path: Path) -> None:
     """Catches create-if-absent publishing done with a replacing rename."""
     target = tmp_path / "out.txt"
-    target.write_bytes(SENTINEL)
+    _ = target.write_bytes(SENTINEL)
     before = target.stat().st_mtime_ns
     tmp = _temp(tmp_path, b"new summary")
 
@@ -71,7 +78,7 @@ def test_publish_create_if_absent_keeps_existing_target(tmp_path: Path) -> None:
 def test_publish_replace_swaps_existing_target(tmp_path: Path) -> None:
     """Catches a replacing publish that keeps the old file or leaves the temp."""
     target = tmp_path / "out.txt"
-    target.write_bytes(SENTINEL)
+    _ = target.write_bytes(SENTINEL)
     tmp = _temp(tmp_path, b"new summary")
 
     assert publish(tmp, target, replace=True) is True
@@ -86,7 +93,7 @@ def test_publish_without_hard_links_writes_nothing(
 ) -> None:
     """Catches an ``except OSError`` fallback that writes the target directly."""
 
-    def no_links(src: object, dst: object) -> NoReturn:
+    def no_links(_src: object, _dst: object) -> NoReturn:
         raise PermissionError(errno.EPERM, "Operation not permitted")
 
     monkeypatch.setattr(os, "link", no_links)
@@ -94,7 +101,7 @@ def test_publish_without_hard_links_writes_nothing(
     tmp = _temp(tmp_path, b"new summary")
 
     with pytest.raises(PermissionError):
-        publish(tmp, target, replace=False)
+        _ = publish(tmp, target, replace=False)
 
     assert not target.exists()
     assert _partials(tmp_path) == []
@@ -106,14 +113,14 @@ def test_interrupted_write_leaves_no_partial(
 ) -> None:
     """Catches a write path without a ``finally`` that removes its temp file."""
 
-    def interrupted(tmp: Path, target: Path, *, replace: bool) -> NoReturn:
+    def interrupted(*_args: object, **_kwargs: object) -> NoReturn:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(io_helpers, "publish", interrupted)
     target = tmp_path / "out.txt"
 
     with pytest.raises(KeyboardInterrupt):
-        write_summary_txt(target, source_name="a.txt", summary="body", replace=False)
+        _ = write_summary_txt(target, source_name="a.txt", summary="body", replace=False)
 
     assert not target.exists()
     assert _partials(tmp_path) == []
@@ -123,10 +130,10 @@ def test_interrupted_write_leaves_no_partial(
 def test_published_file_mode_matches_plain_open(tmp_path: Path) -> None:
     """Catches a temp created owner-only (``tempfile.mkstemp`` is 0o600)."""
     plain = tmp_path / "plain.txt"
-    plain.write_text("x", encoding="utf-8")
+    _ = plain.write_text("x", encoding="utf-8")
     target = tmp_path / "out.txt"
 
-    write_summary_txt(target, source_name="a.txt", summary="body", replace=False)
+    _ = write_summary_txt(target, source_name="a.txt", summary="body", replace=False)
 
     assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(plain.stat().st_mode)
 
@@ -135,14 +142,14 @@ def test_published_file_mode_matches_plain_open(tmp_path: Path) -> None:
 def test_same_file_matches_every_spelling_of_one_path(tmp_path: Path) -> None:
     """Catches a plain string comparison: each spelling below names one file."""
     real = tmp_path / "doc.txt"
-    real.write_text("x", encoding="utf-8")
+    _ = real.write_text("x", encoding="utf-8")
     (tmp_path / "sub").mkdir()
     symlink = tmp_path / "link.txt"
     symlink.symlink_to(real)
     hardlink = tmp_path / "hard.txt"
     os.link(real, hardlink)
     sibling = tmp_path / "other.txt"
-    sibling.write_text("x", encoding="utf-8")
+    _ = sibling.write_text("x", encoding="utf-8")
 
     positives = {
         "same path": (real, real),
@@ -151,7 +158,7 @@ def test_same_file_matches_every_spelling_of_one_path(tmp_path: Path) -> None:
         "hard link": (hardlink, real),
     }
     for label, (a, b) in positives.items():
-        print(f"same_file {label}: {same_file(a, b)}")
+        _LOG.info("same_file %s: %s", label, same_file(a, b))
         assert same_file(a, b), label
 
     assert not same_file(sibling, real)
@@ -164,7 +171,7 @@ def test_same_file_matches_every_spelling_of_one_path(tmp_path: Path) -> None:
 def test_same_file_ignores_case_on_windows(tmp_path: Path) -> None:
     """Catches a comparison without ``normcase`` on a case-insensitive filesystem."""
     p = tmp_path / "Doc.txt"
-    p.write_text("x", encoding="utf-8")
+    _ = p.write_text("x", encoding="utf-8")
 
     assert same_file(str(p).upper(), p)
 
@@ -178,9 +185,9 @@ class _CliHarness:
     """A fake model for ``cli.main()``: counts loads and calls, never touches a network."""
 
     def __init__(self) -> None:
-        self.constructions = 0
-        self.calls = 0
-        self.connections = 0
+        self.constructions: int = 0
+        self.calls: int = 0
+        self.connections: int = 0
         self.hook: Callable[[str], str | None] | None = None
 
 
@@ -189,12 +196,10 @@ def cli_harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[_CliHarness]:
     harness = _CliHarness()
 
     class FakeSummarizer:
-        def __init__(self, model_path: object, n_threads: int | None = None, n_gpu_layers: int = 0):
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             harness.constructions += 1
 
-        def summarize(
-            self, text: str, summary_type: str = "detailed", language: str = "auto"
-        ) -> str:
+        def summarize(self, text: str, **_options: str) -> str:
             harness.calls += 1
             if harness.hook is not None:
                 result = harness.hook(text)
@@ -205,9 +210,10 @@ def cli_harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[_CliHarness]:
         def close(self) -> None:
             pass
 
-    def no_network(*args: object, **kwargs: object) -> NoReturn:
+    def no_network(*_args: object, **_kwargs: object) -> NoReturn:
         harness.connections += 1
-        raise OSError("network access is not allowed in this test")
+        msg = "network access is not allowed in this test"
+        raise OSError(msg)
 
     monkeypatch.setattr(cli, "ensure_model", lambda: True)
     monkeypatch.setattr(cli, "Summarizer", FakeSummarizer)
@@ -229,7 +235,7 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int | str | None:
 def _make_inputs(folder: Path, *names: str) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     for name in names:
-        (folder / name).write_text(f"content of {name}", encoding="utf-8")
+        _ = (folder / name).write_text(f"content of {name}", encoding="utf-8")
     return folder
 
 
@@ -248,9 +254,9 @@ def test_folder_run_never_replaces_unchecked_files(
     out = tmp_path / "out"
     out.mkdir()
     planned = out / "c.txt.detailed.txt"
-    planned.write_bytes(SENTINEL)
+    _ = planned.write_bytes(SENTINEL)
     user_file = out / "a_summary.txt"
-    user_file.write_bytes(SENTINEL)
+    _ = user_file.write_bytes(SENTINEL)
     mtimes = {p: p.stat().st_mtime_ns for p in (planned, user_file)}
 
     assert _run_cli(monkeypatch, str(src), "-o", str(out)) == 0
@@ -260,20 +266,21 @@ def test_folder_run_never_replaces_unchecked_files(
         p.read_bytes() == SENTINEL and p.stat().st_mtime_ns == mtimes[p] for p in mtimes
     )
     written = sum((out / n).exists() for n in ("a.txt.detailed.txt", "b.md.detailed.txt"))
-    print(f"written={written} preexisting_identical={identical}")
+    _LOG.info("written=%s preexisting_identical=%s", written, identical)
     assert written == 2
     assert identical == 2
     assert "c.txt: skipped: summary exists" in printed
     assert cli_harness.calls == 2
 
 
+@pytest.mark.usefixtures("cli_harness")
 def test_named_single_input_replaces_its_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_harness: _CliHarness
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches a named single input treated like a folder run (skipped, not written)."""
-    _make_inputs(tmp_path, "a.txt")
+    _ = _make_inputs(tmp_path, "a.txt")
     target = tmp_path / "out.txt"
-    target.write_bytes(SENTINEL)
+    _ = target.write_bytes(SENTINEL)
 
     assert _run_cli(monkeypatch, str(tmp_path / "a.txt"), "-o", str(target)) == 0
 
@@ -288,9 +295,9 @@ def test_folder_run_overwrite_replaces_planned_outputs_only(
     out = tmp_path / "out"
     out.mkdir()
     planned = out / "c.txt.detailed.txt"
-    planned.write_bytes(SENTINEL)
+    _ = planned.write_bytes(SENTINEL)
     user_file = out / "a_summary.txt"
-    user_file.write_bytes(SENTINEL)
+    _ = user_file.write_bytes(SENTINEL)
 
     assert _run_cli(monkeypatch, str(src), "-o", str(out), "--overwrite") == 0
 
@@ -299,8 +306,9 @@ def test_folder_run_overwrite_replaces_planned_outputs_only(
     assert cli_harness.calls == 3
 
 
+@pytest.mark.usefixtures("cli_harness")
 def test_folder_run_outputs_are_distinct_per_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_harness: _CliHarness
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches stem-based names: a.txt and a.md would share one output."""
     src = _make_inputs(tmp_path / "in", "a.txt", "a.md")
@@ -312,10 +320,11 @@ def test_folder_run_outputs_are_distinct_per_input(
 
 
 @pytest.mark.parametrize("trailing_sep", [False, True], ids=["plain", "trailing-sep"])
+@pytest.mark.usefixtures("cli_harness")
 def test_folder_output_missing_dir_becomes_a_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    cli_harness: _CliHarness,
+    *,
     trailing_sep: bool,
 ) -> None:
     """Catches a missing -o treated as a file: every summary lands in one file."""
@@ -339,7 +348,7 @@ def test_folder_run_never_scans_its_outputs(
     src = _make_inputs(tmp_path / "in", "a.txt", "b.md", "c.txt")
     out = src / "summaries"
     scanned: list[int] = []
-    real_find = cli.find_documents
+    real_find = find_documents
 
     def spy(path: Path) -> list[Path]:
         found = real_find(path)
@@ -350,11 +359,11 @@ def test_folder_run_never_scans_its_outputs(
 
     assert _run_cli(monkeypatch, str(src), "-o", str(out)) == 0
     first_calls = cli_harness.calls
-    capsys.readouterr()
+    _ = capsys.readouterr()
     assert _run_cli(monkeypatch, str(src), "-o", str(out)) == 0
     second = capsys.readouterr().out
 
-    print(f"scanned per run: {scanned}")
+    _LOG.info("scanned per run: %s", scanned)
     assert scanned == [3, 3]
     assert first_calls == 3
     assert cli_harness.calls == first_calls  # the second run wrote nothing
@@ -395,7 +404,7 @@ def test_folder_input_with_existing_file_output_is_refused(
     """Catches a folder input writing every summary over one existing file."""
     src = _make_inputs(tmp_path / "in", "a.txt", "b.md")
     existing = tmp_path / "existing.txt"
-    existing.write_bytes(SENTINEL)
+    _ = existing.write_bytes(SENTINEL)
 
     assert _run_cli(monkeypatch, str(src), "-o", str(existing)) == 2
 
@@ -418,7 +427,7 @@ def test_two_writers_appeared_during_run_cli(
 
     def other_writer(text: str) -> None:
         if text == "content of b.md":
-            target.write_bytes(SENTINEL)
+            _ = target.write_bytes(SENTINEL)
 
     cli_harness.hook = other_writer
 
@@ -446,9 +455,9 @@ def test_two_writers_concurrent_cli(
         out = tmp_path / f"out{round_no}"
         barrier = threading.Barrier(2, timeout=10)
 
-        def contested(text: str, barrier: threading.Barrier = barrier) -> str:
+        def contested(_text: str, barrier: threading.Barrier = barrier) -> str:
             # Both writers have checked their targets before reaching here.
-            barrier.wait()
+            _ = barrier.wait()
             return f"rendered by {threading.current_thread().name}"
 
         cli_harness.hook = contested
@@ -470,6 +479,6 @@ def test_two_writers_concurrent_cli(
             if (saved, appeared, enders) != (1, 1, 1) or _partials(out):
                 violations += 1
 
-    print(f"rounds x inputs = {checked}, violations = {violations}")
+    _LOG.info("rounds x inputs = %s, violations = %s", checked, violations)
     assert checked > 0
     assert violations == 0

@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Basic
@@ -8,14 +9,17 @@ import App
 Item {
     id: screen
 
+    // The ConsoleBridge, passed down from Main.qml.
+    required property var bridge
+
     property string query: ""
     property int activeMatch: 0
 
     function lines() {
-        return bridge.extractedText.split("\n");
+        return screen.bridge.extractedText.split("\n");
     }
     function wordCount() {
-        return bridge.extractedText.split(/\s+/).filter(Boolean).length;
+        return screen.bridge.extractedText.split(/\s+/).filter(Boolean).length;
     }
 
     // [{line, count}] and total matches, recomputed when query/text changes.
@@ -26,9 +30,9 @@ Item {
         var ml = [];
         var total = 0;
         if (q !== "") {
-            var ls = screen.lines();
-            for (var i = 0; i < ls.length; i++) {
-                var c = ls[i].toLowerCase().split(q).length - 1;
+            const ls = screen.lines();
+            for (let i = 0; i < ls.length; i++) {
+                const c = ls[i].toLowerCase().split(q).length - 1;
                 if (c > 0) {
                     ml.push(i);
                     total += c;
@@ -41,7 +45,7 @@ Item {
     }
     onQueryChanged: recomputeMatches()
     Connections {
-        target: bridge
+        target: screen.bridge
         function onDocChanged() {
             screen.recomputeMatches();
         }
@@ -95,7 +99,7 @@ Item {
                     text: "RAW EXTRACTION"
                 }
                 Text {
-                    text: bridge.currentFileName !== "" ? bridge.currentFileName : "No document loaded"
+                    text: screen.bridge.currentFileName !== "" ? screen.bridge.currentFileName : "No document loaded"
                     textFormat: Text.PlainText
                     color: Theme.ink
                     font.family: Theme.serif
@@ -103,7 +107,7 @@ Item {
                     font.weight: Font.DemiBold
                 }
                 Text {
-                    text: screen.wordCount().toLocaleString(Qt.locale(), "f", 0) + " WORDS · " + bridge.extractedText.length.toLocaleString(Qt.locale(), "f", 0) + " CHARS · UTF-8 · pypdf"
+                    text: screen.wordCount().toLocaleString(Qt.locale(), "f", 0) + " WORDS · " + screen.bridge.extractedText.length.toLocaleString(Qt.locale(), "f", 0) + " CHARS · UTF-8 · pypdf"
                     color: Theme.faint
                     font.family: Theme.mono
                     font.pixelSize: 9
@@ -166,10 +170,10 @@ Item {
             ConsoleButton {
                 text: "Copy All"
                 onClicked: {
-                    copyHelper.text = bridge.extractedText;
+                    copyHelper.text = screen.bridge.extractedText;
                     copyHelper.selectAll();
                     copyHelper.copy();
-                    bridge.toast("Extracted text copied");
+                    screen.bridge.toast("Extracted text copied");
                 }
             }
         }
@@ -193,6 +197,7 @@ Item {
                 }
                 model: screen.lines()
                 delegate: RowLayout {
+                    id: line
                     required property var modelData
                     required property int index
                     width: feed.width
@@ -200,7 +205,7 @@ Item {
                     Text {
                         Layout.preferredWidth: 30
                         horizontalAlignment: Text.AlignRight
-                        text: String(index + 1).padStart(3, "0")
+                        text: String(line.index + 1).padStart(3, "0")
                         color: Theme.dim
                         font.family: Theme.mono
                         font.pixelSize: 10
@@ -208,7 +213,7 @@ Item {
                     Text {
                         Layout.fillWidth: true
                         textFormat: Text.RichText
-                        text: screen.highlight(modelData)
+                        text: screen.highlight(line.modelData)
                         color: Theme.text
                         font.family: Theme.body
                         font.pixelSize: 13

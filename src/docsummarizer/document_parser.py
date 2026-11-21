@@ -1,5 +1,6 @@
-"""
-Document Parser Module
+# SPDX-License-Identifier: MIT
+"""Document Parser Module.
+
 Extracts text from various document formats: PDF, DOCX, TXT, RTF.
 
 Legacy binary `.doc` (OLE compound) is intentionally not supported —
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import TypedDict
 
 import chardet
+
+from docsummarizer.logger import get_logger
 
 
 class DocumentInfo(TypedDict):
@@ -30,7 +33,7 @@ def extract_from_pdf(file_path: str) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(file_path)
-    text_parts = []
+    text_parts: list[str] = []
 
     for page in reader.pages:
         page_text = page.extract_text()
@@ -109,7 +112,9 @@ def extract_text(file_path: str) -> tuple[str, str | None]:
 
     try:
         text = extractor(file_path)
-    except Exception as e:
+    except Exception as e:  # parser boundary: any library error becomes a message
+        logger = get_logger()
+        logger.debug("Text extraction failed", exc_info=True)
         return "", f"Error extracting text: {e!s}"
 
     if not text.strip():
@@ -190,6 +195,8 @@ def _pdf_page_count(file_path: str) -> int | None:
 
         return len(PdfReader(file_path).pages)
     except Exception:  # best-effort metadata; a bad PDF just yields None pages
+        logger = get_logger()
+        logger.debug("PDF page count failed", exc_info=True)
         return None
 
 
