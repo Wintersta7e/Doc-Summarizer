@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 
 from docsummarizer import cli, io_helpers
+from docsummarizer.document_parser import find_documents
 from docsummarizer.io_helpers import publish, same_file, write_summary_txt
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ def test_publish_without_hard_links_writes_nothing(
 ) -> None:
     """Catches an ``except OSError`` fallback that writes the target directly."""
 
-    def no_links(src: object, dst: object) -> NoReturn:
+    def no_links(_src: object, _dst: object) -> NoReturn:
         raise PermissionError(errno.EPERM, "Operation not permitted")
 
     monkeypatch.setattr(os, "link", no_links)
@@ -109,7 +110,7 @@ def test_interrupted_write_leaves_no_partial(
 ) -> None:
     """Catches a write path without a ``finally`` that removes its temp file."""
 
-    def interrupted(tmp: Path, target: Path, *, replace: bool) -> NoReturn:
+    def interrupted(*_args: object, **_kwargs: object) -> NoReturn:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(io_helpers, "publish", interrupted)
@@ -181,9 +182,9 @@ class _CliHarness:
     """A fake model for ``cli.main()``: counts loads and calls, never touches a network."""
 
     def __init__(self) -> None:
-        self.constructions = 0
-        self.calls = 0
-        self.connections = 0
+        self.constructions: int = 0
+        self.calls: int = 0
+        self.connections: int = 0
         self.hook: Callable[[str], str | None] | None = None
 
 
@@ -192,12 +193,10 @@ def cli_harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[_CliHarness]:
     harness = _CliHarness()
 
     class FakeSummarizer:
-        def __init__(self, model_path: object, n_threads: int | None = None, n_gpu_layers: int = 0):
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             harness.constructions += 1
 
-        def summarize(
-            self, text: str, summary_type: str = "detailed", language: str = "auto"
-        ) -> str:
+        def summarize(self, text: str, **_options: str) -> str:
             harness.calls += 1
             if harness.hook is not None:
                 result = harness.hook(text)
@@ -208,9 +207,10 @@ def cli_harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[_CliHarness]:
         def close(self) -> None:
             pass
 
-    def no_network(*args: object, **kwargs: object) -> NoReturn:
+    def no_network(*_args: object, **_kwargs: object) -> NoReturn:
         harness.connections += 1
-        raise OSError("network access is not allowed in this test")
+        msg = "network access is not allowed in this test"
+        raise OSError(msg)
 
     monkeypatch.setattr(cli, "ensure_model", lambda: True)
     monkeypatch.setattr(cli, "Summarizer", FakeSummarizer)
@@ -270,8 +270,9 @@ def test_folder_run_never_replaces_unchecked_files(
     assert cli_harness.calls == 2
 
 
+@pytest.mark.usefixtures("cli_harness")
 def test_named_single_input_replaces_its_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_harness: _CliHarness
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches a named single input treated like a folder run (skipped, not written)."""
     _ = _make_inputs(tmp_path, "a.txt")
@@ -302,8 +303,9 @@ def test_folder_run_overwrite_replaces_planned_outputs_only(
     assert cli_harness.calls == 3
 
 
+@pytest.mark.usefixtures("cli_harness")
 def test_folder_run_outputs_are_distinct_per_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_harness: _CliHarness
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches stem-based names: a.txt and a.md would share one output."""
     src = _make_inputs(tmp_path / "in", "a.txt", "a.md")
@@ -315,10 +317,11 @@ def test_folder_run_outputs_are_distinct_per_input(
 
 
 @pytest.mark.parametrize("trailing_sep", [False, True], ids=["plain", "trailing-sep"])
+@pytest.mark.usefixtures("cli_harness")
 def test_folder_output_missing_dir_becomes_a_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    cli_harness: _CliHarness,
+    *,
     trailing_sep: bool,
 ) -> None:
     """Catches a missing -o treated as a file: every summary lands in one file."""
@@ -342,7 +345,7 @@ def test_folder_run_never_scans_its_outputs(
     src = _make_inputs(tmp_path / "in", "a.txt", "b.md", "c.txt")
     out = src / "summaries"
     scanned: list[int] = []
-    real_find = cli.find_documents
+    real_find = find_documents
 
     def spy(path: Path) -> list[Path]:
         found = real_find(path)
@@ -449,7 +452,7 @@ def test_two_writers_concurrent_cli(
         out = tmp_path / f"out{round_no}"
         barrier = threading.Barrier(2, timeout=10)
 
-        def contested(text: str, barrier: threading.Barrier = barrier) -> str:
+        def contested(_text: str, barrier: threading.Barrier = barrier) -> str:
             # Both writers have checked their targets before reaching here.
             _ = barrier.wait()
             return f"rendered by {threading.current_thread().name}"

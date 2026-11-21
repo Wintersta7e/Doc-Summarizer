@@ -10,7 +10,7 @@ from __future__ import annotations
 import http.server
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import shiboken6
@@ -27,9 +27,10 @@ from PySide6.QtGui import QGuiApplication, QTextDocument
 from PySide6.QtNetwork import QNetworkReply, QNetworkRequest
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent, QQmlEngine, QQmlExpression
 from PySide6.QtQuick import QQuickItem, QQuickWindow
+from typing_extensions import override
 
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
-from docsummarizer.ui.app import create_engine
+from docsummarizer.ui.app import LocalOnlyNetworkAccessManagerFactory, create_engine
 from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
 
 if TYPE_CHECKING:
@@ -56,7 +57,9 @@ _EXPECTED_FORMAT = {
 
 @pytest.fixture(scope="session")
 def qapp() -> QGuiApplication:
-    return QGuiApplication.instance() or QGuiApplication([])
+    app = QGuiApplication.instance() or QGuiApplication([])
+    assert isinstance(app, QGuiApplication)
+    return app
 
 
 @pytest.fixture
@@ -70,7 +73,8 @@ def loopback() -> Iterator[tuple[int, list[str]]]:
             self.send_response(404)
             self.end_headers()
 
-        def log_message(self, *args: object) -> None:
+        @override
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -115,9 +119,11 @@ def _payload(port: int, tag: str) -> str:
 def _render_everything(
     bridge: ConsoleBridge, window: QQuickWindow, port: int, after_each: Callable[[], None]
 ) -> None:
-    """Show a payload in every renderer of model output, document text and file names
-    (Summary, Extract and Batch screens, the toast) through today's production paths,
-    calling ``after_each`` once each view has laid out and painted."""
+    """Show a payload in every renderer of model output, document text and file names.
+
+    Covers the Summary, Extract and Batch screens and the toast through today's
+    production paths, calling ``after_each`` once each view has laid out and painted.
+    """
 
     def settle() -> None:
         _ = window.grabWindow()
@@ -182,20 +188,20 @@ def test_rendered_text_fetches_nothing(
     print(f"requests={len(hits)} {sorted(hits)}")
     assert hits == [], f"rendering fetched {sorted(hits)}"
     guard = engine.networkAccessManagerFactory()
+    assert isinstance(guard, LocalOnlyNetworkAccessManagerFactory)
     print(f"refused={guard.refused}")
     assert guard.refused > 0, "no payload reached a renderer: the test proves nothing"
 
 
+@pytest.mark.usefixtures("qapp")
 def test_local_only_manager_refuses_remote_schemes(
-    qapp: QGuiApplication, loopback: tuple[int, list[str]], tmp_path: Path
+    loopback: tuple[int, list[str]], tmp_path: Path
 ) -> None:
     """Every scheme but ``file:`` and ``qrc:`` is refused before a socket opens.
 
     Mutation caught: a scheme check that lets ``http`` through (the loopback
     server records the GET) or one that refuses ``file:`` (the local read fails).
     """
-    from docsummarizer.ui.app import LocalOnlyNetworkAccessManagerFactory
-
     port, hits = loopback
     local = tmp_path / "local.txt"
     _ = local.write_text("local bytes", encoding="utf-8")
@@ -225,8 +231,9 @@ def test_local_only_manager_refuses_remote_schemes(
 def _text_format(item: QQuickItem) -> int:
     # PySide has no converter for QQuickText::TextFormat; QML evaluates it to a number.
     expr = QQmlExpression(QQmlEngine.contextForObject(item), item, "textFormat")
-    value, undefined = expr.evaluate()
+    value, undefined = cast("tuple[object, bool]", expr.evaluate())
     assert not undefined
+    assert isinstance(value, int | float)
     return int(value)
 
 
@@ -234,8 +241,9 @@ def test_content_text_formats_are_explicit(
     console: tuple[QQmlApplicationEngine, ConsoleBridge, QQuickWindow],
     loopback: tuple[int, list[str]],
 ) -> None:
-    """Model output renders as Markdown, file names as plain text and document text as
-    escaped rich text; none of their renderers is left on ``AutoText``.
+    """Model output renders as Markdown, file names as plain text, document text as rich text.
+
+    Document text is escaped first; none of the renderers is left on ``AutoText``.
 
     Mutation caught: deleting ``textFormat`` from the lead, a point, a section point,
     a file-name line, a Batch row, the Batch output line or the toast - that
