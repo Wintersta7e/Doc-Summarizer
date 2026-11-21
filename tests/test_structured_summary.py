@@ -23,10 +23,10 @@ from docsummarizer.model_manager import (
 from docsummarizer.provenance import SourceSpan
 
 _SOURCE = (
-    "The Transformer is a model architecture eschewing recurrence entirely. "
-    "It relies on self-attention to draw global dependencies between tokens. "
-    "On English-to-German translation it reaches 28.4 BLEU, a new state of the art. "
-    "Training took three and a half days on eight GPUs."
+    "The spiral-vane pump is a well design that does without a piston entirely. "
+    "It relies on a turning vane to lift water from depths of forty metres. "
+    "In the dry-season field trial it moved 28.4 litres a minute, a new record. "
+    "Assembly took three and a half days with eight workers."
 )
 
 
@@ -56,19 +56,19 @@ def _shell(fake_llm, n_ctx: int = 8192) -> Summarizer:
 def _detailed_payload() -> str:
     return json.dumps(
         {
-            "lead": "The Transformer is an attention-only architecture.",
+            "lead": "The spiral-vane pump is a piston-free well design.",
             "points": [
                 {
-                    "text": "It drops recurrence.",
-                    "quote": "The Transformer is a model architecture eschewing recurrence entirely.",
+                    "text": "It drops the piston.",
+                    "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
                 },
                 {
-                    "text": "It uses self-attention.",
-                    "quote": "It relies on self-attention to draw global dependencies between tokens.",
+                    "text": "It uses a turning vane.",
+                    "quote": "It relies on a turning vane to lift water from depths of forty metres.",
                 },
                 {
-                    "text": "It sets a translation record.",
-                    "quote": "On English-to-German translation it reaches 28.4 BLEU, a new state of the art.",
+                    "text": "It sets a flow record.",
+                    "quote": "In the dry-season field trial it moved 28.4 litres a minute, a new record.",
                 },
             ],
         }
@@ -97,7 +97,7 @@ def test_detailed_returns_three_grounded_points() -> None:
 
     assert isinstance(result, StructuredSummary)
     assert result.summary_type == SUMMARY_TYPE_DETAILED
-    assert result.lead == "The Transformer is an attention-only architecture."
+    assert result.lead == "The spiral-vane pump is a piston-free well design."
     assert len(result.points) == 3
     for point in result.points:
         assert isinstance(point.citation, SourceSpan)
@@ -129,7 +129,7 @@ def test_detailed_unmatched_quote_yields_no_citation() -> None:
 def test_detailed_render_text_contains_points() -> None:
     s = _shell(_JsonLLM(_detailed_payload()))
     result = s.summarize_structured(_SOURCE, SUMMARY_TYPE_DETAILED)
-    assert "It drops recurrence." in result.text
+    assert "It drops the piston." in result.text
     assert result.text.strip() != ""
 
 
@@ -142,23 +142,23 @@ def test_structured_returns_sections() -> None:
             "sections": {
                 "PURPOSE": [
                     {
-                        "text": "Replace recurrence with attention.",
-                        "quote": "The Transformer is a model architecture eschewing recurrence entirely.",
+                        "text": "Replace the piston with a vane.",
+                        "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
                     }
                 ],
                 "METHOD": [
                     {
-                        "text": "Self-attention over tokens.",
-                        "quote": "It relies on self-attention to draw global dependencies between tokens.",
+                        "text": "A turning vane lifts water.",
+                        "quote": "It relies on a turning vane to lift water from depths of forty metres.",
                     }
                 ],
                 "RESULTS": [
                     {
-                        "text": "28.4 BLEU.",
-                        "quote": "On English-to-German translation it reaches 28.4 BLEU, a new state of the art.",
+                        "text": "28.4 litres a minute.",
+                        "quote": "In the dry-season field trial it moved 28.4 litres a minute, a new record.",
                     }
                 ],
-                "CONCLUSIONS": [{"text": "Attention suffices."}],
+                "CONCLUSIONS": [{"text": "A vane suffices."}],
             }
         }
     )
@@ -242,7 +242,7 @@ def test_chunk_offsets_hard_split_oversized_sentence() -> None:
 # --------------------------------------------------------------------------- #
 def test_long_document_grounds_points_at_global_offsets() -> None:
     # A sentence that appears in every chunk; small ctx forces chunking.
-    marker = "The attention mechanism is the central idea of this work."
+    marker = "The turning vane is the central idea of this design."
     text = (
         (" ".join([f"Filler sentence {i} padding padding padding." for i in range(60)]))
         + " "
@@ -280,8 +280,8 @@ def test_citations_index_source_with_leading_whitespace() -> None:
             "lead": "x",
             "points": [
                 {
-                    "text": "drops recurrence",
-                    "quote": "The Transformer is a model architecture eschewing recurrence entirely.",
+                    "text": "drops the piston",
+                    "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
                 }
             ],
         }
@@ -328,7 +328,7 @@ def test_detailed_map_reduce_covers_multiple_chunks() -> None:
 
 
 def test_structured_map_reduce_grounds_sections_at_global_offsets() -> None:
-    marker = "Self-attention connects all positions with a constant path length."
+    marker = "The turning vane lifts water at a constant rate at any depth."
     text = _multi_chunk_text(marker)
     payload = json.dumps(
         {
@@ -387,7 +387,7 @@ def test_prose_wrapped_json_is_extracted() -> None:
             "points": [
                 {
                     "text": "a",
-                    "quote": "The Transformer is a model architecture eschewing recurrence entirely.",
+                    "quote": "The spiral-vane pump is a well design that does without a piston entirely.",
                 }
             ],
         }
@@ -412,7 +412,7 @@ def test_json_with_trailing_prose_braces_still_parses() -> None:
 # Point-count cap is consistent between single-pass and map-reduce
 # --------------------------------------------------------------------------- #
 def test_single_pass_caps_points_to_three() -> None:
-    quote = "The Transformer is a model architecture eschewing recurrence entirely."
+    quote = "The spiral-vane pump is a well design that does without a piston entirely."
     points = [{"text": f"pt{i}", "quote": quote} for i in range(5)]
     fake = _JsonLLM(json.dumps({"lead": "x", "points": points}))
     s = _shell(fake)

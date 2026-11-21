@@ -37,34 +37,34 @@ _QML_DIR = REPO / "src" / "docsummarizer" / "ui" / "qml"
 _PREVIEW = REPO / "scripts" / "_preview.qml"
 
 SAMPLE_SOURCE = (
-    "The dominant sequence transduction models are based on complex recurrent or "
-    "convolutional neural networks that include an encoder and a decoder. We propose a "
-    "new simple network architecture, the Transformer, based solely on attention "
-    "mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two "
-    "machine translation tasks show these models to be superior in quality while being "
-    "more parallelizable and requiring significantly less time to train."
+    "Most small farm wells today rely on piston pumps that need a skilled mechanic, "
+    "spare seals and a steady supply of grease to keep them running. We describe a "
+    "new simple pump design, the spiral-vane pump, based solely on a turning vane, "
+    "dispensing with pistons and valves entirely. Trials at two village wells show "
+    "these pumps to be superior in output while being easier to repair and requiring "
+    "significantly less time to assemble."
 )
 
 
 def _sample_summary() -> StructuredSummary:
     src = SAMPLE_SOURCE
     q1 = (
-        "We propose a new simple network architecture, the Transformer, based solely on "
-        "attention mechanisms, dispensing with recurrence and convolutions entirely."
+        "We describe a new simple pump design, the spiral-vane pump, based solely on a "
+        "turning vane, dispensing with pistons and valves entirely."
     )
     q2 = (
-        "Experiments on two machine translation tasks show these models to be superior in "
-        "quality while being more parallelizable and requiring significantly less time to train."
+        "Trials at two village wells show these pumps to be superior in output while being "
+        "easier to repair and requiring significantly less time to assemble."
     )
     s1, s2 = src.find(q1), src.find(q2)
     return StructuredSummary(
         "detailed",
-        "Vaswani et al. introduce the Transformer — an attention-only architecture that "
-        "removes recurrence and convolution, trains faster, and sets a new benchmark.",
+        "The authors introduce the spiral-vane pump — a vane-only design that removes "
+        "pistons and valves, assembles faster, and sets a new output record.",
         [
-            SummaryPoint("A pure-attention architecture", SourceSpan(s1, s1 + len(q1), q1, 1.0)),
-            SummaryPoint("Faster, parallelizable training", SourceSpan(s2, s2 + len(q2), q2, 1.0)),
-            SummaryPoint("State-of-the-art translation quality", None),
+            SummaryPoint("A piston-free pump design", SourceSpan(s1, s1 + len(q1), q1, 1.0)),
+            SummaryPoint("Faster, simpler repair", SourceSpan(s2, s2 + len(q2), q2, 1.0)),
+            SummaryPoint("Record output at village wells", None),
         ],
         None,
         "rendered",
@@ -116,7 +116,7 @@ def main() -> int:
 
     register_fonts()
     bridge = _PreviewBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=True)
-    bridge.seed_document("attention.pdf", SAMPLE_SOURCE)
+    bridge.seed_document("spiral-vane-pump.pdf", SAMPLE_SOURCE)
 
     view = QQuickView()
     view.engine().addImportPath(str(_QML_DIR))
@@ -142,9 +142,9 @@ def main() -> int:
     if screen == "batch":
         bridge.seed_batch_rows(
             [
-                {"name": "1706.03762.pdf", "status": "DONE", "tokens": 312},
-                {"name": "1810.04805.pdf", "status": "PROCESSING", "tokens": 0},
-                {"name": "2005.14165.pdf", "status": "QUEUED", "tokens": 0},
+                {"name": "pump-trial-north.pdf", "status": "DONE", "tokens": 312},
+                {"name": "pump-trial-south.pdf", "status": "PROCESSING", "tokens": 0},
+                {"name": "pump-trial-east.pdf", "status": "QUEUED", "tokens": 0},
             ]
         )
 
