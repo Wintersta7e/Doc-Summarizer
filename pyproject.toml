@@ -180,6 +180,9 @@ extend-ignore-names = [
     # 99 hits: an assert compares against the literal the behaviour must
     # produce; a named constant would only restate the expected value.
     "PLR2004",
+    # 26 hits: white-box tests of module-private helpers and bridge state;
+    # making them public would widen the API that later changes rewrite.
+    "SLF001",
 ]
 # Standard output is the interface of the CLI and of the dev scripts.
 "src/docsummarizer/cli.py" = ["T201"]
@@ -231,6 +234,13 @@ stubPath = "typings"
 reportImplicitStringConcatenation = false
 reportIgnoreCommentWithoutRule = true
 reportUnnecessaryTypeIgnoreComment = true
+
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+# 30 hits: white-box tests of module-private helpers and bridge state; making
+# them public would widen the API that later changes rewrite. src, run.py and
+# scripts stay fully checked.
+reportPrivateUsage = false
 
 # --------------------------------------------------------------------------- #
 # pytest + coverage
