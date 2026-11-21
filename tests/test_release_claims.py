@@ -8,6 +8,7 @@ so re-wrapping a line cannot hide one.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -53,8 +54,10 @@ def _hits(text: str, phrases: Sequence[str]) -> list[str]:
 
 def _tracked_files() -> list[str]:
     """Return every path git tracks, printing the count; none listed fails."""
+    git = shutil.which("git")
+    assert git is not None, "git is not on PATH"
     listing = subprocess.run(
-        ["git", "ls-files", "-z"],  # noqa: S607 - the checkout's git, found on PATH
+        [git, "ls-files", "-z"],
         cwd=_ROOT,
         capture_output=True,
         check=True,

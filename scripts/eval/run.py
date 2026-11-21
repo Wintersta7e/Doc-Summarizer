@@ -71,12 +71,12 @@ def git_state(repo: Path) -> GitState:
     git = shutil.which("git")
     if git is None:
         return GitState(None, None, "git not found")
-    head = subprocess.run(  # noqa: S603 - fixed argv, no shell
+    head = subprocess.run(
         [git, "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=False
     )
     if head.returncode != 0:
         return GitState(None, None, head.stderr.strip() or f"git exited {head.returncode}")
-    status = subprocess.run(  # noqa: S603 - fixed argv, no shell
+    status = subprocess.run(
         [git, "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=False
     )
     if status.returncode != 0:
@@ -332,10 +332,13 @@ def read_host_processes() -> str | None:
     Process id, name and CPU seconds of every Windows process. ``tasklist /v``
     carries the same CPU column but takes about a minute on a busy host.
     """
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        return None
     try:
         done = subprocess.run(
-            [  # noqa: S607 - resolved on the interop PATH
-                "powershell.exe",
+            [
+                powershell,
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",

@@ -1219,7 +1219,7 @@ def test_runner_logs_stay_in_the_eval_dir(
     inherited = tmp_path / "inherited"
     env = {**os.environ, "XDG_DATA_HOME": str(inherited), "LOCALAPPDATA": str(inherited)}
     argv = ["scripts/eval/run.py", "--eval-dir", str(eval_dir), "--rescore", str(source)]
-    done = subprocess.run(  # noqa: S603
+    done = subprocess.run(
         [sys.executable, "-I", *argv],
         cwd=_REPO,
         env=env,

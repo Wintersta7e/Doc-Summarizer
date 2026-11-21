@@ -117,60 +117,68 @@ target-version = "py310"
 src = ["src"]
 
 [tool.ruff.lint]
-select = [
-    "E", "W",   # pycodestyle
-    "F",        # pyflakes
-    "I",        # isort
-    "N",        # pep8-naming
-    "UP",       # pyupgrade
-    "B",        # flake8-bugbear
-    "A",        # flake8-builtins
-    "C4",       # flake8-comprehensions
-    "EM",       # flake8-errmsg
-    "FA",       # flake8-future-annotations
-    "G",        # flake8-logging-format
-    "ICN",      # flake8-import-conventions
-    "ISC",      # flake8-implicit-str-concat
-    "LOG",      # flake8-logging
-    "PIE",      # flake8-pie
-    "PT",       # flake8-pytest-style
-    "PTH",      # flake8-use-pathlib
-    "Q",        # flake8-quotes
-    "RSE",      # flake8-raise
-    "RET",      # flake8-return
-    "SLF",      # flake8-self
-    "SIM",      # flake8-simplify
-    "TID",      # flake8-tidy-imports
-    "TRY",      # tryceratops
-    "PERF",     # perflint
-    "FURB",     # refurb
-    "PL",       # pylint
-    "S",        # flake8-bandit (security)
-    "RUF",      # ruff-specific
-]
+select = ["ALL"]
 ignore = [
-    "E501",    # line length — handled by the formatter
-    "ISC001",  # conflicts with the formatter
-    "TRY003",  # long messages outside exception class — too noisy for an app
-    "PLR2004", # "magic value" comparisons — noisy and low value here
-    "PLR0913", # too many arguments — constructors / argparse wiring need them
-    "PLC0415", # import outside top level — intentional lazy imports for heavy/optional deps
-    "G004",    # the log_* wrappers take pre-formatted strings; lazy %-formatting doesn't apply
-    "EM",      # assigning exception messages to a variable first is verbose, not clearer
+    # Conflicts with `ruff format`, which owns trailing commas (130 hits).
+    "COM812",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 12
+max-returns = 6
+max-statements = 50
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+# Optional, heavy or platform-only modules: imported inside the function that
+# needs them, so a module-level import is an error and the lazy one is allowed.
+banned-module-level-imports = [
+    "docx",
+    "llama_cpp",
+    "py3langid",
+    "pypdf",
+    "resource",
+    "striprtf",
+    "tqdm",
+]
+
+[tool.ruff.lint.flake8-copyright]
+notice-rgx = "SPDX-License-Identifier: MIT"
+
+[tool.ruff.lint.pep8-naming]
+# Qt overrides and the bridge's QML-facing signals, properties and slots: QML
+# binds these exact camelCase names.
+extend-ignore-names = [
+    "batchComplete", "batchProcess", "batchProgress", "batchRows", "batchRowsChanged", "beginDownload",
+    "busyChanged", "canSummarize", "cancelSummarize", "checkModel", "computeLabel", "contextSize",
+    "cpuCount", "createRequest", "currentFileName", "docChanged", "downloadChanged", "downloadPercent",
+    "extractedText", "gpuEnabled", "gpuSupported", "hasDoc", "loadComplete", "loadDocument",
+    "loadModel", "modelDownloaded", "modelName", "modelQuant", "modelReady", "modelReadyChanged",
+    "modelSizeGb", "outputLanguage", "outputLanguages", "reloadArmed", "reloadArmedChanged", "reloadModel",
+    "saveSummary", "savedFlash", "setAppearance", "setOutputLanguage", "setSummaryType", "setThreads",
+    "settingsChanged", "statusChanged", "statusColor", "statusText", "summaryError", "summaryReady",
+    "summaryType", "summaryTypeChanged", "summaryTypes", "toggleGpu", "unloadDocument", "urlToPath",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests legitimately assert (S101), reach into private helpers (SLF001),
-# and use bugbear-flagged fixture patterns (B).
-"tests/*" = ["S101", "SLF001", "B"]
-# Qt requires camelCase for QObject signals/slots/properties so QML can bind
-# them; pep8-naming (N802/N815) does not apply to the Qt UI bridge.
-"src/docsummarizer/ui/*" = ["N802", "N815"]
-# Dev/QA scripts may seed bridge internals for offscreen rendering.
-"scripts/*" = ["SLF001"]
-# The gate runner exists to start the configured tools: its argv is built from
-# constants in the script, never from outside input.
-"scripts/check.py" = ["S603"]
+# pytest's assert is the test mechanism.
+"tests/**" = ["S101"]
+# Standard output is the interface of the CLI and of the dev scripts.
+"src/docsummarizer/cli.py" = ["T201"]
+"scripts/**" = ["T201"]
+# These files run fixed tool argv lists, never a shell; S603 has no option to
+# say so.
+"scripts/check.py" = ["S603"]  # 1 hit
+"scripts/eval/run.py" = ["S603"]  # 3 hits
+"tests/test_eval_runner.py" = ["S603"]  # 1 hit
+"tests/test_release_claims.py" = ["S603"]  # 1 hit
 
 [tool.ruff.format]
 docstring-code-format = true
