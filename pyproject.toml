@@ -207,8 +207,13 @@ extend-ignore-names = [
 # 7 hits: sys.path must point at this checkout's src before the PySide6 and
 # first-party imports.
 "scripts/render_qml.py" = ["E402"]
-# 1 hit: seeded random.Random test data, never security.
-"tests/test_eval_metrics.py" = ["S311"]
+"tests/test_eval_metrics.py" = [
+    # 1 hit: seeded random.Random test data, never security.
+    "S311",
+    # 8 hits: the CJK fixtures use full-width punctuation on purpose; the
+    # classifier under test must see real CJK text.
+    "RUF001",
+]
 
 [tool.ruff.format]
 docstring-code-format = true

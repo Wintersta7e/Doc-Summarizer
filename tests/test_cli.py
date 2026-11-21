@@ -23,7 +23,7 @@ def test_cli_args_defaults_match_the_parser() -> None:
 
 
 def test_parser_defaults() -> None:
-    args = _build_parser().parse_args(["doc.pdf"])
+    args = _build_parser().parse_args(["doc.pdf"], namespace=CliArgs())
     assert args.input == "doc.pdf"
     assert args.type == "detailed"
     assert args.gpu is None
@@ -31,51 +31,57 @@ def test_parser_defaults() -> None:
 
 
 def test_parser_gpu_flags() -> None:
-    assert _build_parser().parse_args(["d", "--gpu"]).gpu is True
-    assert _build_parser().parse_args(["d", "--no-gpu"]).gpu is False
+    assert _build_parser().parse_args(["d", "--gpu"], namespace=CliArgs()).gpu is True
+    assert _build_parser().parse_args(["d", "--no-gpu"], namespace=CliArgs()).gpu is False
 
 
 def test_parser_threads_and_type() -> None:
-    args = _build_parser().parse_args(["d", "--threads", "6", "-t", "brief"])
+    args = _build_parser().parse_args(["d", "--threads", "6", "-t", "brief"], namespace=CliArgs())
     assert args.threads == 6
     assert args.type == "brief"
 
 
 def test_resolve_runtime_uses_settings_without_flags() -> None:
-    args = _build_parser().parse_args(["d"])
+    args = _build_parser().parse_args(["d"], namespace=CliArgs())
     assert _resolve_runtime(args, Settings(n_threads=4, use_gpu=False)) == (4, 0)
 
 
 def test_resolve_runtime_flags_override_settings() -> None:
-    args = _build_parser().parse_args(["d", "--gpu", "--threads", "8"])
+    args = _build_parser().parse_args(["d", "--gpu", "--threads", "8"], namespace=CliArgs())
     assert _resolve_runtime(args, Settings(n_threads=4, use_gpu=False)) == (8, -1)
 
 
 def test_resolve_runtime_no_gpu_forces_cpu() -> None:
-    args = _build_parser().parse_args(["d", "--no-gpu"])
+    args = _build_parser().parse_args(["d", "--no-gpu"], namespace=CliArgs())
     assert _resolve_runtime(args, Settings(use_gpu=True)) == (None, 0)
 
 
 def test_parser_language_defaults_to_none() -> None:
     """No flag means 'defer to the saved setting', not 'auto'."""
-    assert _build_parser().parse_args(["doc.pdf"]).language is None
+    assert _build_parser().parse_args(["doc.pdf"], namespace=CliArgs()).language is None
 
 
 def test_parser_language_flag() -> None:
-    assert _build_parser().parse_args(["d", "-l", "Chinese"]).language == "Chinese"
-    assert _build_parser().parse_args(["d", "--language", "German"]).language == "German"
+    assert (
+        _build_parser().parse_args(["d", "-l", "Chinese"], namespace=CliArgs()).language
+        == "Chinese"
+    )
+    assert (
+        _build_parser().parse_args(["d", "--language", "German"], namespace=CliArgs()).language
+        == "German"
+    )
 
 
 def test_resolve_language_uses_settings_without_flag() -> None:
-    args = _build_parser().parse_args(["d"])
+    args = _build_parser().parse_args(["d"], namespace=CliArgs())
     assert _resolve_language(args, Settings(output_language="Chinese")) == "Chinese"
 
 
 def test_resolve_language_flag_overrides_settings() -> None:
-    args = _build_parser().parse_args(["d", "-l", "French"])
+    args = _build_parser().parse_args(["d", "-l", "French"], namespace=CliArgs())
     assert _resolve_language(args, Settings(output_language="Chinese")) == "French"
 
 
 def test_resolve_language_normalizes() -> None:
-    args = _build_parser().parse_args(["d", "-l", "  auto "])
+    args = _build_parser().parse_args(["d", "-l", "  auto "], namespace=CliArgs())
     assert _resolve_language(args, Settings(output_language="Chinese")) == "auto"

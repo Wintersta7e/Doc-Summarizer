@@ -16,6 +16,8 @@ from docsummarizer.document_parser import analyze_document
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 
 def test_txt_stats_from_real_file(tmp_path: Path) -> None:
     f = tmp_path / "note.txt"
@@ -56,8 +58,12 @@ def test_rtf_parser_label() -> None:
     assert stats["parser"] == "striprtf"
 
 
-def test_pdf_reports_pages(monkeypatch) -> None:
-    monkeypatch.setattr(document_parser, "_pdf_page_count", lambda _p: 12)
+def _twelve_pages(_file_path: str) -> int:
+    return 12
+
+
+def test_pdf_reports_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(document_parser, "_pdf_page_count", _twelve_pages)
     stats = analyze_document("paper.pdf", text="extracted body text")
     assert stats["pages"] == 12
     assert stats["parser"] == "pypdf"
@@ -73,4 +79,4 @@ def test_analyze_extracts_when_text_not_supplied(tmp_path: Path) -> None:
 
 def test_pdf_page_count_handles_unreadable_file() -> None:
     # Missing/corrupt PDF must not raise — analyze should degrade to None pages.
-    assert document_parser._pdf_page_count("does-not-exist.pdf") is None
+    assert analyze_document("does-not-exist.pdf", text="body")["pages"] is None

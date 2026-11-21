@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from typing import TYPE_CHECKING
 
 import pytest
@@ -61,11 +62,14 @@ def test_extract_md_routes_to_txt(tmp_path: Path) -> None:
 
 
 def test_extract_docx_basic(tmp_path: Path) -> None:
-    docx = pytest.importorskip("docx")
+    if importlib.util.find_spec("docx") is None:
+        pytest.skip("python-docx is not installed")
+    from docx import Document
+
     target = tmp_path / "doc.docx"
-    document = docx.Document()
-    document.add_paragraph("first paragraph")
-    document.add_paragraph("second paragraph")
+    document = Document()
+    _ = document.add_paragraph("first paragraph")
+    _ = document.add_paragraph("second paragraph")
     document.save(str(target))
 
     text, error = extract_text(str(target))
@@ -94,8 +98,10 @@ def test_legacy_doc_not_supported(tmp_path: Path) -> None:
 
 
 def test_supported_extension_set_canonical() -> None:
-    """The canonical set is the single source of truth — assert against it
-    directly rather than parsing the dialog-filter strings."""
+    """The canonical set is the single source of truth.
+
+    Assert against it directly rather than parsing the dialog-filter strings.
+    """
     assert ".doc" not in SUPPORTED_EXTENSION_SET
     assert ".docx" in SUPPORTED_EXTENSION_SET
     assert {".pdf", ".docx", ".rtf", ".txt", ".md", ".text"} == SUPPORTED_EXTENSION_SET

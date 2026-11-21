@@ -5,9 +5,6 @@ Fixtures are short project-written texts about a village bakery and a river
 ferry, one per language the classifier must tell apart.
 """
 
-# The CJK fixtures use full-width punctuation on purpose.
-# ruff: noqa: RUF001
-
 from __future__ import annotations
 
 import json
@@ -138,11 +135,11 @@ def test_m4_counts_length_finishes() -> None:
 
 
 def test_m12a_prints_first_differing_char() -> None:
-    assert metrics.m12a("same text", "same text") == metrics.M12a(True, None)
+    assert metrics.m12a("same text", "same text") == metrics.M12a(identical=True, first_diff=None)
     result = metrics.m12a("abcd", "abXd")
     print(f"m12a: {result}")
-    assert result == metrics.M12a(False, 2)
-    assert metrics.m12a("abc", "abcd") == metrics.M12a(False, 3)
+    assert result == metrics.M12a(identical=False, first_diff=2)
+    assert metrics.m12a("abc", "abcd") == metrics.M12a(identical=False, first_diff=3)
 
 
 def test_m2_fails_on_an_off_target_map_call() -> None:
@@ -232,6 +229,14 @@ _M7_DOCUMENT = " ".join(_M7_SENTENCES)
 _M7_QUOTES = (_M7_SENTENCES[0], _M7_SENTENCES[1], _LONG_SENTENCE)
 
 
+def _reject_every_match(_quote: str, _span_text: str) -> bool:
+    return False
+
+
+def _accept_every_match(_quote: str, _span_text: str) -> bool:
+    return True
+
+
 def _m7_of_grounded_points() -> metrics.M7:
     payload = {
         "lead": "A ferry serves the village.",
@@ -254,7 +259,7 @@ def test_m7_hit_rate_tracks_the_production_predicate(monkeypatch: pytest.MonkeyP
     unpatched = _m7_of_grounded_points()
     print(f"m7 unpatched: {unpatched} hit_rate={unpatched.hit_rate}")
 
-    monkeypatch.setattr(provenance, "is_verified_match", lambda q, s: False)
+    monkeypatch.setattr(provenance, "is_verified_match", _reject_every_match)
     rejected = _m7_of_grounded_points()
     print(f"m7 reject-all: {rejected}")
     assert rejected.points == len(_M7_QUOTES)
@@ -263,7 +268,7 @@ def test_m7_hit_rate_tracks_the_production_predicate(monkeypatch: pytest.MonkeyP
 
     # Accept-all still runs locate_quote's coverage pre-filter and its length
     # floor, so every quote is a whole sentence of six characters or more.
-    monkeypatch.setattr(provenance, "is_verified_match", lambda q, s: True)
+    monkeypatch.setattr(provenance, "is_verified_match", _accept_every_match)
     accepted = _m7_of_grounded_points()
     print(f"m7 accept-all: {accepted} hit_rate={accepted.hit_rate}")
     assert accepted.cited == len(_M7_QUOTES)
