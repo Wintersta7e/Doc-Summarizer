@@ -16,9 +16,9 @@ _APP_NAME = "DocSummarizer"
 
 
 def app_data_dir(subpath: str) -> Path:
-    """Return the per-user data dir for `subpath`, creating it if missing.
+    r"""Return the per-user data dir for `subpath`, creating it if missing.
 
-    - Windows: `%LOCALAPPDATA%\\DocSummarizer\\<subpath>`
+    - Windows: `%LOCALAPPDATA%\DocSummarizer\<subpath>`
     - macOS:   `~/Library/Application Support/DocSummarizer/<subpath>`
     - Linux:   `$XDG_DATA_HOME/DocSummarizer/<subpath>` (fallback
       `~/.local/share/DocSummarizer/<subpath>`)
