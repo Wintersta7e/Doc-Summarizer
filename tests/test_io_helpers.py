@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import importlib.util
 from typing import TYPE_CHECKING
 
 import pytest
 
-from docsummarizer.io_helpers import summary_txt, write_summary_txt, write_text
+from docsummarizer.io_helpers import (
+    summary_txt,
+    write_summary_docx,
+    write_summary_txt,
+    write_text,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,8 +64,8 @@ def test_write_summary_txt_accepts_string_path(tmp_path: Path) -> None:
 
 
 def test_write_summary_docx_creates_file(tmp_path: Path) -> None:
-    pytest.importorskip("docx")
-    from docsummarizer.io_helpers import write_summary_docx
+    if importlib.util.find_spec("docx") is None:
+        pytest.skip("python-docx is not installed")
 
     out = tmp_path / "s.docx"
     _ = write_summary_docx(out, source_name="doc.pdf", summary="body text 42", replace=True)

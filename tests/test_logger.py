@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,9 +16,11 @@ if TYPE_CHECKING:
 
 
 def test_get_log_directory_lands_under_isolated_tmp(tmp_path: Path) -> None:
-    """`conftest._isolated_app_dirs` redirects platform env vars to tmp_path;
-    `get_log_directory` must resolve under it (the platform branches
-    themselves are covered in test_paths.py)."""
+    """`get_log_directory` resolves under the isolated tmp dir.
+
+    `conftest._isolated_app_dirs` redirects platform env vars to tmp_path; the
+    platform branches themselves are covered in test_paths.py.
+    """
     d = logger_module.get_log_directory()
     assert str(d).startswith(str(tmp_path))
     assert d.name == "logs"
@@ -37,12 +40,10 @@ def test_get_logger_thread_safe() -> None:
     with no lock. Two simultaneous first calls could both pass the check
     and both add a FileHandler.
     """
-    import threading
-
     barrier = threading.Barrier(8)
     results: list[logging.Logger] = []
 
-    def worker():
+    def worker() -> None:
         _ = barrier.wait()
         results.append(logger_module.get_logger())
 
@@ -81,12 +82,13 @@ def test_timer_logs_failure_on_exception(caplog: pytest.LogCaptureFixture) -> No
     logging.getLogger("DocSummarizer").addHandler(caplog.handler)
     logging.getLogger("DocSummarizer").setLevel(logging.DEBUG)
 
+    msg = "boom"
     with (
         caplog.at_level(logging.ERROR, logger="DocSummarizer"),
         pytest.raises(ValueError, match="boom"),
         logger_module.Timer("widget"),
     ):
-        raise ValueError("boom")
+        raise ValueError(msg)
 
     messages = "\n".join(r.getMessage() for r in caplog.records)
     assert "Failed: widget" in messages

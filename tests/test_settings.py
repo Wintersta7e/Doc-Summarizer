@@ -11,7 +11,7 @@ lands under ``tmp_path``.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from docsummarizer.settings import (
     Settings,
@@ -53,7 +53,7 @@ def test_save_then_load_roundtrip() -> None:
 
 def test_save_writes_expected_json() -> None:
     save_settings(Settings(n_threads=4, use_gpu=False))
-    data = json.loads(settings_path().read_text(encoding="utf-8"))
+    data = cast("dict[str, object]", json.loads(settings_path().read_text(encoding="utf-8")))
     assert data == {
         "n_threads": 4,
         "use_gpu": False,

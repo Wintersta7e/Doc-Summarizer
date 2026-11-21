@@ -16,6 +16,8 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
 
+from docsummarizer.ui.bridge import ConsoleBridge
+
 _QML_DIR = Path(__file__).resolve().parents[1] / "src" / "docsummarizer" / "ui" / "qml"
 _APP_DIR = _QML_DIR / "App"
 
@@ -42,13 +44,15 @@ _COMPONENTS = [
 
 @pytest.fixture(scope="session")
 def qapp() -> QGuiApplication:
-    return QGuiApplication.instance() or QGuiApplication([])
+    app = QGuiApplication.instance() or QGuiApplication([])
+    assert isinstance(app, QGuiApplication)
+    return app
 
 
 @pytest.fixture
 def engine(qapp: QGuiApplication) -> QQmlApplicationEngine:
-    from docsummarizer.ui.bridge import ConsoleBridge
-
+    # The engine needs the application object to exist first.
+    assert qapp is QGuiApplication.instance()
     eng = QQmlApplicationEngine()
     eng.addImportPath(str(_QML_DIR))
     bridge = ConsoleBridge()

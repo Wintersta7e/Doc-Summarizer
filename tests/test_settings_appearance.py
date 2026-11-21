@@ -9,6 +9,7 @@ settings.json, with tolerant validation against {System, Light, Dark}.
 from __future__ import annotations
 
 import json
+from typing import cast
 
 from docsummarizer.settings import Settings, load_settings, save_settings, settings_path
 
@@ -28,7 +29,7 @@ def test_appearance_round_trips() -> None:
 
 def test_save_writes_appearance_into_json() -> None:
     save_settings(Settings(appearance="Light"))
-    data = json.loads(settings_path().read_text(encoding="utf-8"))
+    data = cast("dict[str, object]", json.loads(settings_path().read_text(encoding="utf-8")))
     assert data["appearance"] == "Light"
 
 

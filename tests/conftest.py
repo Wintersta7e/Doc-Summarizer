@@ -10,6 +10,7 @@ automatically for every test.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -17,12 +18,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 # Skip the Qt UI tests where PySide6 isn't installed (keeps a minimal env green).
-try:
-    import PySide6  # noqa: F401
-except ImportError:
+if importlib.util.find_spec("PySide6") is None:
     collect_ignore_glob = ["test_ui_*.py"]
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no
@@ -47,7 +47,7 @@ def _isolated_app_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _reset_logger_singleton():
+def _reset_logger_singleton() -> Iterator[None]:
     """Detach the app logger's handlers between tests.
 
     The named logger is a process-wide singleton; without detaching its
