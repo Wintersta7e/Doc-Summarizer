@@ -33,7 +33,7 @@ def extract_from_pdf(file_path: str) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(file_path)
-    text_parts = []
+    text_parts: list[str] = []
 
     for page in reader.pages:
         page_text = page.extract_text()

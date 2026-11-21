@@ -89,9 +89,9 @@ def get_system_info() -> dict[str, object]:
     import psutil
 
     mem = psutil.virtual_memory()
-    info["total_memory_gb"] = round(mem.total / (1024**3), 2)
-    info["available_memory_gb"] = round(mem.available / (1024**3), 2)
-    info["memory_percent_used"] = mem.percent
+    info["total_memory_gb"] = round(cast("int", mem.total) / (1024**3), 2)
+    info["available_memory_gb"] = round(cast("int", mem.available) / (1024**3), 2)
+    info["memory_percent_used"] = cast("float", mem.percent)
     return info
 
 
@@ -132,7 +132,7 @@ def get_memory_usage_mb() -> float:
     import psutil
 
     process = psutil.Process(os.getpid())
-    return float(round(process.memory_info().rss / (1024**2), 2))
+    return float(round(cast("int", process.memory_info().rss) / (1024**2), 2))
 
 
 @final

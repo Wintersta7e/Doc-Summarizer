@@ -30,12 +30,12 @@ def publish(tmp: Path, target: Path, *, replace: bool) -> bool:
     """
     try:
         if replace:
-            tmp.replace(target)
+            _ = tmp.replace(target)
             return True
         try:
             if sys.platform == "win32":
                 # Windows rename refuses an existing destination.
-                tmp.rename(target)
+                _ = tmp.rename(target)
             else:
                 # POSIX rename replaces silently; a hard link refuses.
                 os.link(tmp, target)
@@ -96,7 +96,7 @@ def write_text(output_path: str | Path, text: str, *, replace: bool) -> bool:
 
     def write(tmp: Path) -> None:
         with tmp.open("w", encoding="utf-8") as f:
-            f.write(text)
+            _ = f.write(text)
 
     return _write_and_publish(Path(output_path), write, replace=replace)
 
@@ -133,8 +133,8 @@ def write_summary_docx(
 
     def write(tmp: Path) -> None:
         doc = Document()
-        doc.add_heading(f"Summary: {source_name}", 0)
-        doc.add_paragraph(summary)
+        _ = doc.add_heading(f"Summary: {source_name}", 0)
+        _ = doc.add_paragraph(summary)
         doc.save(str(tmp))
 
     return _write_and_publish(Path(output_path), write, replace=replace)
