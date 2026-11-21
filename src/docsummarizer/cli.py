@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""DocSummarizer Command Line Interface
-For users who prefer terminal over GUI.
-"""
+"""DocSummarizer's command line interface, for users who prefer a terminal to the GUI."""
 
 import argparse
 import os
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NoReturn
 
@@ -17,8 +16,10 @@ from docsummarizer.io_helpers import (
     SKIPPED_EXISTS,
     same_file,
     summary_filename,
-    write_summary_txt,
+    summary_txt,
+    write_text,
 )
+from docsummarizer.logger import get_logger
 from docsummarizer.model_manager import (
     DEFAULT_MODEL,
     LANGUAGE_AUTO,
@@ -33,14 +34,17 @@ from docsummarizer.model_manager import (
 )
 from docsummarizer.settings import Settings, load_settings
 
+# A progress percentage at or past this has finished.
+_COMPLETE_PERCENT = 100
+
 
 def print_progress(percent: float, message: str) -> None:
     """Print progress to console."""
     bar_length = 40
-    filled = int(bar_length * percent / 100)
+    filled = int(bar_length * percent / _COMPLETE_PERCENT)
     bar = "=" * filled + "-" * (bar_length - filled)
     print(f"\r[{bar}] {percent:.1f}% - {message}", end="", flush=True)
-    if percent >= 100:
+    if percent >= _COMPLETE_PERCENT:
         print()
 
 
@@ -64,6 +68,16 @@ def ensure_model() -> bool:
 
 Outcome = Literal["written", "skipped", "failed"]
 
+
+@dataclass(frozen=True)
+class RunOptions:
+    """What every input of one run is summarized as, and whether outputs are replaced."""
+
+    summary_type: str = SUMMARY_TYPE_DETAILED
+    language: str = LANGUAGE_AUTO
+    replace: bool = True
+
+
 # One planned input: the source, its output (None = console), and whether its
 # output already exists and is left alone.
 PlannedInput = tuple[Path, Path | None, bool]
@@ -72,15 +86,12 @@ PlannedInput = tuple[Path, Path | None, bool]
 def summarize_file(
     filepath: str,
     summarizer: Summarizer,
-    summary_type: str = SUMMARY_TYPE_DETAILED,
     target: Path | None = None,
-    language: str = LANGUAGE_AUTO,
-    *,
-    replace: bool = True,
+    options: RunOptions = RunOptions(),
 ) -> Outcome:
     """Summarize a single file into `target`, or to the console without one.
 
-    With `replace=False` an output that appeared since the run checked it is
+    With `options.replace` false an output that appeared since the run checked it is
     kept and the input counts as skipped.
     """
     info = get_document_info(filepath)
@@ -94,9 +105,12 @@ def summarize_file(
     print(f"  Extracted {len(text)} characters")
 
     print("  Generating summary...")
+    summary_type = options.summary_type
     try:
-        summary = summarizer.summarize(text, summary_type=summary_type, language=language)
-    except Exception as e:
+        summary = summarizer.summarize(text, summary_type=summary_type, language=options.language)
+    except Exception as e:  # one bad file must not end the run
+        logger = get_logger()
+        logger.exception("Summarizing a file failed")
         print(f"  Error: {e!s}")
         return "failed"
 
@@ -109,13 +123,10 @@ def summarize_file(
         return "written"
 
     try:
-        written = write_summary_txt(
+        written = write_text(
             target,
-            source_name=info["name"],
-            summary=summary,
-            summary_type=summary_type,
-            separator_width=60,
-            replace=replace,
+            summary_txt(info["name"], summary, summary_type, separator_width=60),
+            replace=options.replace,
         )
     except OSError as e:  # e.g. a locked target; the rest of the run goes on
         print(f"  Error: could not write {target}: {e}")
@@ -271,12 +282,7 @@ def _plan_run(
 
 
 def _run_plan(
-    plan: list[PlannedInput],
-    summarizer: Summarizer,
-    summary_type: str,
-    language: str,
-    *,
-    replace: bool,
+    plan: list[PlannedInput], summarizer: Summarizer, options: RunOptions
 ) -> Counter[Outcome]:
     counts: Counter[Outcome] = Counter()
     for filepath, target, exists in plan:
@@ -284,16 +290,13 @@ def _run_plan(
             print(f"{filepath.name}: skipped: {SKIPPED_EXISTS}")
             counts["skipped"] += 1
         else:
-            counts[
-                summarize_file(
-                    str(filepath), summarizer, summary_type, target, language, replace=replace
-                )
-            ] += 1
+            counts[summarize_file(str(filepath), summarizer, target, options)] += 1
         print()
     return counts
 
 
 def main() -> None:
+    """Run the command line interface; exits non-zero on a usage or setup error."""
     parser = _build_parser()
     args = parser.parse_args()
 
@@ -326,7 +329,9 @@ def main() -> None:
     print(f"Loading model ({'GPU' if n_gpu_layers else 'CPU'})...")
     try:
         summarizer = Summarizer(get_model_path(), n_threads=n_threads, n_gpu_layers=n_gpu_layers)
-    except Exception as e:
+    except Exception as e:  # the native loader's errors have no common base
+        logger = get_logger()
+        logger.exception("Loading the model failed")
         print(f"Error loading model: {e}")
         sys.exit(1)
 
@@ -338,7 +343,7 @@ def main() -> None:
     )
 
     try:
-        counts = _run_plan(plan, summarizer, args.type, language, replace=replace)
+        counts = _run_plan(plan, summarizer, RunOptions(args.type, language, replace))
     finally:
         summarizer.close()
 

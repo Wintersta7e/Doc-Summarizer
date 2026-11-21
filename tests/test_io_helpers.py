@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from docsummarizer.io_helpers import write_summary_txt
+from docsummarizer.io_helpers import summary_txt, write_summary_txt, write_text
 
 
 def test_write_summary_txt_minimal(tmp_path: Path) -> None:
@@ -35,7 +35,7 @@ def test_write_summary_txt_with_type(tmp_path: Path) -> None:
 
 def test_write_summary_txt_custom_separator(tmp_path: Path) -> None:
     out = tmp_path / "s.txt"
-    write_summary_txt(out, source_name="x", summary="y", separator_width=60, replace=True)
+    write_text(out, summary_txt("x", "y", separator_width=60), replace=True)
     content = out.read_text(encoding="utf-8")
     assert "=" * 60 in content
     assert "=" * 61 not in content

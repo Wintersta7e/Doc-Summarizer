@@ -71,16 +71,10 @@ def summary_filename(source: Path, summary_type: str, fmt: str) -> str:
     return f"{source.name}.{summary_type}.{fmt}"
 
 
-def write_summary_txt(
-    output_path: str | Path,
-    *,
-    source_name: str,
-    summary: str,
-    summary_type: str | None = None,
-    separator_width: int = 50,
-    replace: bool,
-) -> bool:
-    """Write `summary` to a UTF-8 text file with a standard header.
+def summary_txt(
+    source_name: str, summary: str, summary_type: str | None = None, separator_width: int = 50
+) -> str:
+    """Return `summary` under the standard text header.
 
     The header is:
 
@@ -89,19 +83,37 @@ def write_summary_txt(
         ==================================================
 
         <summary body>
+    """
+    type_line = f"Type: {summary_type}\n" if summary_type else ""
+    return f"Summary of: {source_name}\n{type_line}" + "=" * separator_width + "\n\n" + summary
+
+
+def write_text(output_path: str | Path, text: str, *, replace: bool) -> bool:
+    """Write `text` to a UTF-8 file.
 
     Returns False when `replace` is False and the file already exists.
     """
 
     def write(tmp: Path) -> None:
         with tmp.open("w", encoding="utf-8") as f:
-            f.write(f"Summary of: {source_name}\n")
-            if summary_type:
-                f.write(f"Type: {summary_type}\n")
-            f.write("=" * separator_width + "\n\n")
-            f.write(summary)
+            f.write(text)
 
     return _write_and_publish(Path(output_path), write, replace=replace)
+
+
+def write_summary_txt(
+    output_path: str | Path,
+    *,
+    source_name: str,
+    summary: str,
+    summary_type: str | None = None,
+    replace: bool,
+) -> bool:
+    """Write `summary` under the standard header (see `summary_txt`) to a UTF-8 file.
+
+    Returns False when `replace` is False and the file already exists.
+    """
+    return write_text(output_path, summary_txt(source_name, summary, summary_type), replace=replace)
 
 
 def write_summary_docx(
