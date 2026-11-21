@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from argparse import Namespace
 import inspect
 import json
 import os
@@ -1562,6 +1563,15 @@ def _docs_section() -> str:
         return ""
     end = text.find("\n## ", start + len(_DOCS_HEADING))
     return text[start : end if end >= 0 else len(text)]
+
+
+def test_eval_args_defaults_match_the_parser() -> None:
+    """The typed namespace's defaults are the parser's own, option for option."""
+    parsed = vars(run.build_parser().parse_args(["--checks", "runstats"], namespace=Namespace()))
+    declared = {name: getattr(run.EvalArgs, name) for name in run.EvalArgs.__annotations__}
+    declared |= vars(run.EvalArgs())
+    declared["checks"] = "runstats"
+    assert declared == parsed
 
 
 def test_docs_name_every_runner_option() -> None:

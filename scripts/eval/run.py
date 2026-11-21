@@ -950,24 +950,50 @@ def _at_least_one(text: str) -> int:
     return value
 
 
+class EvalArgs(argparse.Namespace):
+    """The parsed command line, one typed attribute per option; defaults match the parser's."""
+
+    tier: str | None = None
+    rescore: Path | None = None
+    compare: list[Path] | None = None
+    checks: str | None = None
+    self_test: list[str] | None = None
+    contention: float | None = None
+    eval_dir: Path | None = None
+    model: Path | None = None
+    threads: int | None = None
+    n_gpu_layers: int = 0
+    n_ctx: int | None = None
+    seeds: tuple[int, ...] = (0,)
+    repeat: int = 1
+
+    def __init__(self) -> None:
+        """Give each repeatable option its own empty list."""
+        super().__init__()
+        self.case: list[str] = []
+        self.doc: list[Path] = []
+        self.label: list[str] = []
+        self.script: list[str] = []
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The runner's command line: one mode, plus the options a tier run reads."""
     parser = argparse.ArgumentParser(
         prog="run.py", description="Run evaluation cases against a local corpus."
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--tier", choices=RUNNABLE_TIERS, help="run a tier's cases")
-    mode.add_argument(
+    _ = mode.add_argument("--tier", choices=RUNNABLE_TIERS, help="run a tier's cases")
+    _ = mode.add_argument(
         "--rescore", type=Path, metavar="R", help="replay results file R and score it again"
     )
-    mode.add_argument(
+    _ = mode.add_argument(
         "--compare", type=Path, nargs=2, metavar=("B", "C"), help="candidate C against baseline B"
     )
-    mode.add_argument("--checks", metavar="LIST", help="comma-separated checks to run")
-    mode.add_argument(
+    _ = mode.add_argument("--checks", metavar="LIST", help="comma-separated checks to run")
+    _ = mode.add_argument(
         "--self-test", nargs="+", metavar=("KIND", "ARG"), help="language <labelled set>"
     )
-    mode.add_argument(
+    _ = mode.add_argument(
         "--contention",
         type=float,
         nargs="?",
@@ -975,19 +1001,19 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="count busy model processes over a window (default 10 s)",
     )
-    parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
-    parser.add_argument("--model", type=Path, help="the GGUF model file")
-    parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
-    parser.add_argument("--n-gpu-layers", type=int, default=0, help="layers to offload")
-    parser.add_argument("--n-ctx", type=int, help="context window (default: the app's)")
-    parser.add_argument("--seeds", type=_seed_list, default=(0,), help="comma-separated")
-    parser.add_argument(
+    _ = parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
+    _ = parser.add_argument("--model", type=Path, help="the GGUF model file")
+    _ = parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
+    _ = parser.add_argument("--n-gpu-layers", type=int, default=0, help="layers to offload")
+    _ = parser.add_argument("--n-ctx", type=int, help="context window (default: the app's)")
+    _ = parser.add_argument("--seeds", type=_seed_list, default=(0,), help="comma-separated")
+    _ = parser.add_argument(
         "--repeat", type=_at_least_one, default=1, help="repeat each seed-0 auto run N times"
     )
-    parser.add_argument("--case", action="append", default=[], help="a case id or document id")
-    parser.add_argument("--doc", action="append", type=Path, default=[], help="ad-hoc document")
-    parser.add_argument("--label", action="append", default=[], help="each --doc's language")
-    parser.add_argument("--script", action="append", default=[], help="each zh --doc's script")
+    _ = parser.add_argument("--case", action="append", default=[], help="a case id or document id")
+    _ = parser.add_argument("--doc", action="append", type=Path, default=[], help="ad-hoc document")
+    _ = parser.add_argument("--label", action="append", default=[], help="each --doc's language")
+    _ = parser.add_argument("--script", action="append", default=[], help="each zh --doc's script")
     return parser
 
 
@@ -1086,29 +1112,29 @@ def print_table(case_runs: Sequence[Mapping[str, Any]]) -> None:
     print(f"cases={unique} case_runs={len(case_runs)} calls={calls} scored_units={scored}")
 
 
-def _select_cases(args: argparse.Namespace) -> list[Case]:
+def _select_cases(args: EvalArgs, tier_name: str) -> list[Case]:
     from eval import cases
 
-    tier = cases.TIERS[args.tier]
+    tier = cases.TIERS[tier_name]
     selected = list(tier) if not args.doc else []
     if args.case:
         chosen: set[str] = set()
         for selector in args.case:
             matched = {case.id for case in tier if selector in (case.id, case.doc)}
             if not matched:
-                msg = f"--case {selector}: no case in tier {args.tier} matches"
+                msg = f"--case {selector}: no case in tier {tier_name} matches"
                 raise _RefusedError(msg)
             chosen |= matched
         selected = [case for case in tier if case.id in chosen]
     for doc in _adhoc_documents(args):
-        types = cases.TIER_TYPES[args.tier]
+        types = cases.TIER_TYPES[tier_name]
         selected += [cases.Case(doc.id, t, "auto") for t in types]
-        if args.tier == "lang":
+        if tier_name == "lang":
             selected += [cases.Case(doc.id, t, "auto", split=True) for t in types]
     return selected
 
 
-def _adhoc_documents(args: argparse.Namespace) -> list[ManifestDocument]:
+def _adhoc_documents(args: EvalArgs) -> list[ManifestDocument]:
     if len(args.label) != len(args.doc) or len(args.script) not in (0, len(args.doc)):
         msg = "each --doc needs a --label (and, if any is given, a --script)"
         raise _RefusedError(msg)
@@ -1124,11 +1150,13 @@ def _adhoc_documents(args: argparse.Namespace) -> list[ManifestDocument]:
     return documents
 
 
-def _documents_for(args: argparse.Namespace, runs: Sequence[RunSpec]) -> list[ManifestDocument]:
+def _documents_for(
+    args: EvalArgs, eval_dir: Path, runs: Sequence[RunSpec]
+) -> list[ManifestDocument]:
     adhoc = {doc.id: doc for doc in _adhoc_documents(args)}
     needed = list(dict.fromkeys(spec.case.doc for spec in runs))
     corpus = [doc_id for doc_id in needed if doc_id not in adhoc]
-    manifest = load_manifest(args.eval_dir) if corpus else {}
+    manifest = load_manifest(eval_dir) if corpus else {}
     lacking = [doc_id for doc_id in corpus if doc_id not in manifest]
     if lacking:
         msg = f"manifest lacks: {', '.join(lacking)}"
@@ -1201,8 +1229,18 @@ def _case_run_line(index: int, case_run: CaseRun) -> dict[str, Any]:
     return line
 
 
+@dataclass(frozen=True)
+class ModelBuild:
+    """How a tier run loads the model: the file, its default context and the hardware split."""
+
+    model: Path
+    n_ctx: int
+    n_threads: int | None
+    n_gpu_layers: int
+
+
 def _run_passes(
-    args: argparse.Namespace,
+    build: ModelBuild,
     runs: Sequence[RunSpec],
     texts: Mapping[str, str],
     targets: Mapping[str, Any],
@@ -1213,7 +1251,7 @@ def _run_passes(
 
     passes: list[tuple[int, list[RunSpec]]] = []
     for spec in runs:
-        n_ctx = cases.SPLIT_N_CTX if spec.case.split else args.n_ctx
+        n_ctx = cases.SPLIT_N_CTX if spec.case.split else build.n_ctx
         if passes and passes[-1][0] == n_ctx:
             passes[-1][1].append(spec)
         else:
@@ -1230,9 +1268,9 @@ def _run_passes(
 
     for n_ctx, specs in passes:
         summarizer = build_summarizer(
-            args.model, n_ctx=n_ctx, n_threads=args.threads, n_gpu_layers=args.n_gpu_layers
+            build.model, n_ctx=n_ctx, n_threads=build.n_threads, n_gpu_layers=build.n_gpu_layers
         )
-        threads = getattr(summarizer, "n_threads", args.threads) if threads is None else threads
+        threads = getattr(summarizer, "n_threads", build.n_threads) if threads is None else threads
         try:
             run_cases(summarizer, specs, texts, targets, on_run=stream)
         finally:
@@ -1240,9 +1278,12 @@ def _run_passes(
     return lines, threads
 
 
-def _run_tier(args: argparse.Namespace) -> int:
+def _run_tier(args: EvalArgs) -> int:
     from eval import cases, metrics
 
+    if args.tier is None:
+        msg = "no mode chosen"
+        raise _RefusedError(msg)
     if tuple(args.seeds) != (0,):
         msg = "--seeds: seed 0 only until the seed API lands"
         raise _RefusedError(msg)
@@ -1253,8 +1294,8 @@ def _run_tier(args: argparse.Namespace) -> int:
         msg = f"model not found: {args.model}"
         raise _RefusedError(msg)
     args.n_ctx = args.n_ctx or _default_n_ctx()
-    runs = expand_runs(_select_cases(args), args.seeds, args.repeat)
-    documents = {doc.id: doc for doc in _documents_for(args, runs)}
+    runs = expand_runs(_select_cases(args, args.tier), args.seeds, args.repeat)
+    documents = {doc.id: doc for doc in _documents_for(args, args.eval_dir, runs)}
     targets = _targets(runs, documents)
     texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
     model_sha = _file_sha256(args.model)
@@ -1266,7 +1307,13 @@ def _run_tier(args: argparse.Namespace) -> int:
     final.parent.mkdir(parents=True, exist_ok=True)
     partial = final.with_name(final.name + ".partial")
     with partial.open("w", encoding="utf-8") as sink:
-        lines, threads = _run_passes(args, runs, texts, targets, sink)
+        lines, threads = _run_passes(
+            ModelBuild(args.model, args.n_ctx, args.threads, args.n_gpu_layers),
+            runs,
+            texts,
+            targets,
+            sink,
+        )
     not_split = [
         line["case"]
         for line in lines
@@ -1930,7 +1977,7 @@ def _runstats_leg(
     return failed
 
 
-def check_runstats(args: argparse.Namespace) -> int:
+def check_runstats(args: EvalArgs) -> int:
     """The request counters against llama.cpp's own: blocking, streamed, and a prefix repeat."""
     if args.model is None or not args.model.is_file():
         print("runstats: needs --model <gguf>")
@@ -1964,15 +2011,15 @@ def check_runstats(args: argparse.Namespace) -> int:
     return 0 if passed == len(legs) else 1
 
 
-CHECKS: dict[str, Callable[[argparse.Namespace], int]] = {"runstats": check_runstats}
+CHECKS: dict[str, Callable[[EvalArgs], int]] = {"runstats": check_runstats}
 
 
-def run_checks(args: argparse.Namespace) -> int:
-    """Run each named check; 2 for an unknown or empty list, else the worst exit code."""
-    names = [name.strip() for name in args.checks.split(",") if name.strip()]
+def run_checks(listed: str, args: EvalArgs) -> int:
+    """Run each check ``listed`` names; 2 for an unknown or empty list, else the worst exit code."""
+    names = [name.strip() for name in listed.split(",") if name.strip()]
     unknown = [name for name in names if name not in CHECKS]
     if not names or unknown:
-        print(f"refused: --checks {args.checks!r}: known checks are {', '.join(CHECKS)}")
+        print(f"refused: --checks {listed!r}: known checks are {', '.join(CHECKS)}")
         return 2
     return max(CHECKS[name](args) for name in names)
 
@@ -2088,9 +2135,25 @@ def contention_report(seconds: float) -> int:
     return 1 if outcome.contended else 0
 
 
+def _run_mode(args: EvalArgs) -> int:
+    """The one mode the command line chose; a tier run when no other is."""
+    if args.rescore is not None and args.eval_dir is not None:
+        return rescore(args.eval_dir, args.rescore)
+    if args.compare is not None:
+        baseline, candidate = args.compare
+        return compare(args.eval_dir, baseline, candidate)
+    if args.checks is not None:
+        return run_checks(args.checks, args)
+    if args.self_test is not None:
+        return run_self_test(args.self_test)
+    if args.contention is not None:
+        return contention_report(args.contention)
+    return _run_tier(args)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, bootstrap app data, then run the chosen mode."""
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv, namespace=EvalArgs())
     if args.rescore is not None and args.eval_dir is None:
         print("refused: --rescore needs --eval-dir")
         return 2
@@ -2100,16 +2163,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         app_data = Path(tempfile.mkdtemp(prefix="docsummarizer-eval-"))
         print(f"app data: {app_data}")
     bootstrap(app_data)
-    modes: list[tuple[object, Callable[[], int]]] = [
-        (args.rescore, lambda: rescore(args.eval_dir, args.rescore)),
-        (args.compare, lambda: compare(args.eval_dir, *args.compare)),
-        (args.checks, lambda: run_checks(args)),
-        (args.self_test, lambda: run_self_test(args.self_test)),
-        (args.contention, lambda: contention_report(args.contention)),
-    ]
-    chosen = next((mode for value, mode in modes if value is not None), lambda: _run_tier(args))
     try:
-        return chosen()
+        return _run_mode(args)
     except (_RefusedError, ManifestError) as exc:
         print(f"refused: {exc}")
         return 2
