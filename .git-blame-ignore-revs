@@ -1,0 +1,3 @@
+# Commits that only reformat; `git blame --ignore-revs-file .git-blame-ignore-revs` skips them.
+# style(qml): apply qmlformat
+14351d6b48b08eb9e6b06b8efcced1bd36eab018

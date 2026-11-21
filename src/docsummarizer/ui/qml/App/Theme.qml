@@ -16,7 +16,7 @@ QtObject {
         else if (mode === "Dark")
             dark = true;
         else
-            dark = (Qt.styleHints.colorScheme === Qt.Dark);  // System → follow OS
+            dark = (Application.styleHints.colorScheme === Qt.ColorScheme.Dark);  // System → follow OS
     }
 
     // Surfaces

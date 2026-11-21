@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Basic
@@ -10,6 +11,9 @@ import App
 Item {
     id: screen
 
+    // The ConsoleBridge, passed down from Main.qml.
+    required property var bridge
+
     signal reinitialize
 
     function flashSaved() {
@@ -18,7 +22,7 @@ Item {
     }
 
     Connections {
-        target: bridge
+        target: screen.bridge
         function onSavedFlash() {
             screen.flashSaved();
         }
@@ -124,7 +128,7 @@ Item {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: bridge.modelName !== "" ? bridge.modelName : "No model selected"
+                            text: screen.bridge.modelName !== "" ? screen.bridge.modelName : "No model selected"
                             color: Theme.ink
                             font.family: Theme.serif
                             font.pixelSize: 22
@@ -132,7 +136,7 @@ Item {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: bridge.modelQuant + " · " + bridge.modelSizeGb.toFixed(1) + " GB · CTX " + bridge.contextSize
+                            text: screen.bridge.modelQuant + " · " + screen.bridge.modelSizeGb.toFixed(1) + " GB · CTX " + screen.bridge.contextSize
                             color: Theme.text
                             font.family: Theme.mono
                             font.pixelSize: 11
@@ -140,8 +144,8 @@ Item {
                             wrapMode: Text.WordWrap
                         }
                         Text {
-                            text: bridge.modelDownloaded ? "● DOWNLOADED · VERIFIED" : "● NOT DOWNLOADED"
-                            color: bridge.modelDownloaded ? Theme.accent : Theme.brass
+                            text: screen.bridge.modelDownloaded ? "● DOWNLOADED · VERIFIED" : "● NOT DOWNLOADED"
+                            color: screen.bridge.modelDownloaded ? Theme.accent : Theme.brass
                             font.family: Theme.mono
                             font.pixelSize: 10
                             font.letterSpacing: 1
@@ -193,17 +197,17 @@ Item {
                                 width: 52
                                 height: 26
                                 radius: 13
-                                opacity: bridge.gpuSupported ? 1.0 : 0.4
-                                color: bridge.gpuEnabled ? Theme.accent : Theme.srcPane
+                                opacity: screen.bridge.gpuSupported ? 1.0 : 0.4
+                                color: screen.bridge.gpuEnabled ? Theme.accent : Theme.srcPane
                                 border.width: 1
-                                border.color: bridge.gpuEnabled ? Theme.accentDeep : Theme.line2
+                                border.color: screen.bridge.gpuEnabled ? Theme.accentDeep : Theme.line2
                                 Rectangle {
                                     width: 20
                                     height: 20
                                     radius: 10
                                     y: 3
-                                    x: bridge.gpuEnabled ? gpuPill.width - width - 3 : 3
-                                    color: bridge.gpuEnabled ? Theme.onAccent : Theme.navOff
+                                    x: screen.bridge.gpuEnabled ? gpuPill.width - width - 3 : 3
+                                    color: screen.bridge.gpuEnabled ? Theme.onAccent : Theme.navOff
                                     Behavior on x {
                                         NumberAnimation {
                                             duration: 140
@@ -212,15 +216,15 @@ Item {
                                 }
                                 MouseArea {
                                     anchors.fill: parent
-                                    enabled: bridge.gpuSupported
-                                    cursorShape: bridge.gpuSupported ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: bridge.toggleGpu()
+                                    enabled: screen.bridge.gpuSupported
+                                    cursorShape: screen.bridge.gpuSupported ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: screen.bridge.toggleGpu()
                                 }
                             }
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: !bridge.gpuSupported ? "GPU not available in this build (CPU-only). Inference runs on the CPU." : (bridge.gpuEnabled ? "Layers offloaded to the GPU on reload." : "Running on CPU. Enable to offload layers to the GPU.")
+                            text: !screen.bridge.gpuSupported ? "GPU not available in this build (CPU-only). Inference runs on the CPU." : (screen.bridge.gpuEnabled ? "Layers offloaded to the GPU on reload." : "Running on CPU. Enable to offload layers to the GPU.")
                             color: Theme.faint
                             font.family: Theme.body
                             font.pixelSize: 12
@@ -240,13 +244,13 @@ Item {
                                 id: threadSlider
                                 Layout.fillWidth: true
                                 from: 2
-                                to: bridge.cpuCount
+                                to: screen.bridge.cpuCount
                                 stepSize: 1
-                                value: bridge.threads
-                                onMoved: bridge.setThreads(Math.round(value))
+                                value: screen.bridge.threads
+                                onMoved: screen.bridge.setThreads(Math.round(value))
                             }
                             Text {
-                                text: Math.round(threadSlider.value) + " / " + bridge.cpuCount
+                                text: Math.round(threadSlider.value) + " / " + screen.bridge.cpuCount
                                 color: Theme.accent
                                 font.family: Theme.mono
                                 font.pixelSize: 11
@@ -279,9 +283,9 @@ Item {
                         }
                         SegmentedControl {
                             options: ["System", "Light", "Dark"]
-                            current: bridge.appearance
+                            current: screen.bridge.appearance
                             onSelected: value => {
-                                bridge.setAppearance(value);
+                                screen.bridge.setAppearance(value);
                                 Theme.applyMode(value);
                             }
                         }
@@ -311,7 +315,7 @@ Item {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: "Active: " + bridge.computeLabel + ". Changes take effect after a reload."
+                            text: "Active: " + screen.bridge.computeLabel + ". Changes take effect after a reload."
                             color: Theme.text
                             font.family: Theme.mono
                             font.pixelSize: 11
@@ -320,8 +324,8 @@ Item {
                         }
                         Button {
                             text: "Reload Model"
-                            enabled: bridge.reloadArmed && !bridge.busy
-                            onClicked: bridge.reloadModel()
+                            enabled: screen.bridge.reloadArmed && !screen.bridge.busy
+                            onClicked: screen.bridge.reloadModel()
                         }
                     }
                 }
@@ -352,19 +356,19 @@ Item {
                             id: languageBox
                             Layout.preferredWidth: 280
                             // "auto" is the stored value; only its label is dressed up.
-                            readonly property var labels: bridge.outputLanguages.map(function (name) {
+                            readonly property var labels: screen.bridge.outputLanguages.map(function (name) {
                                 return name === "auto" ? "Auto — match the document" : name;
                             })
                             model: labels
-                            currentIndex: bridge.outputLanguages.indexOf(bridge.outputLanguage)
+                            currentIndex: screen.bridge.outputLanguages.indexOf(screen.bridge.outputLanguage)
                             // A language hand-edited into settings.json need not be
                             // on the list; show it rather than a blank box.
-                            displayText: currentIndex >= 0 ? labels[currentIndex] : bridge.outputLanguage
-                            onActivated: index => bridge.setOutputLanguage(bridge.outputLanguages[index])
+                            displayText: currentIndex >= 0 ? labels[currentIndex] : screen.bridge.outputLanguage
+                            onActivated: index => screen.bridge.setOutputLanguage(screen.bridge.outputLanguages[index])
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: bridge.outputLanguage === "auto" ? "Summaries follow the document's own language. Applies to the next summary." : "Summaries are written in " + bridge.outputLanguage + " whatever the document's language. Applies to the next summary."
+                            text: screen.bridge.outputLanguage === "auto" ? "Summaries follow the document's own language. Applies to the next summary." : "Summaries are written in " + screen.bridge.outputLanguage + " whatever the document's language. Applies to the next summary."
                             color: Theme.faint
                             font.family: Theme.body
                             font.pixelSize: 12

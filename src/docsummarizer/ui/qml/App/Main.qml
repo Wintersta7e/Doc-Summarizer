@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -18,11 +19,14 @@ ApplicationWindow {
     color: Theme.pageBg
 
     // NB: not "screen" — ApplicationWindow already defines a `screen` (QScreen).
+    // The ConsoleBridge, handed in by the loader; every screen gets it from here.
+    required property var bridge
+
     property string activeScreen: "summary"
     property bool forceFirstRun: false
 
     // Restore the persisted appearance on launch (was previously always dark).
-    Component.onCompleted: Theme.applyMode(bridge.appearance)
+    Component.onCompleted: Theme.applyMode(win.bridge.appearance)
 
     // Radial page vignette (lighter at top-center, darkening to the edges).
     Shape {
@@ -83,13 +87,13 @@ ApplicationWindow {
             ctx.clearRect(0, 0, width, height);
             ctx.strokeStyle = Theme.dark ? "rgba(111,195,216,0.03)" : "rgba(40,80,100,0.05)";
             ctx.lineWidth = 1;
-            for (var x = 40; x < width; x += 40) {
+            for (let x = 40; x < width; x += 40) {
                 ctx.beginPath();
                 ctx.moveTo(x, 0);
                 ctx.lineTo(x, height);
                 ctx.stroke();
             }
-            for (var y = 40; y < height; y += 40) {
+            for (let y = 40; y < height; y += 40) {
                 ctx.beginPath();
                 ctx.moveTo(0, y);
                 ctx.lineTo(width, y);
@@ -104,6 +108,7 @@ ApplicationWindow {
 
         TopBar {
             Layout.fillWidth: true
+            bridge: win.bridge
         }
 
         RowLayout {
@@ -135,10 +140,17 @@ ApplicationWindow {
                         return 0;
                     }
                 }
-                SummaryScreen {}
-                ExtractScreen {}
-                BatchScreen {}
+                SummaryScreen {
+                    bridge: win.bridge
+                }
+                ExtractScreen {
+                    bridge: win.bridge
+                }
+                BatchScreen {
+                    bridge: win.bridge
+                }
                 ConfigScreen {
+                    bridge: win.bridge
                     onReinitialize: win.forceFirstRun = true
                 }
             }
@@ -148,11 +160,12 @@ ApplicationWindow {
     // One-time model download, shown on first run or when re-initialized.
     FirstRunOverlay {
         anchors.fill: parent
-        shown: !bridge.modelDownloaded || win.forceFirstRun
+        bridge: win.bridge
+        shown: !win.bridge.modelDownloaded || win.forceFirstRun
         visible: shown
         onEnter: {
             win.forceFirstRun = false;
-            bridge.checkModel();
+            win.bridge.checkModel();
         }
     }
 
@@ -160,7 +173,7 @@ ApplicationWindow {
         id: toast
     }
     Connections {
-        target: bridge
+        target: win.bridge
         function onToast(message) {
             toast.show(message);
         }

@@ -40,6 +40,18 @@ _COMPONENTS = [
     "ConfigScreen",
     "FirstRunOverlay",
 ]
+# The components that declare `required property var bridge`.
+_TAKES_BRIDGE = frozenset(
+    {
+        "Main",
+        "TopBar",
+        "SummaryScreen",
+        "ExtractScreen",
+        "BatchScreen",
+        "ConfigScreen",
+        "FirstRunOverlay",
+    }
+)
 
 
 @pytest.fixture(scope="session")
@@ -55,10 +67,6 @@ def engine(qapp: QGuiApplication) -> QQmlApplicationEngine:
     assert qapp is QGuiApplication.instance()
     eng = QQmlApplicationEngine()
     eng.addImportPath(str(_QML_DIR))
-    bridge = ConsoleBridge()
-    eng.rootContext().setContextProperty("bridge", bridge)
-    # Keep the bridge alive for the engine's lifetime.
-    _ = eng.setProperty("_bridge", bridge)
     return eng
 
 
@@ -66,5 +74,8 @@ def engine(qapp: QGuiApplication) -> QQmlApplicationEngine:
 def test_component_compiles_and_instantiates(engine: QQmlApplicationEngine, name: str) -> None:
     component = QQmlComponent(engine, QUrl.fromLocalFile(str(_APP_DIR / f"{name}.qml")))
     assert component.status() == QQmlComponent.Status.Ready, component.errorString()
-    obj = component.create(engine.rootContext())
+    # The engine owns the bridge, so it outlives every binding that reads it.
+    bridge = ConsoleBridge(parent=engine)
+    initial = {"bridge": bridge} if name in _TAKES_BRIDGE else {}
+    obj = component.createWithInitialProperties(initial, engine.rootContext())
     assert obj is not None, f"{name}.qml failed to instantiate: {component.errorString()}"

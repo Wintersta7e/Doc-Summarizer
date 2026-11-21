@@ -36,6 +36,9 @@ from docsummarizer.ui.fonts import register_fonts
 
 _QML_DIR = REPO / "src" / "docsummarizer" / "ui" / "qml"
 _PREVIEW = REPO / "scripts" / "_preview.qml"
+# Every screen _preview.qml shows, and every theme.
+SCREENS = ("summary", "extract", "batch", "config", "firstrun")
+THEMES = ("dark", "light")
 
 SAMPLE_SOURCE = (
     "Most small farm wells today rely on piston pumps that need a skilled mechanic, "
@@ -113,37 +116,33 @@ class _Args(argparse.Namespace):
 
 def _parse_args() -> _Args:
     parser = argparse.ArgumentParser(description="Render a QML screen to a PNG, offscreen.")
-    _ = parser.add_argument("screen", nargs="?", default=_Args.screen)
-    _ = parser.add_argument("theme", nargs="?", default=_Args.theme)
+    _ = parser.add_argument("screen", nargs="?", default=_Args.screen, choices=SCREENS)
+    _ = parser.add_argument("theme", nargs="?", default=_Args.theme, choices=THEMES)
     _ = parser.add_argument(
         "out", nargs="?", help="default: render-<screen>-<theme>.png in the repo"
     )
     return parser.parse_args(namespace=_Args())
 
 
-def main() -> int:
-    """Render the screen and theme the command line names; 0 when the PNG is saved."""
-    args = _parse_args()
-    screen = args.screen
-    theme = args.theme
-    out = args.out or str(REPO / f"render-{screen}-{theme}.png")
+def load_preview(screen: str, theme: str) -> QQuickView:
+    """Show screen in theme, seeded with sample state; the caller keeps the returned view.
 
-    _app = QGuiApplication(sys.argv)  # kept alive for the view
-
+    Raises ``RuntimeError`` when the QML does not load or the preview shell lacks
+    a property this function sets.
+    """
     _ = register_fonts()
-    bridge = _PreviewBridge(summarizer_factory=_fake_factory, synchronous=True)
-    bridge.seed_document("spiral-vane-pump.pdf", SAMPLE_SOURCE)
-
     view = QQuickView()
+    # The view owns the bridge, so the bridge outlives every binding that reads it;
+    # a bridge freed first turns each of them into a "Cannot read property of null".
+    bridge = _PreviewBridge(summarizer_factory=_fake_factory, synchronous=True, parent=view)
+    bridge.seed_document("spiral-vane-pump.pdf", SAMPLE_SOURCE)
     view.engine().addImportPath(str(_QML_DIR))
-    view.rootContext().setContextProperty("bridge", bridge)
+    view.setInitialProperties({"bridge": bridge})
     view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
     view.resize(1240, 820)
     view.setSource(QUrl.fromLocalFile(str(_PREVIEW)))
     if view.status() != QQuickView.Status.Ready:
-        for err in view.errors():
-            print(err.toString())
-        return 1
+        raise RuntimeError("\n".join(err.toString() for err in view.errors()))
 
     root = view.rootObject()
     seeded = (
@@ -152,8 +151,8 @@ def main() -> int:
         root.setProperty("firstRun", screen == "firstrun"),
     )
     if not all(seeded):
-        print(f"FAILED: {_PREVIEW.name} lacks a darkTheme, screen or firstRun property")
-        return 1
+        msg = f"{_PREVIEW.name} lacks a darkTheme, screen or firstRun property"
+        raise RuntimeError(msg)
     view.show()
 
     bridge.modelReadyChanged.emit()
@@ -168,6 +167,20 @@ def main() -> int:
                 {"name": "pump-trial-east.pdf", "status": "QUEUED", "tokens": 0},
             ]
         )
+    return view
+
+
+def main() -> int:
+    """Render the screen and theme the command line names; 0 when the PNG is saved."""
+    args = _parse_args()
+    out = args.out or str(REPO / f"render-{args.screen}-{args.theme}.png")
+
+    _app = QGuiApplication(sys.argv)  # kept alive for the view
+    try:
+        view = load_preview(args.screen, args.theme)
+    except RuntimeError as exc:
+        print(f"FAILED: {exc}")
+        return 1
 
     loop = QEventLoop()
     QTimer.singleShot(600, loop.quit)

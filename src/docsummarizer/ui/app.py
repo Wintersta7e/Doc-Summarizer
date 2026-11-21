@@ -116,7 +116,9 @@ def create_engine(app: QGuiApplication) -> tuple[QQmlApplicationEngine, ConsoleB
     bridge = ConsoleBridge()
     _ = register_fonts()  # so QML resolves Cormorant/Chakra/Saira/Share Tech Mono
     engine.addImportPath(str(_QML_DIR))
-    engine.rootContext().setContextProperty("bridge", bridge)
+    # Main.qml's `required property var bridge`: a typed hand-off qmllint can
+    # follow, where a context property is an unqualified global.
+    engine.setInitialProperties({"bridge": bridge})
     _ = app.aboutToQuit.connect(bridge.shutdown)
     engine.load(QUrl.fromLocalFile(str(_MAIN_QML)))
     if not engine.rootObjects():

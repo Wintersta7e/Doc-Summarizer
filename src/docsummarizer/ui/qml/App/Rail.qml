@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import App
@@ -69,19 +70,20 @@ Rectangle {
         Repeater {
             model: rail.items
             delegate: Rectangle {
+                id: navItem
                 required property var modelData
                 Layout.fillWidth: true
                 Layout.preferredHeight: 40
                 radius: 4
-                color: modelData.name === rail.currentScreen ? Theme.navOnBg : Theme.block
+                color: navItem.modelData.name === rail.currentScreen ? Theme.navOnBg : Theme.block
                 border.width: 1
-                border.color: modelData.name === rail.currentScreen ? Theme.navOnRing : "transparent"
+                border.color: navItem.modelData.name === rail.currentScreen ? Theme.navOnRing : "transparent"
                 Text {
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 12
-                    text: modelData.label
-                    color: modelData.name === rail.currentScreen ? Theme.label2 : Theme.navOff
+                    text: navItem.modelData.label
+                    color: navItem.modelData.name === rail.currentScreen ? Theme.label2 : Theme.navOff
                     font.family: Theme.ui
                     font.pixelSize: 11
                     font.weight: Font.Medium
@@ -90,7 +92,7 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: rail.navigate(modelData.name)
+                    onClicked: rail.navigate(navItem.modelData.name)
                 }
             }
         }
