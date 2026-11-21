@@ -8,15 +8,14 @@ version = "2.0.1"
 description = "Offline document summarization powered by a local LLM"
 readme = "README.md"
 license = { file = "LICENSE" }
-# Upper bound measured 2026-11-21: CPython 3.10-3.15 resolve the core and gui
+# Upper bound measured 2026-11-21: CPython 3.11-3.15 resolve the core and gui
 # dependencies from wheels alone on Linux, Windows and macOS; 3.16 does not
 # (lxml, through python-docx, and PySide6 ship no 3.16 wheel).
-requires-python = ">=3.10,<3.16"
+requires-python = ">=3.11,<3.16"
 authors = [{ name = "Wintersta7e" }]
 keywords = ["llm", "summarization", "offline", "pdf", "docx", "qwen", "llama-cpp"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -51,16 +50,16 @@ runtime = [
     "llama-cpp-python>=0.3.31,<0.4",
 ]
 # Exact pins, so every place the gate runs uses the same tool versions; uv.lock
-# pins everything else. coverage and import-linter stay at their last release
-# that still installs on Python 3.10, the lowest supported minor.
+# pins everything else. Each is the newest release that still installs on
+# Python 3.11, the lowest supported minor.
 dev = [
     "pytest==9.2.0",
     "pytest-cov==7.1.0",
-    "coverage==7.16.2",
+    "coverage==7.17.4",
     "ruff==0.17.6",
     "mypy==2.4.1",
     "basedpyright==1.40.2",
-    "import-linter==2.15",
+    "import-linter==2.17",
     "deptry==0.25.1",
     "vulture==2.16",
 ]
@@ -113,7 +112,7 @@ include = [
 # --------------------------------------------------------------------------- #
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 src = ["src", "scripts"]
 
 [tool.ruff.lint]
@@ -204,7 +203,7 @@ docstring-code-format = true
 # mypy: strict static type checking of the shipped code
 # --------------------------------------------------------------------------- #
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 warn_unreachable = true
 warn_redundant_casts = true
