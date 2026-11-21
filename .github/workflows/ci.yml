@@ -111,15 +111,14 @@ jobs:
           uv export --locked --all-extras --no-emit-project --no-hashes
           --output-file "$RUNNER_TEMP/audit-requirements.txt"
 
+      # Through uvx, as zizmor: the action installs with the active venv's pip.
+      # Every version is pinned by the lock, so it audits those and resolves
+      # nothing. The ignore's reason and expiry live in osv-scanner.toml.
       - name: pip-audit
-        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
-        with:
-          inputs: ${{ runner.temp }}/audit-requirements.txt
-          # Every version is pinned by the lock: audit those, resolve nothing.
-          no-deps: true
-          extra-index-urls: https://abetlen.github.io/llama-cpp-python/whl/cpu
-          # The reason and the expiry live in osv-scanner.toml; keep the two equal.
-          ignore-vulns: PYSEC-2026-2447
+        run: >-
+          uvx pip-audit@2.10.1 --disable-pip --no-deps
+          --requirement "$RUNNER_TEMP/audit-requirements.txt"
+          --ignore-vuln PYSEC-2026-2447
 
       # Links between files in the repository; the weekly run follows web links too.
       - name: lychee (offline)
