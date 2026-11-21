@@ -1321,12 +1321,18 @@ def read_results(path: Path) -> Results:
     """Read a results file; the header must be its first line.
 
     A ``call`` or ``case_run`` line is taken to hold the fields this runner writes.
+    A line that is not a JSON object is refused, naming its 1-based line number:
+    skipping it would change the figures the file reports.
     """
-    lines = [
-        cast("object", json.loads(line))
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line
-    ]
+    lines: list[object] = []
+    for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not text:
+            continue
+        record = _object_dict(cast("object", json.loads(text)))
+        if record is None:
+            msg = f"{path}: line {number} is not a JSON object"
+            raise ValueError(msg)
+        lines.append(record)
     kinds = [_kind(line) for line in lines]
     if not lines or kinds[0] != "header":
         msg = f"{path}: the first line is not a header"

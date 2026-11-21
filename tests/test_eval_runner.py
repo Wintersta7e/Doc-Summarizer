@@ -965,6 +965,19 @@ def test_lang_tier_runs_the_split_pass(
     assert all(line["parts"] > 1 for line in split_runs if line["case"].startswith("de-cred-s"))
 
 
+def test_read_results_refuses_a_line_that_is_not_an_object(tmp_path: Path) -> None:
+    """A results line that is not a JSON object is refused with its line number.
+
+    Catches a reader that skips the line, which would change the reported figures.
+    """
+    path = tmp_path / "results.jsonl"
+    header = json.dumps({"kind": "header"})
+    call = json.dumps({"kind": "call"})
+    _ = path.write_text(f"{header}\n\n{call}\n[1, 2]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"line 4 is not a JSON object"):
+        _ = run.read_results(path)
+
+
 # --------------------------------------------------------------------------- #
 # Rescore by replay
 # --------------------------------------------------------------------------- #
