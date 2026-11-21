@@ -186,6 +186,10 @@ extend-ignore-names = [
     # 1 hit: a seeded random.Random for reproducible sampling, never security;
     # another sampler would change the language self-test's reported rates.
     "S311",
+    # 2 hits: a failed case run is a measured outcome recorded in the results
+    # file; its exception text may hold document or model text, so it is never
+    # logged.
+    "BLE001",
 ]
 # 7 hits: sys.path must point at this checkout's src before the PySide6 and
 # first-party imports.
