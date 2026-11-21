@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.model_manager`.
 
 Path resolution, model existence checks, and the tqdm progress wrapper are
@@ -18,8 +19,10 @@ import sys
 import types
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn, TypedDict, cast
 
 import pytest
+from typing_extensions import override
 
 from docsummarizer import logger as logger_module
 from docsummarizer import model_manager
@@ -29,10 +32,20 @@ from docsummarizer.model_manager import (
     SUMMARY_TYPE_DETAILED,
     SUMMARY_TYPE_STRUCTURED,
     SUMMARY_TYPES,
+    ChatModel,
+    CreateChatCompletionResponse,
+    CreateChatCompletionStreamResponse,
     ModelConfig,
+    RunStats,
+    StructuredSummary,
     Summarizer,
     normalize_language,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+
+_LOG = logging.getLogger(__name__)
 
 _MB = 1024 * 1024
 
@@ -48,8 +61,9 @@ def default_model_filename() -> str:
 def test_default_model_is_dataclass() -> None:
     assert isinstance(model_manager.DEFAULT_MODEL, ModelConfig)
     # Frozen — assignment must raise.
-    with pytest.raises(FrozenInstanceError):
-        model_manager.DEFAULT_MODEL.filename = "other.gguf"  # type: ignore[misc]
+    for field in dataclasses.fields(ModelConfig):
+        with pytest.raises(FrozenInstanceError):
+            setattr(model_manager.DEFAULT_MODEL, field.name, "other")
 
 
 def test_default_model_points_at_qwen3_gguf() -> None:
@@ -65,8 +79,10 @@ def test_summary_types_tuple_matches_constants() -> None:
 
 
 def test_models_directory_uses_isolated_path(tmp_path: Path) -> None:
-    """`conftest._isolated_app_dirs` redirects platform env vars to tmp_path;
-    the resolved models dir must land under it."""
+    """The resolved models dir lands under the isolated tmp_path.
+
+    `conftest._isolated_app_dirs` redirects the platform env vars there.
+    """
     d = model_manager.get_models_directory()
     assert str(d).startswith(str(tmp_path))
     assert d.name == "models"
@@ -79,7 +95,7 @@ def test_is_model_downloaded_when_missing() -> None:
 
 def test_is_model_downloaded_when_present(default_model_filename: str) -> None:
     models_dir = model_manager.get_models_directory()
-    (models_dir / default_model_filename).write_bytes(b"fake gguf payload")
+    _ = (models_dir / default_model_filename).write_bytes(b"fake gguf payload")
     assert model_manager.is_model_downloaded() is True
 
 
@@ -106,14 +122,15 @@ def test_get_model_path_with_custom_config() -> None:
 def test_download_model_short_circuits_when_file_exists(
     monkeypatch: pytest.MonkeyPatch, default_model_filename: str
 ) -> None:
-    """If the model file is already present, download_model must not call
-    hf_hub_download and must report success.
+    """A model file already present reports success without a download.
+
+    download_model must not call hf_hub_download.
     """
     models_dir = model_manager.get_models_directory()
-    (models_dir / default_model_filename).write_bytes(b"fake")
+    _ = (models_dir / default_model_filename).write_bytes(b"fake")
 
-    def _fake_download(**_kwargs):
-        raise AssertionError("hf_hub_download must not be invoked when the file exists")
+    def _fake_download(**_kwargs: object) -> NoReturn:
+        pytest.fail("hf_hub_download must not be invoked when the file exists")
 
     monkeypatch.setattr(model_manager, "hf_hub_download", _fake_download)
 
@@ -132,15 +149,15 @@ def test_download_model_short_circuit_fires_progress_callback(
 ) -> None:
     """The 100% sentinel still goes out so the GUI can hide its spinner."""
     models_dir = model_manager.get_models_directory()
-    (models_dir / default_model_filename).write_bytes(b"fake")
-    monkeypatch.setattr(
-        model_manager,
-        "hf_hub_download",
-        lambda **_: pytest.fail("must not be called"),
-    )
+    _ = (models_dir / default_model_filename).write_bytes(b"fake")
+
+    def _no_download(**_kwargs: object) -> NoReturn:
+        pytest.fail("must not be called")
+
+    monkeypatch.setattr(model_manager, "hf_hub_download", _no_download)
 
     calls: list[tuple[float, str]] = []
-    model_manager.download_model(progress_callback=lambda pct, msg: calls.append((pct, msg)))
+    _ = model_manager.download_model(progress_callback=lambda pct, msg: calls.append((pct, msg)))
     assert calls == [(100.0, "Model already downloaded")]
 
 
@@ -155,7 +172,7 @@ def test_progress_tqdm_fires_callback_per_megabyte() -> None:
 
     bar = tqdm_cls(total=4 * _MB, file=io.StringIO(), mininterval=0)
     for _ in range(4):
-        bar.update(_MB)
+        _ = bar.update(_MB)
     bar.close()
 
     # 4 MB total, fired once per whole-MB transition => 4 callbacks.
@@ -168,13 +185,14 @@ def test_progress_tqdm_fires_callback_per_megabyte() -> None:
 def test_progress_tqdm_swallows_callback_errors() -> None:
     """A misbehaving callback must not break the download."""
 
-    def bad_cb(_pct, _msg):
-        raise RuntimeError("callback exploded")
+    def bad_cb(_pct: float, _msg: str) -> NoReturn:
+        msg = "callback exploded"
+        raise RuntimeError(msg)
 
     tqdm_cls = model_manager._build_progress_tqdm(bad_cb)
     bar = tqdm_cls(total=2 * _MB, file=io.StringIO(), mininterval=0)
-    bar.update(_MB)
-    bar.update(_MB)
+    _ = bar.update(_MB)
+    _ = bar.update(_MB)
     bar.close()
 
 
@@ -190,7 +208,7 @@ def test_chunk_nonpositive_max_returns_whole() -> None:
 
 
 def test_chunk_packs_paragraphs_under_limit() -> None:
-    text = "\n\n".join(["para one", "para two", "para three"])
+    text = "para one\n\npara two\n\npara three"
     chunks = model_manager._split_into_chunks(text, 20)
     assert all(len(c) <= 20 for c in chunks)
     assert len(chunks) >= 2
@@ -210,6 +228,34 @@ def test_chunk_hard_splits_oversized_paragraph() -> None:
 # --------------------------------------------------------------------------- #
 # summarize(): chat-completion path + map-reduce, against a fake llm
 # --------------------------------------------------------------------------- #
+class _Call(TypedDict):
+    """One ``create_chat_completion`` call a fake received."""
+
+    messages: Sequence[Mapping[str, str]]
+    kwargs: Mapping[str, object]
+
+
+class _PerfCall(_Call):
+    """A call to the counting fake, with the counter deltas it charged."""
+
+    stream: bool
+    prompt: int
+    evaluated: int
+    out: int
+
+
+def _tokens(text: bytes) -> list[int]:
+    # ~3 UTF-8 bytes per token: ~3 chars/token for Latin text and one token
+    # per CJK character, roughly what the real tokenizer measures.
+    return [0] * (len(text) // 3)
+
+
+def _completion(text: str | None) -> CreateChatCompletionResponse:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]
+    }
+
+
 class _FakeLLM:
     """Stand-in for llama_cpp.Llama exposing only create_chat_completion.
 
@@ -217,19 +263,19 @@ class _FakeLLM:
     fixed ``content`` if provided), shaped like llama-cpp's response dict.
     """
 
-    def __init__(self, content: str | None = None):
-        self.calls: list[dict] = []
-        self._content = content
+    def __init__(self, content: str | None = None) -> None:
+        self.calls: list[_Call] = []
+        self._content: str | None = content
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
-        # ~3 UTF-8 bytes per token: ~3 chars/token for Latin text and one token
-        # per CJK character, roughly what the real tokenizer measures.
-        return [0] * (len(text) // 3)
+    def tokenize(self, text: bytes, **_options: bool) -> list[int]:
+        return _tokens(text)
 
-    def create_chat_completion(self, *, messages, **kwargs):
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], **kwargs: object
+    ) -> CreateChatCompletionResponse:
         self.calls.append({"messages": messages, "kwargs": kwargs})
         text = self._content if self._content is not None else f"summary-{len(self.calls)}"
-        return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+        return _completion(text)
 
 
 class _ContextLLM(_FakeLLM):
@@ -240,28 +286,38 @@ class _ContextLLM(_FakeLLM):
     token count is recorded so a test can assert neither happened.
     """
 
-    def __init__(self, n_ctx: int, content: str | None = None):
+    def __init__(self, n_ctx: int, content: str | None = None) -> None:
         super().__init__(content)
-        self.n_ctx = n_ctx
+        self.n_ctx: int = n_ctx
         self.prompt_tokens: list[int] = []
 
-    def create_chat_completion(self, *, messages, **kwargs):
+    @override
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], **kwargs: object
+    ) -> CreateChatCompletionResponse:
         tokens = sum(len(self.tokenize(m["content"].encode("utf-8"))) for m in messages)
         self.prompt_tokens.append(tokens)
         if tokens >= self.n_ctx:
-            raise ValueError(f"Requested tokens ({tokens}) exceed context window of {self.n_ctx}")
+            msg = f"Requested tokens ({tokens}) exceed context window of {self.n_ctx}"
+            raise ValueError(msg)
         return super().create_chat_completion(messages=messages, **kwargs)
 
 
-def _shell(fake_llm, n_ctx: int = 8192) -> Summarizer:
+def _shell(fake_llm: object, n_ctx: int = 8192) -> Summarizer:
     """Build a Summarizer without running __init__ (no llama-cpp needed)."""
     s = object.__new__(Summarizer)
-    s.llm = fake_llm
+    s.llm = cast("ChatModel", fake_llm)
     s.n_ctx = n_ctx
     return s
 
 
-class _PerfLLM(_FakeLLM):
+def _stats(summary: StructuredSummary) -> RunStats:
+    """The summary's run stats, which every request through the fakes records."""
+    assert summary.run_stats is not None
+    return summary.run_stats
+
+
+class _PerfLLM:
     """A fake exposing llama.cpp's cumulative perf counters and ``n_tokens``.
 
     Every call charges its whole prompt to ``n_p_eval`` except an exact repeat
@@ -269,17 +325,32 @@ class _PerfLLM(_FakeLLM):
     Each call's own deltas are recorded on ``calls`` so a test can sum them.
     """
 
-    def __init__(self, content: str | None = None, counters: bool = True, with_usage: bool = True):
-        super().__init__(content)
+    ctx: object  # set only with counters, as llama.cpp's context handle
+
+    def __init__(
+        self, content: str | None = None, *, counters: bool = True, with_usage: bool = True
+    ) -> None:
+        self._content: str | None = content
+        self.calls: list[_PerfCall] = []
         if counters:
             self.ctx = object()
-        self.with_usage = with_usage
-        self.n_tokens = 0
-        self.perf = {"n_p_eval": 0, "n_eval": 0, "t_p_eval_ms": 0.0, "t_eval_ms": 0.0}
+        self.with_usage: bool = with_usage
+        self.n_tokens: int = 0
+        self.perf: dict[str, float] = {
+            "n_p_eval": 0,
+            "n_eval": 0,
+            "t_p_eval_ms": 0.0,
+            "t_eval_ms": 0.0,
+        }
         self.contents: list[str] = []
-        self._previous: list[dict] | None = None
+        self._previous: Sequence[Mapping[str, str]] | None = None
 
-    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+    def tokenize(self, text: bytes, **_options: bool) -> list[int]:
+        return _tokens(text)
+
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         prompt = sum(len(self.tokenize(m["content"].encode())) for m in messages)
         evaluated = 1 if messages == self._previous else prompt
         self._previous = messages
@@ -303,16 +374,16 @@ class _PerfLLM(_FakeLLM):
         self.contents.append(text)
         if stream:
             return self._stream(text)
-        response: dict = {
-            "choices": [
-                {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
-            ]
-        }
+        response = _completion(text)
         if self.with_usage:
-            response["usage"] = {"prompt_tokens": prompt, "completion_tokens": out}
+            response["usage"] = {
+                "prompt_tokens": prompt,
+                "completion_tokens": out,
+                "total_tokens": prompt + out,
+            }
         return response
 
-    def _stream(self, text: str):
+    def _stream(self, text: str) -> Iterator[CreateChatCompletionStreamResponse]:
         half = len(text) // 2
         for piece in (text[:half], text[half:]):
             yield {"choices": [{"delta": {"content": piece}, "finish_reason": None}]}
@@ -326,8 +397,12 @@ def _fake_llama_cpp(monkeypatch: pytest.MonkeyPatch, llm: _PerfLLM) -> None:
     """
     pkg = types.ModuleType("llama_cpp")
     low = types.ModuleType("llama_cpp.llama_cpp")
-    low.llama_perf_context = lambda _ctx: types.SimpleNamespace(**llm.perf)
-    pkg.llama_cpp = low
+
+    def llama_perf_context(_ctx: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(**llm.perf)
+
+    monkeypatch.setattr(low, "llama_perf_context", llama_perf_context, raising=False)
+    monkeypatch.setattr(pkg, "llama_cpp", low, raising=False)
     monkeypatch.setitem(sys.modules, "llama_cpp", pkg)
     monkeypatch.setitem(sys.modules, "llama_cpp.llama_cpp", low)
 
@@ -353,7 +428,7 @@ def test_summarize_single_pass_uses_chat_completion() -> None:
 def test_summarize_unknown_type_falls_back_to_detailed() -> None:
     fake = _FakeLLM()
     s = _shell(fake)
-    s.summarize("doc", "nonsense-type")
+    _ = s.summarize("doc", "nonsense-type")
     user = fake.calls[0]["messages"][1]["content"]
     assert "Provide a detailed summary" in user
 
@@ -361,7 +436,7 @@ def test_summarize_unknown_type_falls_back_to_detailed() -> None:
 def test_summarize_structured_uses_structured_instruction() -> None:
     fake = _FakeLLM()
     s = _shell(fake)
-    s.summarize("doc", SUMMARY_TYPE_STRUCTURED)
+    _ = s.summarize("doc", SUMMARY_TYPE_STRUCTURED)
     user = fake.calls[0]["messages"][1]["content"]
     assert "**Key Points:**" in user
 
@@ -397,7 +472,7 @@ def test_summarize_budgets_cjk_text_in_tokens() -> None:
     fake = _ContextLLM(n_ctx=4096)
     s = _shell(fake, n_ctx=4096)
 
-    s.summarize(_cjk_document(), SUMMARY_TYPE_DETAILED)
+    _ = s.summarize(_cjk_document(), SUMMARY_TYPE_DETAILED)
 
     assert max(fake.prompt_tokens) + 1024 <= 4096  # 1024 = summarize's default max_tokens
     map_calls = [c for c in fake.calls if "Document:" in c["messages"][1]["content"]]
@@ -427,7 +502,7 @@ def test_chunks_within_recuts_dense_regions_and_keeps_offsets() -> None:
     text = f"{latin}\n\n{cjk}"
     s = _shell(_FakeLLM())
 
-    pieces = s._chunks_within(text, 300, model_manager._split_into_chunks_with_offsets)
+    pieces = s.chunks_within(text, 300, model_manager._split_into_chunks_with_offsets)
 
     assert len(pieces) > 1
     for chunk, base in pieces:
@@ -439,13 +514,16 @@ def test_summarize_raises_after_close() -> None:
     s = _shell(_FakeLLM())
     s.llm = None
     with pytest.raises(RuntimeError):
-        s.summarize("anything")
+        _ = s.summarize("anything")
 
 
 def test_summarize_handles_empty_content() -> None:
     class _NoneLLM(_FakeLLM):
-        def create_chat_completion(self, *, messages, **kwargs):
-            return {"choices": [{"message": {"content": None}}]}
+        @override
+        def create_chat_completion(
+            self, *, messages: Sequence[Mapping[str, str]], **kwargs: object
+        ) -> CreateChatCompletionResponse:
+            return _completion(None)
 
     s = _shell(_NoneLLM())
     assert s.summarize("hello", SUMMARY_TYPE_BRIEF) == ""
@@ -480,7 +558,7 @@ def test_auto_language_directive_reaches_both_turns() -> None:
     fake = _FakeLLM(content="S")
     s = _shell(fake)
 
-    s.summarize("a short document", SUMMARY_TYPE_BRIEF)
+    _ = s.summarize("a short document", SUMMARY_TYPE_BRIEF)
 
     system, user = fake.calls[0]["messages"]
     assert "same language as the document" in system["content"]
@@ -493,7 +571,7 @@ def test_explicit_language_pins_the_summary() -> None:
     fake = _FakeLLM(content="S")
     s = _shell(fake)
 
-    s.summarize("a short document", SUMMARY_TYPE_BRIEF, language="Chinese")
+    _ = s.summarize("a short document", SUMMARY_TYPE_BRIEF, language="Chinese")
 
     system, user = fake.calls[0]["messages"]
     assert "Write the summary in Chinese" in system["content"]
@@ -507,7 +585,7 @@ def test_language_survives_map_reduce() -> None:
     s = _shell(fake, n_ctx=2048)
 
     para = ("word " * 80).strip()
-    s.summarize("\n\n".join([para] * 30), SUMMARY_TYPE_DETAILED, language="Japanese")
+    _ = s.summarize("\n\n".join([para] * 30), SUMMARY_TYPE_DETAILED, language="Japanese")
 
     assert len(fake.calls) >= 3
     assert all("Write the summary in Japanese" in c["messages"][1]["content"] for c in fake.calls)
@@ -517,7 +595,7 @@ def test_structured_json_prompt_carries_language() -> None:
     fake = _FakeLLM(content='{"lead": "L", "points": []}')
     s = _shell(fake)
 
-    s.summarize_structured("a short document", SUMMARY_TYPE_DETAILED, language="German")
+    _ = s.summarize_structured("a short document", SUMMARY_TYPE_DETAILED, language="German")
 
     system, user = fake.calls[0]["messages"]
     assert "Write the summary in German" in system["content"]
@@ -531,7 +609,7 @@ def test_unknown_language_is_passed_through_verbatim() -> None:
     fake = _FakeLLM(content="S")
     s = _shell(fake)
 
-    s.summarize("doc", SUMMARY_TYPE_BRIEF, language="Swahili")
+    _ = s.summarize("doc", SUMMARY_TYPE_BRIEF, language="Swahili")
 
     assert "Write the summary in Swahili" in fake.calls[0]["messages"][1]["content"]
 
@@ -559,7 +637,7 @@ def _bakery_document(sentences: int = 150) -> str:
     )
 
 
-def _summed(calls: list[dict]) -> tuple[int, int, float, float, int]:
+def _summed(calls: Sequence[_PerfCall]) -> tuple[int, int, float, float, int]:
     """The fake's per-call deltas summed: evaluated, generated, both times, prompt."""
     return (
         sum(c["evaluated"] for c in calls),
@@ -570,7 +648,7 @@ def _summed(calls: list[dict]) -> tuple[int, int, float, float, int]:
     )
 
 
-def _assert_counter_sums(stats, calls: list[dict]) -> None:
+def _assert_counter_sums(stats: RunStats, calls: Sequence[_PerfCall]) -> None:
     evaluated, generated, prompt_s, generation_s, prompt = _summed(calls)
     assert stats.prompt_evaluated == evaluated
     assert stats.generated_tokens == generated
@@ -587,16 +665,14 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     nested ``summarize()`` opening its own accumulator, so Brief and the
     fallback lose calls.
     """
-    from docsummarizer.model_manager import RunStats
-
     # (a) Detailed, single part, blocking.
     fake = _PerfLLM(_DETAILED_JSON)
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake).summarize_structured("A short note about the bakery.", SUMMARY_TYPE_DETAILED)
-    print(f"calls counted: a {r.run_stats.calls}")
-    assert isinstance(r.run_stats, RunStats)
-    assert r.run_stats.calls == len(fake.calls) == 1
-    _assert_counter_sums(r.run_stats, fake.calls)
+    _LOG.info("calls counted: a %s", _stats(r).calls)
+    assert isinstance(_stats(r), RunStats)
+    assert _stats(r).calls == len(fake.calls) == 1
+    _assert_counter_sums(_stats(r), fake.calls)
 
     # (b) The same, streamed: no usage, so the prompt comes from n_tokens.
     fake = _PerfLLM(_DETAILED_JSON, with_usage=False)
@@ -604,56 +680,55 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     r = _shell(fake).summarize_structured(
         "A short note about the bakery.", SUMMARY_TYPE_DETAILED, should_cancel=lambda: False
     )
-    print(f"calls counted: b {r.run_stats.calls}")
+    _LOG.info("calls counted: b %s", _stats(r).calls)
     assert fake.calls[0]["stream"] is True
-    assert r.run_stats.calls == len(fake.calls) == 1
-    assert r.run_stats.prompt_tokens == fake.n_tokens - fake.calls[0]["out"]
-    _assert_counter_sums(r.run_stats, fake.calls)
+    assert _stats(r).calls == len(fake.calls) == 1
+    assert _stats(r).prompt_tokens == fake.n_tokens - fake.calls[0]["out"]
+    _assert_counter_sums(_stats(r), fake.calls)
 
     # (c) Detailed, multi-part.
     fake = _PerfLLM(_DETAILED_JSON)
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake, n_ctx=2048).summarize_structured(_bakery_document(), SUMMARY_TYPE_DETAILED)
-    print(f"calls counted: c {r.run_stats.calls}")
-    assert r.run_stats.calls == len(fake.calls) > 1
-    _assert_counter_sums(r.run_stats, fake.calls)
+    _LOG.info("calls counted: c %s", _stats(r).calls)
+    assert _stats(r).calls == len(fake.calls) > 1
+    _assert_counter_sums(_stats(r), fake.calls)
 
     # (d) Brief delegates to summarize(): the nested call shares the scope.
     fake = _PerfLLM()
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake, n_ctx=2048).summarize_structured(_bakery_document(), SUMMARY_TYPE_BRIEF)
-    print(f"calls counted: d {r.run_stats.calls}")
-    assert r.run_stats.calls == len(fake.calls) > 1
-    _assert_counter_sums(r.run_stats, fake.calls)
+    _LOG.info("calls counted: d %s", _stats(r).calls)
+    assert _stats(r).calls == len(fake.calls) > 1
+    _assert_counter_sums(_stats(r), fake.calls)
 
     # (e) A prefix hit: the repeat evaluates fewer tokens than its prompt holds.
     fake = _PerfLLM("A short paragraph.")
     _fake_llama_cpp(monkeypatch, fake)
     s = _shell(fake)
-    s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
+    _ = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
     r = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
-    print(f"calls counted: e {r.run_stats.calls}")
-    assert r.run_stats.calls == 1
-    assert r.run_stats.prompt_evaluated < r.run_stats.prompt_tokens
+    _LOG.info("calls counted: e %s", _stats(r).calls)
+    assert _stats(r).calls == 1
+    evaluated, prompt = _stats(r).prompt_evaluated, _stats(r).prompt_tokens
+    assert evaluated is not None
+    assert prompt is not None
+    assert evaluated < prompt
 
     # (f) No counters: the tokenizer counts the output, never a character ratio.
     fake = _PerfLLM(_DETAILED_JSON, counters=False)
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake).summarize_structured("A short note about the bakery.", SUMMARY_TYPE_DETAILED)
-    print(f"calls counted: f {r.run_stats.calls}")
-    assert r.run_stats.calls == len(fake.calls) == 1
-    assert r.run_stats.prompt_evaluated is None
-    assert r.run_stats.prompt_seconds is None
-    assert r.run_stats.generation_seconds is None
-    assert r.run_stats.generated_tokens == sum(
-        len(fake.tokenize(c.encode())) for c in fake.contents
-    )
+    _LOG.info("calls counted: f %s", _stats(r).calls)
+    assert _stats(r).calls == len(fake.calls) == 1
+    assert _stats(r).prompt_evaluated is None
+    assert _stats(r).prompt_seconds is None
+    assert _stats(r).generation_seconds is None
+    assert _stats(r).generated_tokens == sum(len(fake.tokenize(c.encode())) for c in fake.contents)
 
 
 def test_structured_summary_run_stats_is_last_and_defaulted() -> None:
     """``run_stats`` is appended last and defaulted, so positional builds still work."""
-    from docsummarizer.model_manager import StructuredSummary
-
     last = dataclasses.fields(StructuredSummary)[-1]
     assert last.name == "run_stats"
     assert last.default is None
@@ -681,7 +756,7 @@ _RUN_STATS_KEYS = [
 
 def _run_stats_records(caplog: pytest.LogCaptureFixture) -> list[dict[str, str]]:
     """Every ``run_stats`` record, parsed into an ordered ``key=value`` dict."""
-    records = []
+    records: list[dict[str, str]] = []
     for record in caplog.records:
         message = record.getMessage()
         if message.startswith("run_stats "):
@@ -698,7 +773,8 @@ def _long_document() -> str:
 
 
 # (id, entry point, summary type, document, n_ctx, content, repeat is a prefix hit)
-_LOG_SHAPES = [
+_LogShape = tuple[str, str, str, "Callable[[], str]", int, str | None, bool]
+_LOG_SHAPES: list[_LogShape] = [
     ("brief-single", "structured", SUMMARY_TYPE_BRIEF, _short_document, 8192, None, True),
     ("brief-multi", "structured", SUMMARY_TYPE_BRIEF, _long_document, 2048, None, False),
     ("detailed-single", "structured", SUMMARY_TYPE_DETAILED, _short_document, 8192, "json", True),
@@ -710,7 +786,7 @@ _LOG_SHAPES = [
 
 @pytest.mark.parametrize("shape", _LOG_SHAPES, ids=[shape[0] for shape in _LOG_SHAPES])
 def test_run_stats_log_line_once_per_request(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, shape: tuple
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, shape: _LogShape
 ) -> None:
     """Each request logs exactly one ``run_stats`` line of counts and times.
 
@@ -727,9 +803,9 @@ def test_run_stats_log_line_once_per_request(
 
     def request() -> None:
         if entry == "prose":
-            s.summarize(text, summary_type)
+            _ = s.summarize(text, summary_type)
         else:
-            s.summarize_structured(text, summary_type)
+            _ = s.summarize_structured(text, summary_type)
 
     request()  # warm the fake so a single-part repeat is a prefix hit
     caplog.clear()
@@ -738,7 +814,7 @@ def test_run_stats_log_line_once_per_request(
     calls = fake.calls[first:]
 
     records = _run_stats_records(caplog)
-    print(f"run_stats records: {records}")
+    _LOG.info("parsed run_stats records: %s", records)
     assert len(records) == 1
     record = records[0]
     assert list(record) == _RUN_STATS_KEYS
@@ -750,7 +826,9 @@ def test_run_stats_log_line_once_per_request(
         assert record["prompt_tok_s"] != f"{prompt / prompt_s:.1f}"
 
     log_files = sorted(logger_module.get_log_directory().glob("docsummarizer_*.log"))
-    print(f"caplog records scanned: {len(caplog.records)}; log files scanned: {len(log_files)}")
+    _LOG.info(
+        "caplog records scanned: %s; log files scanned: %s", len(caplog.records), len(log_files)
+    )
     assert caplog.records
     assert log_files
     assert all(_SENTINEL not in r.getMessage() for r in caplog.records)
@@ -761,18 +839,22 @@ def test_run_stats_log_line_once_per_request(
 class _CancellingLLM(_PerfLLM):
     """Sets ``flag`` inside the first completion, or after its first streamed chunk."""
 
-    def __init__(self, content: str | None, after_first_chunk: bool):
+    def __init__(self, content: str | None, *, after_first_chunk: bool) -> None:
         super().__init__(content)
-        self.flag = False
-        self.after_first_chunk = after_first_chunk
+        self.flag: bool = False
+        self.after_first_chunk: bool = after_first_chunk
 
-    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+    @override
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         response = super().create_chat_completion(messages=messages, stream=stream, **kwargs)
         if not self.after_first_chunk:
             self.flag = True
         return response
 
-    def _stream(self, text: str):
+    @override
+    def _stream(self, text: str) -> Iterator[CreateChatCompletionStreamResponse]:
         for i, chunk in enumerate(super()._stream(text)):
             if i == 1 and self.after_first_chunk:
                 self.flag = True
@@ -792,14 +874,14 @@ def test_run_stats_partial_on_cancel_and_fallback(
     # (i) and (ii): Stop inside the first call, then after its first chunk.
     for after_first_chunk in (False, True):
         caplog.clear()
-        fake = _CancellingLLM(_DETAILED_JSON, after_first_chunk)
+        fake = _CancellingLLM(_DETAILED_JSON, after_first_chunk=after_first_chunk)
         _fake_llama_cpp(monkeypatch, fake)
         with pytest.raises(model_manager.SummarizationCancelledError):
-            _shell(fake, n_ctx=2048).summarize_structured(
+            _ = _shell(fake, n_ctx=2048).summarize_structured(
                 _bakery_document(), SUMMARY_TYPE_DETAILED, should_cancel=lambda f=fake: f.flag
             )
         records = _run_stats_records(caplog)
-        print(f"cancel after_first_chunk={after_first_chunk}: {records}")
+        _LOG.info("cancel after_first_chunk=%s: %s", after_first_chunk, records)
         assert len(records) == 1
         assert int(records[0]["calls"]) == len(fake.calls) == 1
         assert int(records[0]["prompt_evaluated"]) == fake.calls[0]["evaluated"]
@@ -814,13 +896,13 @@ def test_run_stats_partial_on_cancel_and_fallback(
     )
     json_calls = sum(1 for c in fake.calls if "response_format" in c["kwargs"])
     prose_calls = len(fake.calls) - json_calls
-    print(f"fallback calls: json={json_calls} prose={prose_calls}")
+    _LOG.info("fallback calls: json=%s prose=%s", json_calls, prose_calls)
     assert json_calls > 0
     assert prose_calls > 0
     records = _run_stats_records(caplog)
     assert len(records) == 1
     assert int(records[0]["calls"]) == json_calls + prose_calls == len(fake.calls)
-    assert result.run_stats.calls == len(fake.calls)
+    assert _stats(result).calls == len(fake.calls)
 
 
 def test_no_character_ratio_speed_log() -> None:
@@ -839,7 +921,7 @@ def test_no_character_ratio_speed_log() -> None:
         count = sum(1 for line in lines if old_logger in line or ratio.search(line))
         if count:
             hits[path.relative_to(root).as_posix()] = count
-    print(f"files scanned: {len(files)}; hits: {hits}")
+    _LOG.info("files scanned: %s; hits: %s", len(files), hits)
     assert files
     for name, count in hits.items():
         assert count <= allowed.get(name, 0), f"{name}: {count}"

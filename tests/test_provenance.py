@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.provenance` — sentence splitting + quote location.
 
 Pure functions, no model: given a source string and a (model-emitted) quote,
@@ -6,17 +7,34 @@ locate the source sentence it came from, by char offsets into the full text.
 
 from __future__ import annotations
 
+import dataclasses
+import logging
+from dataclasses import FrozenInstanceError
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import pytest
 
-from docsummarizer.provenance import SourceSpan, locate_quote, split_sentences
+from docsummarizer import provenance
+from docsummarizer.provenance import (
+    MAX_SPAN_CHARS,
+    SourceSpan,
+    _normalize,
+    is_verified_match,
+    locate_quote,
+    split_sentences,
+)
+
+_LOG = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
 # split_sentences — offsets must be exact slices of the source
 # --------------------------------------------------------------------------- #
+def _reject_every_match(_quote: str, _span_text: str) -> bool:
+    return False
+
+
 def test_split_sentences_returns_exact_offset_slices() -> None:
     text = "Foo bar. Baz qux! Quux?"
     spans = split_sentences(text)
@@ -106,7 +124,7 @@ def test_locate_quote_threshold_governs_fuzzy_match() -> None:
     quote = "the ferry needs neither sails nor an engine"
     assert locate_quote(quote, _SOURCE, threshold=0.99) is None
     with pytest.raises(ValueError, match="threshold"):
-        locate_quote(quote, _SOURCE, threshold=0.1)
+        _ = locate_quote(quote, _SOURCE, threshold=0.1)
 
 
 def test_paraphrase_below_contiguous_bar_is_not_located() -> None:
@@ -115,8 +133,6 @@ def test_paraphrase_below_contiguous_bar_is_not_located() -> None:
     Catches dropping the contiguous-run condition, so coverage summed over
     scattered blocks alone admits a paraphrase.
     """
-    from docsummarizer.provenance import _normalize
-
     quote = "Operators check chlorine every four hours and note it in the log."
     start, end = split_sentences(_WATER)[2]
     sentence = _WATER[start:end]
@@ -125,7 +141,7 @@ def test_paraphrase_below_contiguous_bar_is_not_located() -> None:
     sizes = [block.size for block in matcher.get_matching_blocks()]
     coverage = sum(sizes) / len(q)
     longest = max(sizes) / len(q)
-    print(f"coverage={coverage:.3f} longest={longest:.3f}")
+    _LOG.info("coverage=%.3f longest=%.3f", coverage, longest)
     assert coverage >= 0.6
     assert longest < 0.5
     assert locate_quote(quote, _WATER) is None
@@ -149,10 +165,11 @@ def test_locate_quote_returns_best_verified_sentence() -> None:
 
 
 def test_verified_predicate_cases() -> None:
-    from docsummarizer.provenance import is_verified_match
-
     s1, s2, s3 = (_WATER[s:e] for s, e in split_sentences(_WATER))
-    messy = "Sand filters remove   most of the\n   sediment before the water\nreaches the treatment hall."
+    messy = (
+        "Sand filters remove   most of the\n   sediment before the water\n"
+        "reaches the treatment hall."
+    )
     wrapped = f"{s1} {messy} {s3}"
     paraphrase = "Operators check chlorine every four hours and note it in the log."
     near = "Operators test the chlorine level every four hours and write it in the daily log."
@@ -162,7 +179,10 @@ def test_verified_predicate_cases() -> None:
         ("b wrapped source", s2, wrapped, 0.6, messy, 1.0),
         (
             "c wrapped quote",
-            "Sand filters  remove most of the\nsediment before  the water reaches the treatment hall.",
+            (
+                "Sand filters  remove most of the\n"
+                "sediment before  the water reaches the treatment hall."
+            ),
             _WATER,
             0.6,
             s2,
@@ -177,7 +197,7 @@ def test_verified_predicate_cases() -> None:
     for label, quote, text, threshold, want, want_score in cases:
         span = locate_quote(quote, text, threshold=threshold)
         got = None if span is None else span.quote
-        print(f"{label}: expected={want!r} got={got!r}")
+        _LOG.info("%s: expected=%r got=%r", label, want, got)
         assert got == want, label
         if span is not None:
             assert is_verified_match(quote, span.quote), label
@@ -185,9 +205,9 @@ def test_verified_predicate_cases() -> None:
             if want_score is not None:
                 assert span.score == pytest.approx(want_score, abs=5e-4), label
     assert is_verified_match("pipes", _WATER) is False
-    print("g threshold below default: expected=ValueError")
+    _LOG.info("g threshold below default: expected=ValueError")
     with pytest.raises(ValueError, match="threshold"):
-        locate_quote(s2, _WATER, threshold=0.1)
+        _ = locate_quote(s2, _WATER, threshold=0.1)
 
 
 _CJK_SOURCE = "山谷裡的小鎮每年春天\n都會舉行一場盛大的\n燈籠節慶祝豐收"
@@ -200,8 +220,6 @@ def test_cjk_quote_without_wrap_spaces_is_located() -> None:
     Catches dropping the CJK whitespace rule from ``_normalize``, so wrap
     spaces split the contiguous run.
     """
-    from docsummarizer.provenance import is_verified_match
-
     span = locate_quote(_CJK_QUOTE, _CJK_SOURCE)
     assert span is not None
     assert (span.start, span.end) == (0, len(_CJK_SOURCE))
@@ -210,8 +228,6 @@ def test_cjk_quote_without_wrap_spaces_is_located() -> None:
 
 
 def test_normalize_drops_only_whitespace_touching_cjk() -> None:
-    from docsummarizer.provenance import _normalize
-
     assert _normalize("A  b\n c") == "a b c"
     assert _normalize("中文 字\n句") == "中文字句"
     assert _normalize("see 第三章 now") == "see第三章now"
@@ -236,10 +252,10 @@ def test_non_verbatim_quotes_are_never_located() -> None:
         assert " ".join(quote.lower().split()) not in collapsed_reference, quote
     located: list[str] = []
     for quote in quotes:
-        print(f"tried: {quote}")
+        _LOG.info("tried: %s", quote)
         if locate_quote(quote, reference) is not None:
             located.append(quote)
-    print(f"tried {len(quotes)}, located {len(located)}")
+    _LOG.info("tried %s, located %s", len(quotes), len(located))
     assert len(quotes) >= 40
     assert located == []
 
@@ -250,9 +266,7 @@ def test_locate_quote_consults_is_verified_match(monkeypatch: pytest.MonkeyPatch
     Catches inlining the conditions in ``locate_quote``, so a patched
     predicate no longer governs production grounding.
     """
-    from docsummarizer import provenance
-
-    monkeypatch.setattr(provenance, "is_verified_match", lambda quote, span_text: False)
+    monkeypatch.setattr(provenance, "is_verified_match", _reject_every_match)
     s1 = _WATER[: split_sentences(_WATER)[0][1]]
     assert locate_quote(s1, _WATER) is None
 
@@ -283,16 +297,11 @@ def test_locate_quote_grounds_sentence_with_abbreviation() -> None:
 
 
 def test_max_span_chars_is_the_span_cap() -> None:
-    from docsummarizer.provenance import MAX_SPAN_CHARS
-
     assert MAX_SPAN_CHARS == 1000
 
 
 def test_source_span_is_frozen() -> None:
-    from dataclasses import FrozenInstanceError
-
-    import pytest
-
     span = SourceSpan(start=0, end=5, quote="hello", score=1.0)
-    with pytest.raises(FrozenInstanceError):
-        span.start = 3  # type: ignore[misc]
+    for field in dataclasses.fields(span):
+        with pytest.raises(FrozenInstanceError):
+            setattr(span, field.name, 3)

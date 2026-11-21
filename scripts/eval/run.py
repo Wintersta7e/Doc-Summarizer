@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The evaluation runner: runs cases against a local corpus and records what it measured.
 
 Module-level imports are the standard library only. ``bootstrap()`` decides
@@ -12,26 +13,283 @@ import argparse
 import ast
 import csv
 import hashlib
+import importlib.metadata
+import importlib.util
+import inspect
 import io
 import json
 import os
 import platform
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import IO, TYPE_CHECKING, Any, Literal
+from typing import IO, TYPE_CHECKING, Literal, Protocol, TypedDict, cast, overload
+
+from typing_extensions import override
 
 if TYPE_CHECKING:
-    from docsummarizer.model_manager import StructuredSummary, Summarizer
+    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+
+    from docsummarizer.model_manager import (
+        ChatCompletionResponseChoice,
+        ChatCompletionResponseMessage,
+        ChatModel,
+        CompletionUsage,
+        CreateChatCompletionResponse,
+        CreateChatCompletionStreamResponse,
+        RunStats,
+        StructuredSummary,
+        Summarizer,
+        SummaryPoint,
+    )
     from eval.cases import Case
     from eval.metrics import CaseScore, Target
+
+    class SeededModel(ChatModel, Protocol):
+        """A loaded ``llama_cpp.Llama``: the chat calls plus its context reset and sampler seed."""
+
+        def reset(self) -> None:
+            """Clear the context state."""
+            ...
+
+        def set_seed(self, seed: int) -> None:
+            """Seed the sampler."""
+            ...
+
+    class MappedFile(Protocol):
+        """One of a process's mapped files, as ``psutil`` reports it."""
+
+        @property
+        def path(self) -> str:
+            """The mapped file's path."""
+            ...
+
+    class CpuTimes(Protocol):
+        """A process's CPU time, as ``psutil`` reports it."""
+
+        @property
+        def user(self) -> float:
+            """Seconds in user mode."""
+            ...
+
+        @property
+        def system(self) -> float:
+            """Seconds in kernel mode."""
+            ...
+
+    class ProcessLike(Protocol):
+        """The part of ``psutil.Process`` a contention snapshot reads."""
+
+        @property
+        def pid(self) -> int:
+            """The process id."""
+            ...
+
+        def exe(self) -> str:
+            """The executable's path, or an empty string."""
+            ...
+
+        def memory_maps(self) -> Sequence[MappedFile]:
+            """The files the process maps."""
+            ...
+
+        def cpu_times(self) -> CpuTimes:
+            """The CPU time the process has used."""
+            ...
+
+    class PeakMemory(Protocol):
+        """Windows' ``psutil`` memory info, which carries the peak working set."""
+
+        @property
+        def peak_wset(self) -> int:
+            """The peak working set in bytes."""
+            ...
+
+
+# --------------------------------------------------------------------------- #
+# The results file's records: one JSON object per line
+# --------------------------------------------------------------------------- #
+
+
+class SpanRecord(TypedDict):
+    """A cited point's source span."""
+
+    start: int
+    end: int
+    quote: str
+    score: float
+
+
+class PointLine(TypedDict):
+    """One summary point and its citation, if any."""
+
+    text: str
+    citation: SpanRecord | None
+
+
+class ResultRecord(TypedDict):
+    """A returned structured summary, without its run stats."""
+
+    summary_type: str
+    lead: str | None
+    points: list[PointLine]
+    sections: dict[str, list[PointLine]] | None
+    text: str
+
+
+class M1Score(TypedDict):
+    """M1: calls whose content is empty or holds think tags."""
+
+    violations: int
+    calls: int
+    failed_calls: list[int]
+
+
+class OffTargetRecord(TypedDict):
+    """One M2 unit in the wrong language; ``call`` is ``None`` for the result."""
+
+    call: int | None
+    unit: str
+    got: str
+
+
+class M2Score(TypedDict):
+    """M2: units in a language other than the target's."""
+
+    violations: int
+    passed: bool
+    scored: int
+    unparsed_calls: int
+    off_target: list[OffTargetRecord]
+
+
+class M4Score(TypedDict):
+    """M4: calls the token limit cut short."""
+
+    violations: int
+    calls: int
+    truncated_calls: list[int]
+
+
+class M7Score(TypedDict):
+    """M7: how tightly the returned points' citations hold their quotes."""
+
+    points: int
+    cited: int
+    tight: int
+    whole_document: int
+    quotes: int
+    verbatim: int
+    hit_rate: float
+
+
+class M12aScore(TypedDict):
+    """M12a: whether a re-run returned the first run's text."""
+
+    identical: bool
+    first_diff: int | None
+    violations: int
+    first: str
+
+
+class CaseMetrics(TypedDict):
+    """Every score of one case run, and the cell it counts toward."""
+
+    cell: list[str]
+    M1: M1Score
+    M2: M2Score
+    M4: M4Score
+    M7: M7Score | None
+    M12a: M12aScore | None
+
+
+class CallLine(TypedDict):
+    """A ``call`` line: one completion, and the case run it belongs to."""
+
+    kind: str
+    run: int
+    case: str
+    seed: int
+    repetition: int
+    seq: int
+    messages: list[dict[str, str]]
+    kwargs: dict[str, object]
+    stream: bool
+    content: str
+    finish_reason: str | None
+    usage: CompletionUsage | None
+    perf: dict[str, float] | None
+    error: str | None
+
+
+class CaseRunLine(TypedDict):
+    """A ``case_run`` line: one case run's outcome and scores; ``calls`` is its call count."""
+
+    kind: str
+    run: int
+    case: str
+    seed: int
+    repetition: int
+    n_ctx: int
+    parts: int
+    result: ResultRecord | None
+    run_stats: dict[str, object] | None
+    calls: int
+    tokenized: dict[str, int]
+    contention: dict[str, object]
+    contended: bool
+    error: str | None
+    metrics: CaseMetrics
+
+
+class RescoredLine(CaseRunLine):
+    """A rescored ``case_run`` line, with the coverage-only arm's M7 beside its scores."""
+
+    m7_coverage_only: M7Score | None
+
+
+def _object_dict(value: object) -> dict[str, object] | None:
+    """``value`` as a JSON object, or ``None`` when it is not one."""
+    if not isinstance(value, dict):
+        return None
+    return cast("dict[str, object]", value)
+
+
+def _point_line(point: SummaryPoint) -> PointLine:
+    span = point.citation
+    citation: SpanRecord | None = None
+    if span is not None:
+        citation = {"start": span.start, "end": span.end, "quote": span.quote, "score": span.score}
+    return {"text": point.text, "citation": citation}
+
+
+def _result_record(result: StructuredSummary) -> ResultRecord:
+    """The result as its line records it: every field but ``run_stats``."""
+    sections = result.sections
+    return {
+        "summary_type": result.summary_type,
+        "lead": result.lead,
+        "points": [_point_line(point) for point in result.points],
+        "sections": None
+        if sections is None
+        else {name: [_point_line(point) for point in points] for name, points in sections.items()},
+        "text": result.text,
+    }
+
+
+def _record(value: RunStats | Contention) -> dict[str, object]:
+    """A dataclass's fields as a JSON object, recursively."""
+    record: dict[str, object] = asdict(value)
+    return record
+
 
 _REPO = Path(__file__).resolve().parents[2]
 _PACKAGE = "docsummarizer"
@@ -49,7 +307,8 @@ def bootstrap(app_data: Path) -> None:
 
     location = Path(str(docsummarizer.__file__)).resolve()
     if not location.is_relative_to(_REPO / "src"):
-        raise SystemExit(f"docsummarizer resolves from {location.parent}, not {_REPO / 'src'}")
+        msg = f"docsummarizer resolves from {location.parent}, not {_REPO / 'src'}"
+        raise SystemExit(msg)
 
 
 # --------------------------------------------------------------------------- #
@@ -71,12 +330,12 @@ def git_state(repo: Path) -> GitState:
     git = shutil.which("git")
     if git is None:
         return GitState(None, None, "git not found")
-    head = subprocess.run(  # noqa: S603 - fixed argv, no shell
+    head = subprocess.run(
         [git, "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=False
     )
     if head.returncode != 0:
         return GitState(None, None, head.stderr.strip() or f"git exited {head.returncode}")
-    status = subprocess.run(  # noqa: S603 - fixed argv, no shell
+    status = subprocess.run(
         [git, "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=False
     )
     if status.returncode != 0:
@@ -203,29 +462,43 @@ class ManifestDocument:
 
 
 _SCRIPTS = ("Simplified", "Traditional")
+_SPLIT_MIN_PARTS = 2  # a split case must reach at least two parts
 _REQUIRED = ("id", "file", "label", "sha256")
 
 
-def _manifest_document(entry: Any, corpus: Path) -> ManifestDocument:
+def _manifest_document(entry: object, corpus: Path) -> ManifestDocument:
     from eval import cases
 
-    if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in _REQUIRED):
-        raise ManifestError(f"manifest unreadable: an entry lacks one of {_REQUIRED}")
-    doc_id = entry["id"]
+    record = _object_dict(entry) or {}
+    doc_id, file, label, sha256 = (record.get(key) for key in _REQUIRED)
+    if not (
+        isinstance(doc_id, str)
+        and isinstance(file, str)
+        and isinstance(label, str)
+        and isinstance(sha256, str)
+    ):
+        msg = f"manifest unreadable: an entry lacks one of {_REQUIRED}"
+        raise ManifestError(msg)
     shape = cases.DOCUMENTS.get(doc_id)
     if shape is None:
-        raise ManifestError(f"manifest unknown: {doc_id} (ad-hoc documents go through --doc)")
-    if entry["label"] != shape.label:
-        raise ManifestError(f"manifest label: {doc_id} ({entry['label']!r}, not {shape.label!r})")
-    script = entry.get("script")
+        msg = f"manifest unknown: {doc_id} (ad-hoc documents go through --doc)"
+        raise ManifestError(msg)
+    if label != shape.label:
+        msg = f"manifest label: {doc_id} ({label!r}, not {shape.label!r})"
+        raise ManifestError(msg)
+    script = record.get("script")
     if shape.label == "zh" and (
         script not in _SCRIPTS or (shape.script is not None and script != shape.script)
     ):
-        raise ManifestError(f"manifest script: {doc_id} ({script!r})")
-    path = (corpus / entry["file"]).resolve()
+        msg = f"manifest script: {doc_id} ({script!r})"
+        raise ManifestError(msg)
+    path = (corpus / file).resolve()
     if not path.is_relative_to(corpus.resolve()):
-        raise ManifestError(f"manifest file outside the corpus: {doc_id}")
-    return ManifestDocument(doc_id, path, entry["label"], script, entry["sha256"])
+        msg = f"manifest file outside the corpus: {doc_id}"
+        raise ManifestError(msg)
+    return ManifestDocument(
+        doc_id, path, label, script if isinstance(script, str) else None, sha256
+    )
 
 
 def load_manifest(eval_dir: Path) -> dict[str, ManifestDocument]:
@@ -233,19 +506,23 @@ def load_manifest(eval_dir: Path) -> dict[str, ManifestDocument]:
     corpus = eval_dir / "corpus"
     manifest = corpus / "manifest.json"
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = _object_dict(cast("object", json.loads(manifest.read_text(encoding="utf-8"))))
     except FileNotFoundError:
-        raise ManifestError(f"manifest absent: {manifest}") from None
+        msg = f"manifest absent: {manifest}"
+        raise ManifestError(msg) from None
     except (OSError, ValueError) as exc:
-        raise ManifestError(f"manifest unreadable: {manifest}: {exc}") from exc
-    entries = data.get("documents") if isinstance(data, dict) else None
+        msg = f"manifest unreadable: {manifest}: {exc}"
+        raise ManifestError(msg) from exc
+    entries = data.get("documents") if data is not None else None
     if not isinstance(entries, list):
-        raise ManifestError(f"manifest unreadable: {manifest}: no documents list")
+        msg = f"manifest unreadable: {manifest}: no documents list"
+        raise ManifestError(msg)
     documents: dict[str, ManifestDocument] = {}
-    for entry in entries:
+    for entry in cast("list[object]", entries):
         doc = _manifest_document(entry, corpus)
         if doc.id in documents:
-            raise ManifestError(f"manifest duplicate: {doc.id}")
+            msg = f"manifest duplicate: {doc.id}"
+            raise ManifestError(msg)
         documents[doc.id] = doc
     return documents
 
@@ -312,6 +589,7 @@ class Contention:
 
     @property
     def contended(self) -> bool:
+        """Whether either side counted a contending process."""
         if (self.local.count or 0) > 0:
             return True
         return self.host is not None and (self.host.count or 0) > 0
@@ -332,10 +610,13 @@ def read_host_processes() -> str | None:
     Process id, name and CPU seconds of every Windows process. ``tasklist /v``
     carries the same CPU column but takes about a minute on a busy host.
     """
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        return None
     try:
         done = subprocess.run(
-            [  # noqa: S607 - resolved on the interop PATH
-                "powershell.exe",
+            [
+                powershell,
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
@@ -370,7 +651,9 @@ def parse_host_processes(text: str) -> dict[int, tuple[str, float]]:
 
 
 def take_snapshot(
-    processes: Iterable[Any], own_pid: int, host_processes: Callable[[], str | None] | None
+    processes: Iterable[ProcessLike],
+    own_pid: int,
+    host_processes: Callable[[], str | None] | None,
 ) -> ContentionSnapshot:
     """Record every matching process's CPU time, and the host's when ``host_processes`` is given.
 
@@ -447,51 +730,93 @@ class CallRecord:
     """One completion as the model returned it, before any clean-up."""
 
     seq: int
-    messages: list[dict[str, Any]]
-    kwargs: dict[str, Any]
+    messages: list[dict[str, str]]
+    kwargs: dict[str, object]
     stream: bool
     content: str
     finish_reason: str | None
-    usage: dict[str, Any] | None
+    usage: CompletionUsage | None
     perf: dict[str, float] | None  # the call's counter deltas; None without counters
     error: str | None
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: object) -> object:
     """``value`` when it serializes to JSON, else its type name."""
     try:
-        json.dumps(value)
+        _ = json.dumps(value)  # a probe: only whether it serializes matters
     except (TypeError, ValueError):
         return type(value).__name__
     return value
 
 
-class CapturingLlama:
+class _ChatModel(ABC):
+    """A stand-in for the model's overloaded ``create_chat_completion``.
+
+    The overloads the pipeline's protocol needs are declared once here; each
+    stand-in answers the call in ``_complete``.
+    """
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[False] = False,
+        **kwargs: object,
+    ) -> CreateChatCompletionResponse: ...
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[True],
+        **kwargs: object,
+    ) -> Iterator[CreateChatCompletionStreamResponse]: ...
+
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Answer the completion through ``_complete``."""
+        return self._complete(messages, stream=stream, kwargs=kwargs)
+
+    @abstractmethod
+    def _complete(
+        self, messages: Sequence[Mapping[str, str]], *, stream: bool, kwargs: dict[str, object]
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Answer one completion: ``create_chat_completion``'s arguments, keywords as a dict."""
+
+
+class CapturingLlama(_ChatModel):
     """Wraps the model and records every completion and every tokenize length.
 
     Every other attribute is the wrapped model's, so the pipeline sees the
     same context pointer and counters.
     """
 
-    def __init__(self, real: Any, snapshot: Callable[[], Any]) -> None:
-        self._real = real
-        self._snapshot = snapshot
+    def __init__(self, real: SeededModel, snapshot: Callable[[], object]) -> None:
+        """Wrap ``real``; ``snapshot`` reads its perf counters, or ``None`` without them."""
+        self._real: SeededModel = real
+        self._snapshot: Callable[[], object] = snapshot
         self.calls: list[CallRecord] = []
         self.tokenized: dict[str, int] = {}
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
+    def __getattr__(self, name: str) -> object:
+        """Any attribute not wrapped here is the wrapped model's."""
+        return cast("object", getattr(self._real, name))
 
-    def _perf_since(self, before: Any) -> dict[str, float] | None:
+    def _perf_since(self, before: object) -> dict[str, float] | None:
         after = self._snapshot() if before is not None else None
         if before is None or after is None:
             return None
         return {name: getattr(after, name) - getattr(before, name) for name in _PERF_FIELDS}
 
-    def create_chat_completion(self, **kwargs: Any) -> Any:
+    @override
+    def _complete(
+        self, messages: Sequence[Mapping[str, str]], *, stream: bool, kwargs: dict[str, object]
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Forward the completion to the model and record the request and its answer."""
         before = self._snapshot()
-        messages = kwargs.pop("messages")
-        stream = bool(kwargs.pop("stream", False))
         record = CallRecord(
             seq=len(self.calls),
             messages=[dict(message) for message in messages],
@@ -508,7 +833,7 @@ class CapturingLlama:
             chunks = self._real.create_chat_completion(messages=messages, stream=True, **kwargs)
             return self._stream(record, before, chunks)
         try:
-            response = self._real.create_chat_completion(messages=messages, **kwargs)
+            response = self._real.create_chat_completion(messages=messages, stream=False, **kwargs)
             choice = response["choices"][0]
             record.content = str(choice["message"].get("content") or "")
             record.finish_reason = choice.get("finish_reason")
@@ -520,7 +845,12 @@ class CapturingLlama:
             record.perf = self._perf_since(before)
         return response
 
-    def _stream(self, record: CallRecord, before: Any, chunks: Iterable[Any]) -> Iterator[Any]:
+    def _stream(
+        self,
+        record: CallRecord,
+        before: object,
+        chunks: Iterable[CreateChatCompletionStreamResponse],
+    ) -> Iterator[CreateChatCompletionStreamResponse]:
         try:
             for chunk in chunks:
                 choice = chunk["choices"][0]
@@ -536,16 +866,33 @@ class CapturingLlama:
             # An aborted stream is recorded too: this runs when the consumer stops.
             record.perf = self._perf_since(before)
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> Any:
-        result = self._real.tokenize(text, add_bos=add_bos)
+    def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
+        """Tokenize through the model and record the token count by text hash."""
+        result: list[int] = self._real.tokenize(text, add_bos=add_bos)
         self.tokenized[hashlib.sha256(text).hexdigest()] = len(result)
         return result
 
     def reset(self) -> None:
+        """Clear the model's context state."""
         self._real.reset()
 
     def set_seed(self, seed: int) -> None:
+        """Seed the model's sampler."""
         self._real.set_seed(seed)
+
+
+def capture_calls(summarizer: Summarizer) -> CapturingLlama:
+    """Wrap the summarizer's model in a ``CapturingLlama``, once."""
+    llm = summarizer.llm
+    if isinstance(llm, CapturingLlama):
+        return llm
+    if llm is None:
+        msg = "the summarizer is closed"
+        raise RuntimeError(msg)
+    # build_summarizer loads a llama_cpp.Llama, which has reset and set_seed.
+    capture = CapturingLlama(cast("SeededModel", llm), summarizer.perf_snapshot)
+    summarizer.llm = capture
+    return capture
 
 
 def build_summarizer(
@@ -575,68 +922,72 @@ class CaseRun:
     repetition: int
     n_ctx: int
     parts: int
-    result: dict[str, Any] | None
-    run_stats: dict[str, Any] | None
+    result: ResultRecord | None
+    run_stats: dict[str, object] | None
     calls: list[CallRecord]
     tokenized: dict[str, int]
-    contention: dict[str, Any]
+    contention: dict[str, object]
     contended: bool
     error: str | None
-    metrics: dict[str, Any] = field(default_factory=dict)
+    metrics: CaseMetrics
 
 
 def _json_units(content: str) -> list[str] | None:
     """The lead and point texts the app's parser reads from one JSON call."""
-    from docsummarizer.model_manager import _parse_structured_json
+    from docsummarizer.model_manager import parse_structured_json
     from eval import metrics
 
-    parsed = _parse_structured_json(content)
+    parsed = parse_structured_json(content)
     if parsed is None:
         return None
     texts = [str(parsed.get("lead") or ""), *(text for text, _ in _json_points(parsed))]
     return [unit for text in texts for unit in metrics.split_units(text)]
 
 
-def _json_points(parsed: Mapping[str, Any]) -> list[tuple[str, str]]:
+def _json_points(parsed: Mapping[str, object]) -> list[tuple[str, str]]:
     """Every ``(text, quote)`` pair of a parsed call: Detailed points and each section."""
-    from docsummarizer.model_manager import _read_raw_points
+    from docsummarizer.model_manager import read_raw_points
 
-    pairs = _read_raw_points(parsed.get("points"))
-    sections = parsed.get("sections")
-    if isinstance(sections, dict):
+    pairs = read_raw_points(parsed.get("points"))
+    sections = _object_dict(parsed.get("sections"))
+    if sections is not None:
         for value in sections.values():
-            pairs.extend(_read_raw_points(value))
+            pairs.extend(read_raw_points(value))
     return pairs
 
 
 def _model_quotes(calls: Sequence[CallRecord]) -> dict[str, str]:
     """Each point text's quote as the model wrote it, over every parsed JSON call."""
-    from docsummarizer.model_manager import _parse_structured_json
+    from docsummarizer.model_manager import parse_structured_json
 
     quotes: dict[str, str] = {}
     for call in calls:
-        parsed = _parse_structured_json(call.content) if "response_format" in call.kwargs else None
+        parsed = parse_structured_json(call.content) if "response_format" in call.kwargs else None
         if parsed is not None:
             quotes.update(_json_points(parsed))
     return quotes
 
 
-def _result_points(result: StructuredSummary) -> list[Any]:
+def _result_points(result: StructuredSummary) -> list[SummaryPoint]:
     points = list(result.points)
     for section in (result.sections or {}).values():
         points.extend(section)
     return points
 
 
+@dataclass(frozen=True)
+class ScoringInput:
+    """What a case run was asked: the case, its document text, its target and its part count."""
+
+    case: Case
+    text: str
+    target: Target
+    parts: int
+
+
 def score_case_run(
-    case: Case,
-    result: StructuredSummary | None,
-    calls: Sequence[CallRecord],
-    text: str,
-    target: Target,
-    *,
-    parts: int,
-) -> dict[str, Any]:
+    asked: ScoringInput, result: StructuredSummary | None, calls: Sequence[CallRecord]
+) -> CaseMetrics:
     """Score one case run: every call's raw content and the returned result.
 
     The one scoring path a run and a rescore share. The rendered ``text`` of a
@@ -645,20 +996,29 @@ def score_case_run(
     from docsummarizer.model_manager import SUMMARY_TYPE_BRIEF
     from eval import metrics
 
+    case, text, target, parts = asked.case, asked.text, asked.target, asked.parts
     is_json = ["response_format" in call.kwargs for call in calls]
     call_units = [
         _json_units(call.content) if json_call else metrics.split_units(call.content)
         for call, json_call in zip(calls, is_json, strict=True)
     ]
     result_units: list[str] = []
-    m7: dict[str, Any] | None = None
+    m7: M7Score | None = None
     if result is not None:
         points = _result_points(result)
         texts = [result.lead or "", *(point.text for point in points)]
         result_units = [unit for t in texts for unit in metrics.split_units(t)]
         if case.summary_type != SUMMARY_TYPE_BRIEF:
             scored = metrics.m7(metrics.point_records(points, _model_quotes(calls)), text)
-            m7 = {**asdict(scored), "hit_rate": scored.hit_rate}
+            m7 = {
+                "points": scored.points,
+                "cited": scored.cited,
+                "tight": scored.tight,
+                "whole_document": scored.whole_document,
+                "quotes": scored.quotes,
+                "verbatim": scored.verbatim,
+                "hit_rate": scored.hit_rate,
+            }
     m1 = [metrics.m1(call.content).passed for call in calls]
     m4 = [metrics.m4(call.finish_reason) for call in calls]
     m2 = metrics.m2(call_units, result_units, target)
@@ -676,7 +1036,9 @@ def score_case_run(
             "passed": m2.passed,
             "scored": m2.scored,
             "unparsed_calls": m2.unparsed_calls,
-            "off_target": [asdict(off) for off in m2.off_target],
+            "off_target": [
+                {"call": off.call, "unit": off.unit, "got": off.got} for off in m2.off_target
+            ],
         },
         "M4": {
             "violations": sum(m4),
@@ -695,21 +1057,30 @@ def _first_run_of(rerun: Case, seed: int, done: Sequence[CaseRun]) -> CaseRun | 
     )
 
 
-def _m12a(first: CaseRun | None, rerun: CaseRun) -> dict[str, Any] | None:
+def _m12a(first: CaseRun | None, rerun: CaseRun) -> M12aScore | None:
     from eval import metrics
 
     if first is None or first.result is None or rerun.result is None:
         return None
     outcome = metrics.m12a(first.result["text"], rerun.result["text"])
-    return {**asdict(outcome), "violations": 0 if outcome.identical else 1, "first": first.case}
+    return {
+        "identical": outcome.identical,
+        "first_diff": outcome.first_diff,
+        "violations": 0 if outcome.identical else 1,
+        "first": first.case,
+    }
 
 
-def _counting_chunks(summarizer: Summarizer, observed: list[int]) -> Callable[..., Any]:
-    """``_chunks_within``, recording the piece count of each top-level call."""
-    original = summarizer._chunks_within
+def _counting_chunks(
+    summarizer: Summarizer, observed: list[int]
+) -> Callable[[str, int, Callable[[str, int], list[tuple[str, int]]]], list[tuple[str, int]]]:
+    """``chunks_within``, recording the piece count of each top-level call."""
+    original = summarizer.chunks_within
     depth = 0
 
-    def counting(text: str, budget_tokens: int, split: Any) -> list[tuple[str, int]]:
+    def counting(
+        text: str, budget_tokens: int, split: Callable[[str, int], list[tuple[str, int]]]
+    ) -> list[tuple[str, int]]:
         nonlocal depth
         depth += 1
         try:
@@ -731,7 +1102,8 @@ def _run_one(
     capture.reset()
     capture.set_seed(spec.seed)
     observed: list[int] = []
-    summarizer._chunks_within = _counting_chunks(summarizer, observed)  # type: ignore[method-assign]
+    # An instance attribute shadows the method for this run; the del below drops it.
+    vars(summarizer)["chunks_within"] = _counting_chunks(summarizer, observed)
     result: StructuredSummary | None = None
     error: str | None = None
     start = snapshot_now()
@@ -746,7 +1118,7 @@ def _run_one(
         error = f"{type(exc).__name__}: {exc}"  # recorded in the results file, never logged
     finally:
         end = snapshot_now()
-        del summarizer._chunks_within
+        del summarizer.chunks_within
     parts = getattr(result, "parts_total", None) or (observed[0] if observed else 0)
     return result, error, parts, count_contention(start, end)
 
@@ -764,32 +1136,27 @@ def run_cases(
     ``m12a`` is compared with repetition 0 of the same case without the flag.
     ``on_run`` sees each case run as soon as it is scored.
     """
-    capture = summarizer.llm
-    if not isinstance(capture, CapturingLlama):
-        capture = CapturingLlama(summarizer.llm, summarizer._perf_snapshot)
-        summarizer.llm = capture
+    capture = capture_calls(summarizer)
     done: list[CaseRun] = []
     for spec in runs:
         case, text = spec.case, texts[spec.case.doc]
         result, error, parts, contention = _run_one(summarizer, capture, spec, text)
-        result_dict = asdict(result) if result is not None else None
-        stats = result_dict.pop("run_stats", None) if result_dict is not None else None
+        stats = result.run_stats if result is not None else None
+        asked = ScoringInput(case, text, targets[case.id], parts)
         case_run = CaseRun(
             case=case.id,
             seed=spec.seed,
             repetition=spec.repetition,
             n_ctx=summarizer.n_ctx,
             parts=parts,
-            result=result_dict,
-            run_stats=stats,
+            result=_result_record(result) if result is not None else None,
+            run_stats=_record(stats) if stats is not None else None,
             calls=capture.calls,
             tokenized=capture.tokenized,
-            contention={**asdict(contention), "contended": contention.contended},
+            contention={**_record(contention), "contended": contention.contended},
             contended=contention.contended,
             error=error,
-        )
-        case_run.metrics = score_case_run(
-            case, result, case_run.calls, text, targets[case.id], parts=parts
+            metrics=score_case_run(asked, result, capture.calls),
         )
         if case.m12a:
             case_run.metrics["M12a"] = _m12a(_first_run_of(case, spec.seed, done), case_run)
@@ -848,15 +1215,43 @@ def _seed_list(text: str) -> tuple[int, ...]:
     try:
         seeds = tuple(int(part) for part in text.split(","))
     except ValueError:
-        raise argparse.ArgumentTypeError(f"not a comma-separated list of seeds: {text!r}") from None
+        msg = f"not a comma-separated list of seeds: {text!r}"
+        raise argparse.ArgumentTypeError(msg) from None
     return seeds
 
 
 def _at_least_one(text: str) -> int:
     value = int(text)
     if value < 1:
-        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+        msg = f"must be at least 1, got {value}"
+        raise argparse.ArgumentTypeError(msg)
     return value
+
+
+class EvalArgs(argparse.Namespace):
+    """The parsed command line, one typed attribute per option; defaults match the parser's."""
+
+    tier: str | None = None
+    rescore: Path | None = None
+    compare: list[Path] | None = None
+    checks: str | None = None
+    self_test: list[str] | None = None
+    contention: float | None = None
+    eval_dir: Path | None = None
+    model: Path | None = None
+    threads: int | None = None
+    n_gpu_layers: int = 0
+    n_ctx: int | None = None
+    seeds: tuple[int, ...] = (0,)
+    repeat: int = 1
+
+    def __init__(self) -> None:
+        """Give each repeatable option its own empty list."""
+        super().__init__()
+        self.case: list[str] = []
+        self.doc: list[Path] = []
+        self.label: list[str] = []
+        self.script: list[str] = []
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -865,18 +1260,18 @@ def build_parser() -> argparse.ArgumentParser:
         prog="run.py", description="Run evaluation cases against a local corpus."
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--tier", choices=RUNNABLE_TIERS, help="run a tier's cases")
-    mode.add_argument(
+    _ = mode.add_argument("--tier", choices=RUNNABLE_TIERS, help="run a tier's cases")
+    _ = mode.add_argument(
         "--rescore", type=Path, metavar="R", help="replay results file R and score it again"
     )
-    mode.add_argument(
+    _ = mode.add_argument(
         "--compare", type=Path, nargs=2, metavar=("B", "C"), help="candidate C against baseline B"
     )
-    mode.add_argument("--checks", metavar="LIST", help="comma-separated checks to run")
-    mode.add_argument(
+    _ = mode.add_argument("--checks", metavar="LIST", help="comma-separated checks to run")
+    _ = mode.add_argument(
         "--self-test", nargs="+", metavar=("KIND", "ARG"), help="language <labelled set>"
     )
-    mode.add_argument(
+    _ = mode.add_argument(
         "--contention",
         type=float,
         nargs="?",
@@ -884,19 +1279,19 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="count busy model processes over a window (default 10 s)",
     )
-    parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
-    parser.add_argument("--model", type=Path, help="the GGUF model file")
-    parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
-    parser.add_argument("--n-gpu-layers", type=int, default=0, help="layers to offload")
-    parser.add_argument("--n-ctx", type=int, help="context window (default: the app's)")
-    parser.add_argument("--seeds", type=_seed_list, default=(0,), help="comma-separated")
-    parser.add_argument(
+    _ = parser.add_argument("--eval-dir", type=Path, help="holds corpus/, results/ and appdata/")
+    _ = parser.add_argument("--model", type=Path, help="the GGUF model file")
+    _ = parser.add_argument("--threads", type=int, help="CPU threads (default: half the cores)")
+    _ = parser.add_argument("--n-gpu-layers", type=int, default=0, help="layers to offload")
+    _ = parser.add_argument("--n-ctx", type=int, help="context window (default: the app's)")
+    _ = parser.add_argument("--seeds", type=_seed_list, default=(0,), help="comma-separated")
+    _ = parser.add_argument(
         "--repeat", type=_at_least_one, default=1, help="repeat each seed-0 auto run N times"
     )
-    parser.add_argument("--case", action="append", default=[], help="a case id or document id")
-    parser.add_argument("--doc", action="append", type=Path, default=[], help="ad-hoc document")
-    parser.add_argument("--label", action="append", default=[], help="each --doc's language")
-    parser.add_argument("--script", action="append", default=[], help="each zh --doc's script")
+    _ = parser.add_argument("--case", action="append", default=[], help="a case id or document id")
+    _ = parser.add_argument("--doc", action="append", type=Path, default=[], help="ad-hoc document")
+    _ = parser.add_argument("--label", action="append", default=[], help="each --doc's language")
+    _ = parser.add_argument("--script", action="append", default=[], help="each zh --doc's script")
     return parser
 
 
@@ -927,51 +1322,72 @@ def results_path(eval_dir: Path, tier: str, short_sha: str, now: datetime) -> Pa
     return eval_dir / "results" / f"{now:%Y%m%dT%H%M%SZ}-{tier}-{short_sha}.jsonl"
 
 
-def write_line(fh: IO[str], record: Mapping[str, Any]) -> None:
+def write_line(fh: IO[str], record: Mapping[str, object]) -> None:
     """One JSON record per line."""
-    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _ = fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 @dataclass(frozen=True)
 class Results:
     """A results file: its header, call lines and case-run lines."""
 
-    header: dict[str, Any]
-    calls: list[dict[str, Any]]
-    case_runs: list[dict[str, Any]]
+    header: dict[str, object]
+    calls: list[CallLine]
+    case_runs: list[CaseRunLine]
+
+
+def _kind(record: object) -> object:
+    fields = _object_dict(record)
+    return fields.get("kind") if fields is not None else None
 
 
 def read_results(path: Path) -> Results:
-    """Read a results file; the header must be its first line."""
-    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    if not lines or lines[0].get("kind") != "header":
-        raise ValueError(f"{path}: the first line is not a header")
-    calls = [line for line in lines if line.get("kind") == "call"]
-    case_runs = [line for line in lines if line.get("kind") == "case_run"]
-    return Results(lines[0], calls, case_runs)
+    """Read a results file; the header must be its first line.
+
+    A ``call`` or ``case_run`` line is taken to hold the fields this runner writes.
+    A line that is not a JSON object is refused, naming its 1-based line number:
+    skipping it would change the figures the file reports.
+    """
+    lines: list[object] = []
+    for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not text:
+            continue
+        record = _object_dict(cast("object", json.loads(text)))
+        if record is None:
+            msg = f"{path}: line {number} is not a JSON object"
+            raise ValueError(msg)
+        lines.append(record)
+    kinds = [_kind(line) for line in lines]
+    if not lines or kinds[0] != "header":
+        msg = f"{path}: the first line is not a header"
+        raise ValueError(msg)
+    pairs = list(zip(lines, kinds, strict=True))
+    calls = [cast("CallLine", line) for line, kind in pairs if kind == "call"]
+    case_runs = [cast("CaseRunLine", line) for line, kind in pairs if kind == "case_run"]
+    return Results(cast("dict[str, object]", lines[0]), calls, case_runs)
 
 
 def _share(num: int, den: int) -> str:
     return f"{num}/{den}"
 
 
-def _table_row(name: str, runs: Sequence[Mapping[str, Any]]) -> str:
+def _table_row(name: str, runs: Sequence[CaseRunLine]) -> str:
     metrics = [run["metrics"] for run in runs]
     calls = sum(m["M1"]["calls"] for m in metrics)
     m1 = _share(calls - sum(m["M1"]["violations"] for m in metrics), calls)
     m2 = _share(sum(1 for m in metrics if m["M2"]["passed"]), len(metrics))
     m4 = _share(calls - sum(m["M4"]["violations"] for m in metrics), calls)
-    m7s = [m["M7"] for m in metrics if m["M7"] is not None]
+    m7s = [score for m in metrics if (score := m["M7"]) is not None]
     m7 = _share(sum(m["tight"] for m in m7s), sum(m["points"] for m in m7s))
-    m12as = [m["M12a"] for m in metrics if m.get("M12a") is not None]
+    m12as = [rerun for m in metrics if (rerun := m.get("M12a")) is not None]
     m12a = _share(sum(1 for m in m12as if m["identical"]), len(m12as))
     return f"{name:<28} {len(runs):>5} {m1:>9} {m2:>9} {m4:>9} {m7:>9} {m12a:>7}"
 
 
-def print_table(case_runs: Sequence[Mapping[str, Any]]) -> None:
+def print_table(case_runs: Sequence[CaseRunLine]) -> None:
     """One row per cell and an aggregate row, read from repetition 0; then the counts."""
     first = [run for run in case_runs if run.get("repetition", 0) == 0]
-    cells: dict[str, list[Mapping[str, Any]]] = {}
+    cells: dict[str, list[CaseRunLine]] = {}
     for run in first:
         cells.setdefault("/".join(run["metrics"]["cell"]), []).append(run)
     print(f"{'cell':<28} {'runs':>5} {'M1':>9} {'M2':>9} {'M4':>9} {'M7':>9} {'M12a':>7}")
@@ -994,64 +1410,73 @@ def print_table(case_runs: Sequence[Mapping[str, Any]]) -> None:
     print(f"cases={unique} case_runs={len(case_runs)} calls={calls} scored_units={scored}")
 
 
-def _select_cases(args: argparse.Namespace) -> list[Case]:
+def _select_cases(args: EvalArgs, tier_name: str) -> list[Case]:
     from eval import cases
 
-    tier = cases.TIERS[args.tier]
+    tier = cases.TIERS[tier_name]
     selected = list(tier) if not args.doc else []
     if args.case:
         chosen: set[str] = set()
         for selector in args.case:
             matched = {case.id for case in tier if selector in (case.id, case.doc)}
             if not matched:
-                raise _RefusedError(f"--case {selector}: no case in tier {args.tier} matches")
+                msg = f"--case {selector}: no case in tier {tier_name} matches"
+                raise _RefusedError(msg)
             chosen |= matched
         selected = [case for case in tier if case.id in chosen]
     for doc in _adhoc_documents(args):
-        types = cases.TIER_TYPES[args.tier]
+        types = cases.TIER_TYPES[tier_name]
         selected += [cases.Case(doc.id, t, "auto") for t in types]
-        if args.tier == "lang":
+        if tier_name == "lang":
             selected += [cases.Case(doc.id, t, "auto", split=True) for t in types]
     return selected
 
 
-def _adhoc_documents(args: argparse.Namespace) -> list[ManifestDocument]:
+def _adhoc_documents(args: EvalArgs) -> list[ManifestDocument]:
     if len(args.label) != len(args.doc) or len(args.script) not in (0, len(args.doc)):
-        raise _RefusedError("each --doc needs a --label (and, if any is given, a --script)")
+        msg = "each --doc needs a --label (and, if any is given, a --script)"
+        raise _RefusedError(msg)
     scripts = args.script or [None] * len(args.doc)
-    documents = []
+    documents: list[ManifestDocument] = []
     for path, label, script in zip(args.doc, args.label, scripts, strict=True):
         try:
             sha = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
-            raise _RefusedError(f"--doc {path}: {exc}") from exc
+            msg = f"--doc {path}: {exc}"
+            raise _RefusedError(msg) from exc
         documents.append(ManifestDocument(sha[:12], path.resolve(), label, script, sha))
     return documents
 
 
-def _documents_for(args: argparse.Namespace, runs: Sequence[RunSpec]) -> list[ManifestDocument]:
+def _documents_for(
+    args: EvalArgs, eval_dir: Path, runs: Sequence[RunSpec]
+) -> list[ManifestDocument]:
     adhoc = {doc.id: doc for doc in _adhoc_documents(args)}
     needed = list(dict.fromkeys(spec.case.doc for spec in runs))
     corpus = [doc_id for doc_id in needed if doc_id not in adhoc]
-    manifest = load_manifest(args.eval_dir) if corpus else {}
+    manifest = load_manifest(eval_dir) if corpus else {}
     lacking = [doc_id for doc_id in corpus if doc_id not in manifest]
     if lacking:
-        raise _RefusedError(f"manifest lacks: {', '.join(lacking)}")
+        msg = f"manifest lacks: {', '.join(lacking)}"
+        raise _RefusedError(msg)
     documents = [manifest[doc_id] for doc_id in corpus]
     verify_documents(documents)
     return [*documents, *(adhoc[doc_id] for doc_id in needed if doc_id in adhoc)]
 
 
-def _targets(runs: Sequence[RunSpec], documents: Mapping[str, ManifestDocument]) -> dict[str, Any]:
+def _targets(
+    runs: Sequence[RunSpec], documents: Mapping[str, ManifestDocument]
+) -> dict[str, Target]:
     from eval import metrics
 
-    targets: dict[str, Any] = {}
+    targets: dict[str, Target] = {}
     for spec in runs:
         doc = documents[spec.case.doc]
         try:
             targets[spec.case.id] = metrics.target_for(spec.case.language, doc.label, doc.script)
         except ValueError as exc:
-            raise _RefusedError(f"{spec.case.id}: {exc}") from exc
+            msg = f"{spec.case.id}: {exc}"
+            raise _RefusedError(msg) from exc
     return targets
 
 
@@ -1065,9 +1490,6 @@ def _file_sha256(path: Path) -> str:
 
 def _llama_cpp_install() -> tuple[str | None, str | None]:
     """The installed llama-cpp-python version and its library dir, without importing it."""
-    import importlib.metadata
-    import importlib.util
-
     try:
         version: str | None = importlib.metadata.version("llama-cpp-python")
     except importlib.metadata.PackageNotFoundError:
@@ -1083,101 +1505,164 @@ def _peak_rss_bytes() -> int | None:
     if sys.platform == "win32":
         import psutil
 
-        return int(psutil.Process().memory_info().peak_wset)
+        # The stubs describe this platform's memory info; Windows' carries peak_wset.
+        memory = cast("PeakMemory", cast("object", psutil.Process().memory_info()))
+        return memory.peak_wset
     import resource
 
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
 
 def _default_n_ctx() -> int:
-    import inspect
-
     from docsummarizer.model_manager import Summarizer
 
-    return int(inspect.signature(Summarizer.__init__).parameters["n_ctx"].default)
+    default = cast("object", inspect.signature(Summarizer.__init__).parameters["n_ctx"].default)
+    if not isinstance(default, int):
+        msg = f"Summarizer's n_ctx default is not an int: {default!r}"
+        raise TypeError(msg)
+    return default
 
 
-def _call_lines(index: int, case_run: CaseRun) -> list[dict[str, Any]]:
-    where = {"run": index, "case": case_run.case, "seed": case_run.seed}
-    where["repetition"] = case_run.repetition
-    return [{"kind": "call", **where, **asdict(call)} for call in case_run.calls]
+def _call_lines(index: int, case_run: CaseRun) -> list[CallLine]:
+    return [
+        {
+            "kind": "call",
+            "run": index,
+            "case": case_run.case,
+            "seed": case_run.seed,
+            "repetition": case_run.repetition,
+            "seq": call.seq,
+            "messages": call.messages,
+            "kwargs": call.kwargs,
+            "stream": call.stream,
+            "content": call.content,
+            "finish_reason": call.finish_reason,
+            "usage": call.usage,
+            "perf": call.perf,
+            "error": call.error,
+        }
+        for call in case_run.calls
+    ]
 
 
-def _case_run_line(index: int, case_run: CaseRun) -> dict[str, Any]:
-    line = {"kind": "case_run", "run": index, **asdict(case_run)}
-    line["calls"] = len(case_run.calls)
-    return line
+def _case_run_line(index: int, case_run: CaseRun) -> CaseRunLine:
+    return {
+        "kind": "case_run",
+        "run": index,
+        "case": case_run.case,
+        "seed": case_run.seed,
+        "repetition": case_run.repetition,
+        "n_ctx": case_run.n_ctx,
+        "parts": case_run.parts,
+        "result": case_run.result,
+        "run_stats": case_run.run_stats,
+        "calls": len(case_run.calls),
+        "tokenized": case_run.tokenized,
+        "contention": case_run.contention,
+        "contended": case_run.contended,
+        "error": case_run.error,
+        "metrics": case_run.metrics,
+    }
+
+
+@dataclass(frozen=True)
+class ModelBuild:
+    """How a tier run loads the model: the file, its default context and the hardware split."""
+
+    model: Path
+    n_ctx: int
+    n_threads: int | None
+    n_gpu_layers: int
 
 
 def _run_passes(
-    args: argparse.Namespace,
+    build: ModelBuild,
     runs: Sequence[RunSpec],
     texts: Mapping[str, str],
-    targets: Mapping[str, Any],
+    targets: Mapping[str, Target],
     sink: IO[str],
-) -> tuple[list[dict[str, Any]], int | None]:
+) -> tuple[list[CaseRunLine], int | None]:
     """Run every pass, a split pass on its own model build; stream each case run's lines."""
     from eval import cases
 
     passes: list[tuple[int, list[RunSpec]]] = []
     for spec in runs:
-        n_ctx = cases.SPLIT_N_CTX if spec.case.split else args.n_ctx
+        n_ctx = cases.SPLIT_N_CTX if spec.case.split else build.n_ctx
         if passes and passes[-1][0] == n_ctx:
             passes[-1][1].append(spec)
         else:
             passes.append((n_ctx, [spec]))
-    lines: list[dict[str, Any]] = []
+    lines: list[CaseRunLine] = []
     threads: int | None = None
 
     def stream(case_run: CaseRun) -> None:
         line = _case_run_line(len(lines), case_run)
-        for record in [*_call_lines(len(lines), case_run), line]:
-            write_line(sink, record)
+        for call in _call_lines(len(lines), case_run):
+            write_line(sink, call)
+        write_line(sink, line)
         sink.flush()
         lines.append(line)
 
     for n_ctx, specs in passes:
         summarizer = build_summarizer(
-            args.model, n_ctx=n_ctx, n_threads=args.threads, n_gpu_layers=args.n_gpu_layers
+            build.model, n_ctx=n_ctx, n_threads=build.n_threads, n_gpu_layers=build.n_gpu_layers
         )
-        threads = getattr(summarizer, "n_threads", args.threads) if threads is None else threads
+        threads = getattr(summarizer, "n_threads", build.n_threads) if threads is None else threads
         try:
-            run_cases(summarizer, specs, texts, targets, on_run=stream)
+            # Each case run reaches the results file through ``stream`` as it ends.
+            _ = run_cases(summarizer, specs, texts, targets, on_run=stream)
         finally:
             summarizer.close()
     return lines, threads
 
 
-def _run_tier(args: argparse.Namespace) -> int:
+def _run_tier(args: EvalArgs) -> int:
     from eval import cases, metrics
 
+    if args.tier is None:
+        msg = "no mode chosen"
+        raise _RefusedError(msg)
     if tuple(args.seeds) != (0,):
-        raise _RefusedError("--seeds: seed 0 only until the seed API lands")
+        msg = "--seeds: seed 0 only until the seed API lands"
+        raise _RefusedError(msg)
     if args.eval_dir is None or args.model is None:
-        raise _RefusedError("a tier run needs --eval-dir and --model")
+        msg = "a tier run needs --eval-dir and --model"
+        raise _RefusedError(msg)
     if not args.model.is_file():
-        raise _RefusedError(f"model not found: {args.model}")
+        msg = f"model not found: {args.model}"
+        raise _RefusedError(msg)
     args.n_ctx = args.n_ctx or _default_n_ctx()
-    runs = expand_runs(_select_cases(args), args.seeds, args.repeat)
-    documents = {doc.id: doc for doc in _documents_for(args, runs)}
+    runs = expand_runs(_select_cases(args, args.tier), args.seeds, args.repeat)
+    documents = {doc.id: doc for doc in _documents_for(args, args.eval_dir, runs)}
     targets = _targets(runs, documents)
     texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
     model_sha = _file_sha256(args.model)
     git = git_state(_REPO)
     package = _REPO / "src" / _PACKAGE
     gated = derive_gated(package)
-    start = datetime.now(timezone.utc)
+    start = datetime.now(UTC)
     final = results_path(args.eval_dir, args.tier, (git.commit or "unknown")[:12], start)
     final.parent.mkdir(parents=True, exist_ok=True)
     partial = final.with_name(final.name + ".partial")
     with partial.open("w", encoding="utf-8") as sink:
-        lines, threads = _run_passes(args, runs, texts, targets, sink)
-    not_split = [line["case"] for line in lines if "@split" in line["case"] and line["parts"] < 2]
+        lines, threads = _run_passes(
+            ModelBuild(args.model, args.n_ctx, args.threads, args.n_gpu_layers),
+            runs,
+            texts,
+            targets,
+            sink,
+        )
+    not_split = [
+        line["case"]
+        for line in lines
+        if "@split" in line["case"] and line["parts"] < _SPLIT_MIN_PARTS
+    ]
+
     for case_id in not_split:
         print(f"not split: {case_id}")
     version, lib_dir = _llama_cpp_install()
     gpu = f"gpu:{Path(lib_dir).name}" if lib_dir else "gpu"
-    header = {
+    header: dict[str, object] = {
         "kind": "header",
         "metric_version": metrics.METRIC_VERSION,
         "commit": git.commit,
@@ -1211,7 +1696,7 @@ def _run_tier(args: argparse.Namespace) -> int:
         "not_split": not_split,
         "machine_id": machine_id(),
         "utc_start": start.isoformat(),
-        "utc_end": datetime.now(timezone.utc).isoformat(),
+        "utc_end": datetime.now(UTC).isoformat(),
         "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
         "contention": [
             {"run": line["run"], "case": line["case"], **line["contention"]} for line in lines
@@ -1220,7 +1705,7 @@ def _run_tier(args: argparse.Namespace) -> int:
     }
     with final.open("x", encoding="utf-8") as out:
         write_line(out, header)
-        out.write(partial.read_text(encoding="utf-8"))
+        _ = out.write(partial.read_text(encoding="utf-8"))
     partial.unlink()
     print(f"results: {final}")
     print_table(lines)
@@ -1237,20 +1722,21 @@ def _run_tier(args: argparse.Namespace) -> int:
 RESCORE_ARMS = ("coverage_only", "production")
 
 
-class ReplayMismatch(Exception):  # noqa: N818 - a refusal, named for what it found
+class ReplayMismatchError(Exception):
     """This tree asked the model something the stored run did not."""
 
     def __init__(self, seq: int, field: str) -> None:
+        """Name the call (``seq``) and the request field that differed."""
         super().__init__(f"seq {seq} field {field}")
-        self.seq = seq
-        self.field = field
+        self.seq: int = seq
+        self.field: str = field
 
 
-def _normalized(value: Any) -> Any:
-    return json.loads(json.dumps(value))
+def _normalized(value: object) -> object:
+    return cast("object", json.loads(json.dumps(value)))
 
 
-class ReplayLlama:
+class ReplayLlama(_ChatModel):
     """Answers each completion with the stored one, once the request matches it.
 
     It has no ``ctx``, so the pipeline reads no counters and installs no abort
@@ -1258,40 +1744,58 @@ class ReplayLlama:
     fall back, and the replay must still report the first difference.
     """
 
-    def __init__(self, calls: Sequence[Mapping[str, Any]], tokenized: Mapping[str, int]) -> None:
-        self._calls = list(calls)
-        self._tokenized = dict(tokenized)
-        self.consumed = 0
-        self.mismatch: ReplayMismatch | None = None
+    def __init__(self, calls: Sequence[CallLine], tokenized: Mapping[str, int]) -> None:
+        """Replay ``calls`` in order; ``tokenized`` maps a text hash to its token count."""
+        self._calls: list[CallLine] = list(calls)
+        self._tokenized: dict[str, int] = dict(tokenized)
+        self.consumed: int = 0
+        self.mismatch: ReplayMismatchError | None = None
 
-    def _refuse(self, field: str) -> ReplayMismatch:
+    def _refuse(self, field: str) -> ReplayMismatchError:
         if self.mismatch is None:
-            self.mismatch = ReplayMismatch(self.consumed, field)
+            self.mismatch = ReplayMismatchError(self.consumed, field)
         return self.mismatch
 
-    def create_chat_completion(
-        self, *, messages: Sequence[Mapping[str, Any]], **kwargs: Any
-    ) -> dict[str, Any]:
-        kwargs.pop("stream", None)
+    @override
+    def _complete(
+        self, messages: Sequence[Mapping[str, str]], *, stream: bool, kwargs: dict[str, object]
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Return the stored answer when the request matches the stored one, else refuse.
+
+        A replay runs without a cancel check, so the pipeline never streams to it.
+        """
+        if stream:
+            msg = "stream"
+            raise self._refuse(msg)
         if self.mismatch is not None:
             raise self.mismatch
         if self.consumed >= len(self._calls):
-            raise self._refuse("call count")
+            msg = "call count"
+            raise self._refuse(msg)
         stored = self._calls[self.consumed]
         if _normalized([dict(message) for message in messages]) != stored["messages"]:
-            raise self._refuse("messages")
-        asked = _normalized({key: _jsonable(value) for key, value in kwargs.items()})
+            msg = "messages"
+            raise self._refuse(msg)
+        asked = {key: _normalized(_jsonable(value)) for key, value in kwargs.items()}
         for key in sorted(set(asked) | set(stored["kwargs"])):
             if asked.get(key) != stored["kwargs"].get(key):
                 raise self._refuse(key)
         self.consumed += 1
         if stored["error"]:
             raise RuntimeError(stored["error"])  # the stored call failed: fail the same way
-        message = {"role": "assistant", "content": stored["content"]}
-        choice = {"message": message, "finish_reason": stored["finish_reason"]}
+        message: ChatCompletionResponseMessage = {
+            "role": "assistant",
+            "content": stored["content"],
+        }
+        choice: ChatCompletionResponseChoice = {
+            "message": message,
+            "finish_reason": stored["finish_reason"],
+        }
         return {"choices": [choice], "usage": stored["usage"]}
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
+        """Placeholder tokens, as many as the stored run counted for this text."""
+        del add_bos  # the stored count already reflects it
         # Message equality still guards an unknown text: any chunking difference
         # changes the next request.
         return [0] * self._tokenized.get(hashlib.sha256(text).hexdigest(), len(text) // 3)
@@ -1308,36 +1812,45 @@ def replay_summarizer(llm: ReplayLlama, n_ctx: int) -> Summarizer:
 
 
 @contextmanager
-def accept_every_match() -> Iterator[None]:
+def accept_every_match() -> Generator[None, None, None]:
     """Accept every candidate sentence the coverage pre-filter keeps, then restore."""
     from docsummarizer import provenance
 
     original = provenance.is_verified_match
-    provenance.is_verified_match = lambda quote, span_text: True
+
+    def accept(quote: str, span_text: str) -> bool:
+        del quote, span_text  # every candidate is accepted
+        return True
+
+    provenance.is_verified_match = accept
+
     try:
         yield
     finally:
         provenance.is_verified_match = original
 
 
-def _cited_points(result: Mapping[str, Any]) -> list[tuple[int, Mapping[str, Any]]]:
-    """``(index, point)`` for each cited point: the Detailed points, then each section."""
-    sections = result.get("sections") or {}
-    points = [*(result.get("points") or []), *(p for s in sections.values() for p in s)]
-    return [(i, point) for i, point in enumerate(points) if point.get("citation") is not None]
+def _cited_points(result: ResultRecord) -> list[tuple[int, PointLine, SpanRecord]]:
+    """``(index, point, span)`` for each cited point: the Detailed points, then each section."""
+    sections = result["sections"] or {}
+    points = [*result["points"], *(p for s in sections.values() for p in s)]
+    return [
+        (i, point, span)
+        for i, point in enumerate(points)
+        if (span := point["citation"]) is not None
+    ]
 
 
-def audit_citations(
-    result: Mapping[str, Any], quotes: Mapping[str, str], document: str
-) -> list[str]:
-    """Each cited point whose span does not verifiably hold the model's quote, or is not
-    the document's own text at its offsets.
+def audit_citations(result: ResultRecord, quotes: Mapping[str, str], document: str) -> list[str]:
+    """Each cited point whose span fails to hold the model's quote or the document's text.
+
+    A span fails when it does not verifiably hold the quote, or is not the
+    document's own text at its offsets.
     """
     from docsummarizer import provenance
 
     failures: list[str] = []
-    for index, point in _cited_points(result):
-        span = point["citation"]
+    for index, point, span in _cited_points(result):
         if not provenance.is_verified_match(quotes.get(point["text"], ""), span["quote"]):
             failures.append(f"point {index}: the span does not hold the quote")
         elif document[span["start"] : span["end"]] != span["quote"]:
@@ -1356,16 +1869,26 @@ def _case_of(case_id: str) -> Case:
     return cases.Case(doc, summary_type, language, split=split, m12a=m12a)
 
 
-def _call_record(line: Mapping[str, Any]) -> CallRecord:
-    return CallRecord(**{f.name: line[f.name] for f in fields(CallRecord)})
+def _call_record(line: CallLine) -> CallRecord:
+    return CallRecord(
+        seq=line["seq"],
+        messages=line["messages"],
+        kwargs=line["kwargs"],
+        stream=line["stream"],
+        content=line["content"],
+        finish_reason=line["finish_reason"],
+        usage=line["usage"],
+        perf=line["perf"],
+        error=line["error"],
+    )
 
 
 def _replay(
-    case: Case, text: str, n_ctx: int, line: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]
+    case: Case, text: str, n_ctx: int, line: CaseRunLine, calls: Sequence[CallLine]
 ) -> tuple[StructuredSummary | None, str | None]:
     """One arm's replay of a case run: its result or the error it raised.
 
-    Raises ``ReplayMismatch`` when this tree asks anything the stored run did
+    Raises ``ReplayMismatchError`` when this tree asks anything the stored run did
     not, or fewer calls than it made.
     """
     llm = ReplayLlama(calls, line["tokenized"])
@@ -1379,30 +1902,47 @@ def _replay(
     if llm.mismatch is not None:
         raise llm.mismatch
     if llm.consumed != len(calls):
-        raise ReplayMismatch(llm.consumed, "call count")
+        raise ReplayMismatchError(llm.consumed, "call count")
     return result, error
 
 
-def _rescore_documents(eval_dir: Path, header: Mapping[str, Any]) -> dict[str, ManifestDocument]:
+def _rescore_documents(eval_dir: Path, header: Mapping[str, object]) -> dict[str, ManifestDocument]:
     manifest = load_manifest(eval_dir)
+    recorded = _object_dict(header.get("documents"))
+    if recorded is None:
+        msg = "the run's header records no documents"
+        raise _RefusedError(msg)
     documents: dict[str, ManifestDocument] = {}
-    for doc_id, recorded in header["documents"].items():
+    for doc_id, entry in recorded.items():
         doc = manifest.get(doc_id)
         if doc is None:
-            raise _RefusedError(f"{doc_id}: not in the manifest (ad-hoc runs are not rescored)")
-        if doc.sha256 != recorded["sha256"]:
-            raise _RefusedError(f"{doc_id}: the manifest's sha256 differs from the run's")
+            msg = f"{doc_id}: not in the manifest (ad-hoc runs are not rescored)"
+            raise _RefusedError(msg)
+        if doc.sha256 != (_object_dict(entry) or {}).get("sha256"):
+            msg = f"{doc_id}: the manifest's sha256 differs from the run's"
+            raise _RefusedError(msg)
         documents[doc_id] = doc
     verify_documents(documents.values())
     return documents
 
 
-def _arm_sums(m7s: Sequence[Mapping[str, Any]]) -> dict[str, int]:
-    keys = ("points", "cited", "tight", "whole_document", "quotes", "verbatim")
-    return {key: sum(m7[key] for m7 in m7s) for key in keys}
+_M7_SUMS: tuple[
+    Literal["points", "cited", "tight", "whole_document", "quotes", "verbatim"], ...
+] = (
+    "points",
+    "cited",
+    "tight",
+    "whole_document",
+    "quotes",
+    "verbatim",
+)
 
 
-def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
+def _arm_sums(m7s: Sequence[M7Score | None]) -> dict[str, int]:
+    return {key: sum(m7[key] for m7 in m7s if m7 is not None) for key in _M7_SUMS}
+
+
+def print_arms(case_runs: Sequence[RescoredLine]) -> None:
     """M7 per cell and aggregate in both arms, and the cited share the strict check costs."""
     scored = [
         run
@@ -1411,7 +1951,7 @@ def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
     ]
     if not scored:
         return
-    cells: dict[str, list[Mapping[str, Any]]] = {}
+    cells: dict[str, list[RescoredLine]] = {}
     for run in scored:
         cells.setdefault("/".join(run["metrics"]["cell"]), []).append(run)
     for scope, runs in [*sorted(cells.items()), ("aggregate", scored)]:
@@ -1433,15 +1973,15 @@ def print_arms(case_runs: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _rescore_one(
-    line: Mapping[str, Any],
-    stored: Sequence[Mapping[str, Any]],
+    line: CaseRunLine,
+    stored: Sequence[CallLine],
     doc: ManifestDocument,
     text: str,
     done: Sequence[CaseRun],
-) -> tuple[CaseRun, dict[str, Any] | None]:
+) -> tuple[CaseRun, M7Score | None]:
     """Replay one case run in both arms: the production case run and the coverage-only M7.
 
-    A production-arm mismatch raises ``ReplayMismatch``; a coverage-only one is
+    A production-arm mismatch raises ``ReplayMismatchError``; a coverage-only one is
     printed and leaves that arm's M7 ``None``.
     """
     from eval import metrics
@@ -1450,47 +1990,43 @@ def _rescore_one(
     try:
         target = metrics.target_for(case.language, doc.label, doc.script)
     except ValueError as exc:
-        raise _RefusedError(f"{case.id}: {exc}") from exc
+        msg = f"{case.id}: {exc}"
+        raise _RefusedError(msg) from exc
     records = [_call_record(call) for call in stored]
+    asked = ScoringInput(case, text, target, line["parts"])
     result, error = _replay(case, text, line["n_ctx"], line, stored)
-    coverage_m7: dict[str, Any] | None = None
+    coverage_m7: M7Score | None = None
     try:
         with accept_every_match():
             covered, _ = _replay(case, text, line["n_ctx"], line, stored)
-    except ReplayMismatch as exc:
+    except ReplayMismatchError as exc:
         print(f"coverage-only arm: replay mismatch: {exc} ({case.id})")
     else:
-        coverage_m7 = score_case_run(case, covered, records, text, target, parts=line["parts"])[
-            "M7"
-        ]
-    result_dict = asdict(result) if result is not None else None
-    if result_dict is not None:
-        result_dict.pop("run_stats", None)
+        coverage_m7 = score_case_run(asked, covered, records)["M7"]
     case_run = CaseRun(
         case=case.id,
         seed=line["seed"],
         repetition=line["repetition"],
         n_ctx=line["n_ctx"],
         parts=line["parts"],
-        result=result_dict,
+        result=_result_record(result) if result is not None else None,
         run_stats=line["run_stats"],
         calls=records,
         tokenized=line["tokenized"],
         contention=line["contention"],
         contended=line["contended"],
         error=error,
+        metrics=score_case_run(asked, result, records),
     )
-    case_run.metrics = score_case_run(case, result, records, text, target, parts=line["parts"])
     if case.m12a:
         case_run.metrics["M12a"] = _m12a(_first_run_of(case, case_run.seed, done), case_run)
     return case_run, coverage_m7
 
 
-def _rescore_header(source: Path, header: Mapping[str, Any]) -> dict[str, Any]:
-    """The generating run's header, plus the tree that scored it again."""
+def _rescore_header(source: Path, header: Mapping[str, object], git: GitState) -> dict[str, object]:
+    """The generating run's header, plus the tree (``git``) that scored it again."""
     from eval import metrics
 
-    git = git_state(_REPO)
     package = _REPO / "src" / _PACKAGE
     scored_by = {
         "commit": git.commit,
@@ -1515,17 +2051,19 @@ def rescore(eval_dir: Path, source: Path) -> int:
     try:
         results = read_results(source)
     except (OSError, ValueError) as exc:
-        raise _RefusedError(f"--rescore {source}: {exc}") from exc
+        msg = f"--rescore {source}: {exc}"
+        raise _RefusedError(msg) from exc
     if not results.case_runs:
-        raise _RefusedError(f"--rescore {source}: zero case runs")
+        msg = f"--rescore {source}: zero case runs"
+        raise _RefusedError(msg)
     documents = _rescore_documents(eval_dir, results.header)
     texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
-    calls_of: dict[int, list[dict[str, Any]]] = {}
+    calls_of: dict[int, list[CallLine]] = {}
     for call in results.calls:
         calls_of.setdefault(call["run"], []).append(call)
 
     done: list[CaseRun] = []
-    lines: list[dict[str, Any]] = []
+    lines: list[RescoredLine] = []
     citations = 0
     failures: list[str] = []
     for line in results.case_runs:
@@ -1533,7 +2071,7 @@ def rescore(eval_dir: Path, source: Path) -> int:
         stored, text = calls_of.get(line["run"], []), texts[doc_id]
         try:
             case_run, coverage_m7 = _rescore_one(line, stored, documents[doc_id], text, done)
-        except ReplayMismatch as exc:
+        except ReplayMismatchError as exc:
             print(f"replay mismatch: {exc} ({line['case']})")
             return 2
         done.append(case_run)
@@ -1543,9 +2081,10 @@ def rescore(eval_dir: Path, source: Path) -> int:
             failures += [f"{case_run.case} {failure}" for failure in audit]
         lines.append({**_case_run_line(line["run"], case_run), "m7_coverage_only": coverage_m7})
 
-    header = _rescore_header(source, results.header)
-    commit = header["scored_by"]["commit"] or "unknown"
-    plain = results_path(eval_dir, str(header["tier"]), commit[:12], datetime.now(timezone.utc))
+    git = git_state(_REPO)
+    header = _rescore_header(source, results.header, git)
+    commit = git.commit or "unknown"
+    plain = results_path(eval_dir, str(header["tier"]), commit[:12], datetime.now(UTC))
     final = plain.with_name(f"{plain.stem}-rescore.jsonl")
     final.parent.mkdir(parents=True, exist_ok=True)
     with final.open("x", encoding="utf-8") as out:
@@ -1571,7 +2110,7 @@ def rescore(eval_dir: Path, source: Path) -> int:
 COMPARE_FIELDS = ("machine_id", "backend", "metric_version", "corpus_hash", "seeds", "cases")
 
 
-def _case_scores(case_runs: Sequence[Mapping[str, Any]]) -> list[CaseScore]:
+def _case_scores(case_runs: Sequence[CaseRunLine]) -> list[CaseScore]:
     """A verdict's view of each repetition-0 case run; repetitions exist for timing only."""
     from eval import metrics
 
@@ -1580,10 +2119,17 @@ def _case_scores(case_runs: Sequence[Mapping[str, Any]]) -> list[CaseScore]:
         if line.get("repetition", 0) != 0:
             continue
         scored = line["metrics"]
+        # Every hard metric by name; a name missing here is a KeyError, never a skip.
+        by_name = {
+            "M1": scored.get("M1"),
+            "M2": scored.get("M2"),
+            "M4": scored.get("M4"),
+            "M12a": scored.get("M12a"),
+        }
         hard = {
-            name: int(scored[name]["violations"])
+            name: int(score["violations"])
             for name in metrics.HARD_METRICS
-            if scored.get(name) is not None
+            if (score := by_name[name]) is not None
         }
         m7 = scored.get("M7")
         proportion = {"M7": (int(m7["tight"]), int(m7["points"]))} if m7 is not None else {}
@@ -1608,13 +2154,15 @@ def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
     from eval import metrics
 
     arms: list[Results] = []
-    for path in (b, c):
-        if not path.exists() and eval_dir is not None and path.name == str(path):
-            path = eval_dir / "results" / path  # noqa: PLW2901 - the file actually read
+    for given in (b, c):
+        path = given  # the file actually read
+        if not given.exists() and eval_dir is not None and given.name == str(given):
+            path = eval_dir / "results" / given
         try:
             arms.append(read_results(path))
         except (OSError, ValueError) as exc:
-            raise _RefusedError(f"--compare {path}: {exc}") from exc
+            msg = f"--compare {path}: {exc}"
+            raise _RefusedError(msg) from exc
     base, candidate = arms
     lacking = [
         f"{arm} {name}"
@@ -1623,13 +2171,16 @@ def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
         if name not in results.header
     ]
     if lacking:
-        raise _RefusedError(f"header lacks: {', '.join(lacking)}")
+        msg = f"header lacks: {', '.join(lacking)}"
+        raise _RefusedError(msg)
     differ = [name for name in COMPARE_FIELDS if base.header[name] != candidate.header[name]]
     if differ:
-        raise _RefusedError(f"the arms differ in {', '.join(differ)}")
+        msg = f"the arms differ in {', '.join(differ)}"
+        raise _RefusedError(msg)
     b_scores, c_scores = _case_scores(base.case_runs), _case_scores(candidate.case_runs)
     if not b_scores or not c_scores:
-        raise _RefusedError("zero case runs")
+        msg = "zero case runs"
+        raise _RefusedError(msg)
 
     outcome = metrics.verdict(b_scores, c_scores)
     print(f"verdict: B {len(b_scores)} case runs, C {len(c_scores)} case runs (repetition 0)")
@@ -1689,6 +2240,47 @@ def _perf_sums(calls: Sequence[CallRecord]) -> dict[str, float]:
     return {name: sum((call.perf or {}).get(name, 0) for call in calls) for name in _PERF_FIELDS}
 
 
+_SECONDS_TOLERANCE = 1e-6  # run_stats seconds against the counters' milliseconds
+
+
+def _counter_failures(stats: RunStats, sums: Mapping[str, float]) -> list[str]:
+    """The run_stats fields that disagree with the summed counter deltas."""
+    failed = [
+        key
+        for key, got, want in (
+            ("prompt_evaluated", stats.prompt_evaluated, sums["n_p_eval"]),
+            ("generated_tokens", stats.generated_tokens, sums["n_eval"]),
+        )
+        if got != want
+    ]
+    for key, got, want_ms in (
+        ("prompt_seconds", stats.prompt_seconds, sums["t_p_eval_ms"]),
+        ("generation_seconds", stats.generation_seconds, sums["t_eval_ms"]),
+    ):
+        if got is None or abs(got - want_ms / 1000) > _SECONDS_TOLERANCE:
+            failed.append(key)
+    return failed
+
+
+def _usage_failures(last: CallRecord, n_tokens: object) -> list[str]:
+    """The last call's usage against the context's token count, within one token."""
+    usage = last.usage or {}
+    n_eval = (last.perf or {}).get("n_eval", 0)
+    if not isinstance(n_tokens, int) or "prompt_tokens" not in usage:
+        return ["usage"]
+    failed: list[str] = []
+    prompt_tokens = usage["prompt_tokens"]
+    if abs((n_tokens - n_eval) - prompt_tokens) > 1:
+        failed.append(
+            f"prompt_tokens (usage {prompt_tokens}, n_tokens - n_eval {n_tokens - n_eval:g})"
+        )
+    if abs(n_eval - usage.get("completion_tokens", -10)) > 1:
+        failed.append(
+            f"completion_tokens (usage {usage.get('completion_tokens')}, n_eval {n_eval:g})"
+        )
+    return failed
+
+
 def _runstats_leg(
     name: str, summarizer: Summarizer, capture: CapturingLlama, *, reset: bool, stream: bool
 ) -> list[str] | None:
@@ -1701,7 +2293,6 @@ def _runstats_leg(
     if not capture.calls:
         return None
     stats, sums, last = result.run_stats, _perf_sums(capture.calls), capture.calls[-1]
-    usage = last.usage or {}
     n_tokens = getattr(capture, "n_tokens", None)
     print(
         f"leg {name}: calls={len(capture.calls)} deltas "
@@ -1725,45 +2316,19 @@ def _runstats_leg(
     )
     if stats is None:
         return ["run_stats"]
-    failed = [
-        key
-        for key, got, want in (
-            ("prompt_evaluated", stats.prompt_evaluated, sums["n_p_eval"]),
-            ("generated_tokens", stats.generated_tokens, sums["n_eval"]),
-        )
-        if got != want
-    ]
-    for key, got, want_ms in (
-        ("prompt_seconds", stats.prompt_seconds, sums["t_p_eval_ms"]),
-        ("generation_seconds", stats.generation_seconds, sums["t_eval_ms"]),
-    ):
-        if got is None or abs(got - want_ms / 1000) > 1e-6:
-            failed.append(key)
+    failed = _counter_failures(stats, sums)
     if name == "blocking":
-        n_eval = (last.perf or {}).get("n_eval", 0)
-        if not isinstance(n_tokens, int) or "prompt_tokens" not in usage:
-            failed.append("usage")
-        else:
-            if abs((n_tokens - n_eval) - usage["prompt_tokens"]) > 1:
-                failed.append(
-                    f"prompt_tokens (usage {usage['prompt_tokens']}, n_tokens - n_eval {n_tokens - n_eval:g})"
-                )
-            if abs(n_eval - usage.get("completion_tokens", -10)) > 1:
-                failed.append(
-                    f"completion_tokens (usage {usage.get('completion_tokens')}, n_eval {n_eval:g})"
-                )
+        failed.extend(_usage_failures(last, n_tokens))
+    evaluated, prompt_tokens = stats.prompt_evaluated, stats.prompt_tokens
     if name == "prefix repeat" and not (
-        stats.prompt_evaluated is not None
-        and stats.prompt_tokens is not None
-        and stats.prompt_evaluated < stats.prompt_tokens
+        evaluated is not None and prompt_tokens is not None and evaluated < prompt_tokens
     ):
-        failed.append(
-            f"prefix (prompt_evaluated {stats.prompt_evaluated}, prompt_tokens {stats.prompt_tokens})"
-        )
+        failed.append(f"prefix (prompt_evaluated {evaluated}, prompt_tokens {prompt_tokens})")
+
     return failed
 
 
-def check_runstats(args: argparse.Namespace) -> int:
+def check_runstats(args: EvalArgs) -> int:
     """The request counters against llama.cpp's own: blocking, streamed, and a prefix repeat."""
     if args.model is None or not args.model.is_file():
         print("runstats: needs --model <gguf>")
@@ -1775,9 +2340,8 @@ def check_runstats(args: argparse.Namespace) -> int:
         n_gpu_layers=args.n_gpu_layers,
     )
     try:
-        capture = CapturingLlama(summarizer.llm, summarizer._perf_snapshot)
-        summarizer.llm = capture
-        if summarizer._perf_snapshot() is None:
+        capture = capture_calls(summarizer)
+        if summarizer.perf_snapshot() is None:
             print("Counters unavailable: llama_perf_context missing")
             return 2
         passed = 0
@@ -1798,15 +2362,15 @@ def check_runstats(args: argparse.Namespace) -> int:
     return 0 if passed == len(legs) else 1
 
 
-CHECKS: dict[str, Callable[[argparse.Namespace], int]] = {"runstats": check_runstats}
+CHECKS: dict[str, Callable[[EvalArgs], int]] = {"runstats": check_runstats}
 
 
-def run_checks(args: argparse.Namespace) -> int:
-    """Run each named check; 2 for an unknown or empty list, else the worst exit code."""
-    names = [name.strip() for name in args.checks.split(",") if name.strip()]
+def run_checks(listed: str, args: EvalArgs) -> int:
+    """Run each check ``listed`` names; 2 for an unknown or empty list, else the worst exit code."""
+    names = [name.strip() for name in listed.split(",") if name.strip()]
     unknown = [name for name in names if name not in CHECKS]
     if not names or unknown:
-        print(f"refused: --checks {args.checks!r}: known checks are {', '.join(CHECKS)}")
+        print(f"refused: --checks {listed!r}: known checks are {', '.join(CHECKS)}")
         return 2
     return max(CHECKS[name](args) for name in names)
 
@@ -1828,8 +2392,6 @@ def _rate_line(name: str, num: int, den: int, bar: float) -> bool:
 
 def self_test_language(path: Path) -> int:
     """The M2 classifier's three error rates over a labelled set of sentences."""
-    import random
-
     from eval import metrics
 
     by_label: dict[str, list[str]] = {}
@@ -1841,11 +2403,11 @@ def self_test_language(path: Path) -> int:
         return 2
     for text_line in raw:
         try:
-            row = json.loads(text_line) if text_line.strip() else None
+            row = _object_dict(cast("object", json.loads(text_line))) if text_line.strip() else None
         except ValueError:
             row = None
-        text = row.get("text") if isinstance(row, dict) else None
-        label = row.get("label") if isinstance(row, dict) else None
+        text = row.get("text") if row is not None else None
+        label = row.get("label") if row is not None else None
         if not isinstance(text, str) or not isinstance(label, str) or not text or not label:
             skipped += 1 if text_line.strip() else 0
             continue
@@ -1865,7 +2427,7 @@ def self_test_language(path: Path) -> int:
         (t, label) for label, texts in by_label.items() for t in texts if metrics.is_scored(t)
     ]
     wrong = sum(1 for text, label in scored if metrics.classify_unit(text) != label)
-    rng = random.Random(0)  # noqa: S311 - a reproducible sample, not a secret
+    rng = random.Random(0)  # a reproducible sample, not a secret
     labels = sorted(by_label)
     false_fail = missed = 0
     for _ in range(_SELF_TEST_OUTPUTS):
@@ -1886,10 +2448,12 @@ def self_test_language(path: Path) -> int:
 
 def run_self_test(kind_and_arg: Sequence[str]) -> int:
     """``--self-test KIND [ARG]``; the only kind so far is ``language <set>``."""
-    if len(kind_and_arg) != 2 or kind_and_arg[0] != "language":
-        print("refused: --self-test takes: language <labelled set>")
-        return 2
-    return self_test_language(Path(kind_and_arg[1]))
+    match kind_and_arg:
+        case ["language", labelled_set]:
+            return self_test_language(Path(labelled_set))
+        case _:
+            print("refused: --self-test takes: language <labelled set>")
+            return 2
 
 
 # The default window of a standalone contention count, in seconds.
@@ -1922,9 +2486,25 @@ def contention_report(seconds: float) -> int:
     return 1 if outcome.contended else 0
 
 
+def _run_mode(args: EvalArgs) -> int:
+    """The one mode the command line chose; a tier run when no other is."""
+    if args.rescore is not None and args.eval_dir is not None:
+        return rescore(args.eval_dir, args.rescore)
+    if args.compare is not None:
+        baseline, candidate = args.compare
+        return compare(args.eval_dir, baseline, candidate)
+    if args.checks is not None:
+        return run_checks(args.checks, args)
+    if args.self_test is not None:
+        return run_self_test(args.self_test)
+    if args.contention is not None:
+        return contention_report(args.contention)
+    return _run_tier(args)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, bootstrap app data, then run the chosen mode."""
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv, namespace=EvalArgs())
     if args.rescore is not None and args.eval_dir is None:
         print("refused: --rescore needs --eval-dir")
         return 2
@@ -1934,16 +2514,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         app_data = Path(tempfile.mkdtemp(prefix="docsummarizer-eval-"))
         print(f"app data: {app_data}")
     bootstrap(app_data)
-    modes: list[tuple[object, Callable[[], int]]] = [
-        (args.rescore, lambda: rescore(args.eval_dir, args.rescore)),
-        (args.compare, lambda: compare(args.eval_dir, *args.compare)),
-        (args.checks, lambda: run_checks(args)),
-        (args.self_test, lambda: run_self_test(args.self_test)),
-        (args.contention, lambda: contention_report(args.contention)),
-    ]
-    chosen = next((mode for value, mode in modes if value is not None), lambda: _run_tier(args))
     try:
-        return chosen()
+        return _run_mode(args)
     except (_RefusedError, ManifestError) as exc:
         print(f"refused: {exc}")
         return 2

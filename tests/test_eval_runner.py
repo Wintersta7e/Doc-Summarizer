@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for the evaluation runner under ``scripts/eval``.
 
 Everything here runs without a model: the case matrix, its budgets and the
@@ -7,20 +8,27 @@ package's configuration are checked as data, and the runner against fakes.
 from __future__ import annotations
 
 import ast
+import dataclasses
+import functools
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
-from collections import namedtuple
+import time
+import tomllib
+import types
+from argparse import Namespace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, NamedTuple, NoReturn, cast
 
-import psutil
 import pytest
-from eval import cases, metrics, run
+from typing_extensions import override
 
 import docsummarizer
 from docsummarizer import model_manager, paths, provenance
@@ -30,6 +38,22 @@ from docsummarizer.model_manager import (
     SUMMARY_TYPES,
     Summarizer,
 )
+from eval import cases, metrics, run
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from typing import TypeAlias
+
+    from docsummarizer.model_manager import (
+        ChatModel,
+        CreateChatCompletionResponse,
+        CreateChatCompletionStreamResponse,
+    )
+
+    # A fake's answer to the messages and options of one completion.
+    _Respond: TypeAlias = Callable[[Sequence[Mapping[str, str]], Mapping[str, object]], str]
+
+_LOG = logging.getLogger(__name__)
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -37,7 +61,7 @@ _REPO = Path(__file__).resolve().parents[1]
 def test_tier_matrices_match_the_spec() -> None:
     """The tiers hold exactly the cases the evaluation procedure names, in order."""
     for name, tier in cases.TIERS.items():
-        print(f"tier {name}: {len(tier)} cases")
+        _LOG.info("tier %s: %s cases", name, len(tier))
 
     smoke = cases.TIERS["smoke"]
     assert len(smoke) == 17
@@ -106,18 +130,20 @@ def test_split_documents_exceed_the_split_budget() -> None:
     Catches a split context whose budget a ~2-3k-token document fits in one
     part, so the split pass measures nothing multi-part.
     """
-    max_tokens = inspect.signature(Summarizer.summarize).parameters["max_tokens"].default
+    max_tokens = cast(
+        "int", inspect.signature(Summarizer.summarize).parameters["max_tokens"].default
+    )
     prose = cases.SPLIT_N_CTX - max_tokens - model_manager._SCAFFOLD_TOKENS
     json_budget = cases.SPLIT_N_CTX - max_tokens - model_manager._STRUCTURED_SCAFFOLD_TOKENS
-    print(f"split budgets at {cases.SPLIT_N_CTX}: prose {prose}, json {json_budget}")
+    _LOG.info("split budgets at %s: prose %s, json %s", cases.SPLIT_N_CTX, prose, json_budget)
 
     split_docs = sorted({case.doc for case in cases.TIERS["lang"] if case.split})
     budget = max(prose, json_budget)
     for doc in split_docs:
         margin = cases.DOCUMENTS[doc].tokens - budget
-        print(f"{doc}: margin {margin}")
+        _LOG.info("%s: margin %s", doc, margin)
         assert margin > 0, doc
-    print(f"documents checked: {len(split_docs)}")
+    _LOG.info("documents checked: %s", len(split_docs))
     assert split_docs
     assert cases.SPLIT_N_CTX == 4096
 
@@ -128,11 +154,11 @@ def test_no_real_path_in_harness_files() -> None:
     files = sorted(
         [*(_REPO / "scripts" / "eval").glob("*.py"), *(_REPO / "tests").glob("test_eval_*.py")]
     )
-    hits = []
+    hits: list[str] = []
     for path in files:
         text = path.read_text(encoding="utf-8")
         hits.extend(f"{path.name}: {needle}" for needle in needles if needle in text)
-    print(f"files scanned: {len(files)}; hits: {hits}")
+    _LOG.info("files scanned: %s; hits: %s", len(files), hits)
     assert files
     assert hits == []
 
@@ -143,21 +169,18 @@ def test_language_classifier_is_a_core_dependency() -> None:
     Catches the classifier kept in a temporary extra that a later change must
     delete.
     """
-    tomllib = pytest.importorskip("tomllib")
     config = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    project = config["project"]
+    project = cast("dict[str, object]", config["project"])
+    dependencies = cast("list[str]", project["dependencies"])
     matched = [
         entry
-        for entry in project["dependencies"]
+        for entry in dependencies
         if re.split(r"[<>=!~ \[]", entry, maxsplit=1)[0] == "py3langid"
     ]
-    print(f"core entry: {matched}")
-    assert "eval" not in project.get("optional-dependencies", {})
+    _LOG.info("core entry: %s", matched)
+    assert "eval" not in cast("dict[str, object]", project.get("optional-dependencies", {}))
     assert len(matched) == 1
-    overrides = config["tool"]["mypy"]["overrides"]
-    modules = [table.get("module", []) for table in overrides]
-    listed = sum(([m] if isinstance(m, str) else m).count("py3langid.*") for m in modules)
-    assert listed == 1
+    assert (_REPO / "typings" / "py3langid" / "langid.pyi").is_file()
 
 
 def test_gated_set_is_derived(tmp_path: Path) -> None:
@@ -168,7 +191,9 @@ def test_gated_set_is_derived(tmp_path: Path) -> None:
     """
     package = Path(docsummarizer.__file__).parent
     real = run.derive_gated(package)
-    print(f"gated files: {len(real.files)} {real.files}; missing roots: {real.missing_roots}")
+    _LOG.info(
+        "gated files: %s %s; missing roots: %s", len(real.files), real.files, real.missing_roots
+    )
     assert len(real.files) > 0
     assert {"model_manager.py", "provenance.py"} <= set(real.files)
     assert not set(run.NOT_GATED) & set(real.files)
@@ -178,29 +203,36 @@ def test_gated_set_is_derived(tmp_path: Path) -> None:
 
     synthetic = tmp_path / "pkg"
     synthetic.mkdir()
-    (synthetic / "model_manager.py").write_text(
+    _ = (synthetic / "model_manager.py").write_text(
         "from . import logger\n\n\ndef load():\n    from .extra import x\n\n    return x\n",
         encoding="utf-8",
     )
-    (synthetic / "extra.py").write_text("x = 1\n", encoding="utf-8")
-    (synthetic / "logger.py").write_text("", encoding="utf-8")
-    (synthetic / "provenance.py").write_text("", encoding="utf-8")
+    _ = (synthetic / "extra.py").write_text("x = 1\n", encoding="utf-8")
+    _ = (synthetic / "logger.py").write_text("", encoding="utf-8")
+    _ = (synthetic / "provenance.py").write_text("", encoding="utf-8")
     gated = run.derive_gated(synthetic)
-    print(f"synthetic gated: {gated.files}")
+    _LOG.info("synthetic gated: %s", gated.files)
     assert "extra.py" in gated.files
     assert "logger.py" not in gated.files
     assert gated.missing_roots == ("native.py", "hardware.py")
 
     before = run.gated_hash(synthetic, gated.files)
-    (synthetic / "extra.py").write_text("x = 2\n", encoding="utf-8")
+    _ = (synthetic / "extra.py").write_text("x = 2\n", encoding="utf-8")
     after_extra = run.gated_hash(synthetic, gated.files)
     assert after_extra != before
-    (synthetic / "logger.py").write_text("y = 1\n", encoding="utf-8")
+    _ = (synthetic / "logger.py").write_text("y = 1\n", encoding="utf-8")
     assert run.gated_hash(synthetic, run.derive_gated(synthetic).files) == after_extra
 
 
-_Times = namedtuple("_Times", "user system")
-_Map = namedtuple("_Map", "path")
+class _Times(NamedTuple):
+    user: float
+    system: float
+
+
+class _Map(NamedTuple):
+    path: str
+
+
 _OWN_PID = 999
 
 
@@ -208,15 +240,17 @@ class _FakeProcess:
     """A process as ``psutil`` reports it, with an invented executable name."""
 
     def __init__(
-        self, pid: int, exe: str, cpu: float, maps: tuple[str, ...] = (), denied: bool = False
+        self, pid: int, exe: str, cpu: float, maps: tuple[str, ...] = (), *, denied: bool = False
     ) -> None:
-        self.pid = pid
-        self._exe = exe
-        self._cpu = cpu
-        self._maps = maps
-        self._denied = denied
+        self.pid: int = pid
+        self._exe: str = exe
+        self._cpu: float = cpu
+        self._maps: tuple[str, ...] = maps
+        self._denied: bool = denied
 
-    def memory_maps(self) -> list[Any]:
+    def memory_maps(self) -> list[_Map]:
+        import psutil
+
         if self._denied:
             raise psutil.AccessDenied
         return [_Map(path) for path in self._maps]
@@ -224,11 +258,11 @@ class _FakeProcess:
     def exe(self) -> str:
         return self._exe
 
-    def cpu_times(self) -> Any:
+    def cpu_times(self) -> _Times:
         return _Times(self._cpu / 2, self._cpu / 2)
 
 
-def _processes(at_end: bool, only: tuple[int, ...] | None = None) -> list[_FakeProcess]:
+def _processes(*, at_end: bool, only: tuple[int, ...] | None = None) -> list[_FakeProcess]:
     table = [
         (101, "/usr/bin/inkwell-mapper", (2.0, 7.5), ("/x/libllama.so",), False),
         (102, "/opt/x/quill-llama-runner", (0.0, 5.0), (), False),
@@ -238,7 +272,7 @@ def _processes(at_end: bool, only: tuple[int, ...] | None = None) -> list[_FakeP
         (_OWN_PID, "/usr/bin/python3", (0.0, 60.0), ("/x/libggml.so",), False),
     ]
     return [
-        _FakeProcess(pid, exe, cpu[1] if at_end else cpu[0], maps, denied)
+        _FakeProcess(pid, exe, cpu[1] if at_end else cpu[0], maps, denied=denied)
         for pid, exe, cpu, maps, denied in table
         if only is None or pid in only
     ]
@@ -250,10 +284,10 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     Catches a presence count (an idle match marks the run), and ``unknown``
     counted toward contention.
     """
-    start = run.take_snapshot(_processes(False), _OWN_PID, host_processes=None)
-    end = run.take_snapshot(_processes(True), _OWN_PID, host_processes=None)
+    start = run.take_snapshot(_processes(at_end=False), _OWN_PID, host_processes=None)
+    end = run.take_snapshot(_processes(at_end=True), _OWN_PID, host_processes=None)
     result = run.count_contention(start, end)
-    print(f"full table: {result}")
+    _LOG.info("full table: %s", result)
     assert result.local.count == 2
     assert result.local.unknown == 1
     assert set(result.local.busy) == {"inkwell-mapper", "quill-llama-runner"}
@@ -263,11 +297,16 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     assert result.contended
 
     idle_only = (103, 104)
-    start = run.take_snapshot(_processes(False, idle_only), _OWN_PID, host_processes=None)
-    end = run.take_snapshot(_processes(True, idle_only), _OWN_PID, host_processes=None)
+    start = run.take_snapshot(
+        _processes(at_end=False, only=idle_only), _OWN_PID, host_processes=None
+    )
+    end = run.take_snapshot(_processes(at_end=True, only=idle_only), _OWN_PID, host_processes=None)
     quiet = run.count_contention(start, end)
-    print(
-        f"idle only: count={quiet.local.count} unknown={quiet.local.unknown} idle={quiet.local.idle}"
+    _LOG.info(
+        "idle only: count=%s unknown=%s idle=%s",
+        quiet.local.count,
+        quiet.local.unknown,
+        quiet.local.idle,
     )
     assert quiet.local.count == 0
     assert quiet.local.unknown == 1
@@ -295,7 +334,7 @@ def test_host_process_table_reads_float_seconds() -> None:
     of the host's table, so the host side counts nothing.
     """
     parsed = run.parse_host_processes(_host_table("2.25"))
-    print(f"parsed host table: {parsed}")
+    _LOG.info("parsed host table: %s", parsed)
     assert parsed == {4242: ("orchard-llama-host", 2.25)}
 
 
@@ -311,7 +350,7 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     busy = run.count_contention(
         start, run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("7.25"))
     )
-    print(f"(a) host advanced 5 s: {busy.host}")
+    _LOG.info("(a) host advanced 5 s: %s", busy.host)
     assert busy.host is not None
     assert busy.host.count == 1
     assert busy.contended
@@ -319,7 +358,7 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     idle = run.count_contention(
         start, run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("2.0"))
     )
-    print(f"(b) host idle: {idle.host}")
+    _LOG.info("(b) host idle: %s", idle.host)
     assert idle.host is not None
     assert idle.host.count == 0
     assert idle.host.idle == ("orchard-llama-host",)
@@ -327,19 +366,19 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
 
     blind = run.take_snapshot([], _OWN_PID, host_processes=lambda: None)
     unknown = run.count_contention(blind, blind)
-    print(f"(c) no interop: host_state={blind.host_state} host={unknown.host}")
+    _LOG.info("(c) no interop: host_state=%s host=%s", blind.host_state, unknown.host)
     assert blind.host_state == "unknown"
     assert unknown.host is not None
     assert unknown.host.count is None
     assert not unknown.contended
 
-    def refuse() -> str:
-        raise AssertionError("host process table read off WSL")
+    def refuse() -> NoReturn:
+        pytest.fail("host process table read off WSL")
 
     monkeypatch.setattr(run, "under_wsl", lambda: False)
     monkeypatch.setattr(run, "read_host_processes", refuse)
     off_wsl = run.snapshot_now()
-    print(f"(d) off WSL: host_state={off_wsl.host_state}")
+    _LOG.info("(d) off WSL: host_state=%s", off_wsl.host_state)
     assert off_wsl.host_state == "n/a"
     assert run.count_contention(off_wsl, off_wsl).host is None
 
@@ -361,7 +400,7 @@ def test_bootstrap_points_app_data_at_the_eval_dir(
     tree = ast.parse((_REPO / "scripts" / "eval" / "run.py").read_text(encoding="utf-8"))
     banned = {"eval", "cases", "metrics", "docsummarizer"}
     counted = 0
-    hits = []
+    hits: list[str] = []
     for node in tree.body:
         if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING":
             continue
@@ -373,24 +412,24 @@ def test_bootstrap_points_app_data_at_the_eval_dir(
             module = node.module or ""
             if node.level or module.split(".")[0] in banned:
                 hits.append("." * node.level + module)
-    print(f"module-level imports counted: {counted}; banned: {hits}")
+    _LOG.info("module-level imports counted: %s; banned: %s", counted, hits)
     assert counted > 0
     assert hits == []
 
 
-def _write_manifest(eval_dir: Path, docs: list[dict[str, Any]]) -> Path:
+def _write_manifest(eval_dir: Path, docs: Sequence[Mapping[str, object]]) -> Path:
     corpus = eval_dir / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
     manifest = corpus / "manifest.json"
-    manifest.write_text(json.dumps({"documents": docs}), encoding="utf-8")
+    _ = manifest.write_text(json.dumps({"documents": docs}), encoding="utf-8")
     return manifest
 
 
-def _manifest_entry(eval_dir: Path, doc_id: str, text: str, **fields: Any) -> dict[str, Any]:
+def _manifest_entry(eval_dir: Path, doc_id: str, text: str, **fields: object) -> dict[str, object]:
     corpus = eval_dir / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
-    (corpus / f"{doc_id}.txt").write_text(text, encoding="utf-8")
-    entry = {
+    _ = (corpus / f"{doc_id}.txt").write_text(text, encoding="utf-8")
+    entry: dict[str, object] = {
         "id": doc_id,
         "file": f"{doc_id}.txt",
         "label": cases.DOCUMENTS[doc_id].label,
@@ -405,7 +444,7 @@ def _manifest_entry(eval_dir: Path, doc_id: str, text: str, **fields: Any) -> di
 
 
 def test_manifest_absent_unreadable_and_mismatch(tmp_path: Path) -> None:
-    def refused(eval_dir: Path, verify: bool = False) -> str:
+    def refused(eval_dir: Path, *, verify: bool = False) -> str:
         def attempt() -> None:
             documents = run.load_manifest(eval_dir)
             if verify:
@@ -413,7 +452,7 @@ def test_manifest_absent_unreadable_and_mismatch(tmp_path: Path) -> None:
 
         with pytest.raises(run.ManifestError) as caught:
             attempt()
-        print(f"refused: {caught.value}")
+        _LOG.info("refused: %s", caught.value)
         return str(caught.value)
 
     assert "absent" in refused(tmp_path / "none")
@@ -424,32 +463,32 @@ def test_manifest_absent_unreadable_and_mismatch(tmp_path: Path) -> None:
 
     bad_json = tmp_path / "bad-json"
     (bad_json / "corpus").mkdir(parents=True)
-    (bad_json / "corpus" / "manifest.json").write_text("{not json", encoding="utf-8")
+    _ = (bad_json / "corpus" / "manifest.json").write_text("{not json", encoding="utf-8")
     assert "unreadable" in refused(bad_json)
 
     text = "Die Bäckerei im Dorf öffnet jeden Morgen um fünf Uhr."
     missing = tmp_path / "missing"
     entry = _manifest_entry(missing, "de-lit-s", text)
-    _write_manifest(missing, [entry])
+    _ = _write_manifest(missing, [entry])
     (missing / "corpus" / "de-lit-s.txt").unlink()
     assert "absent: de-lit-s" in refused(missing, verify=True)
 
     changed = tmp_path / "changed"
-    _write_manifest(changed, [_manifest_entry(changed, "de-lit-s", text, sha256="0" * 64)])
+    _ = _write_manifest(changed, [_manifest_entry(changed, "de-lit-s", text, sha256="0" * 64)])
     assert "sha256: de-lit-s" in refused(changed, verify=True)
 
     relabelled = tmp_path / "relabelled"
-    _write_manifest(relabelled, [_manifest_entry(relabelled, "de-lit-s", text, label="fr")])
+    _ = _write_manifest(relabelled, [_manifest_entry(relabelled, "de-lit-s", text, label="fr")])
     assert "label: de-lit-s" in refused(relabelled)
 
     no_script = tmp_path / "no-script"
-    _write_manifest(
+    _ = _write_manifest(
         no_script, [_manifest_entry(no_script, "zh-lit-s", "村里的面包店每天清晨开门。")]
     )
     assert "script: zh-lit-s" in refused(no_script)
 
     good = tmp_path / "good"
-    _write_manifest(good, [_manifest_entry(good, "de-lit-s", text)])
+    _ = _write_manifest(good, [_manifest_entry(good, "de-lit-s", text)])
     documents = run.load_manifest(good)
     run.verify_documents(documents.values())
     assert documents["de-lit-s"].label == "de"
@@ -460,14 +499,17 @@ def test_git_state_distinguishes_missing_git(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     no_repo = run.git_state(tmp_path)
-    print(f"not a repo: {no_repo}")
+    _LOG.info("not a repo: %s", no_repo)
     assert no_repo.commit is None
     assert no_repo.error
     assert "not a git repository" in no_repo.error
 
-    monkeypatch.setattr(run.shutil, "which", lambda name: None)
+    def no_tool(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", no_tool)
     no_git = run.git_state(tmp_path)
-    print(f"no git: {no_git}")
+    _LOG.info("no git: %s", no_git)
     assert no_git.commit is None
     assert no_git.error == "git not found"
 
@@ -490,13 +532,13 @@ _LONG_RESPONSE = "\n  " + ("The ferry crosses the river twice an hour. " * 120)[
 _PROSE = "The village bakery opens early every morning and sells fresh bread to everyone."
 
 
-def _document_of(messages: list[dict[str, str]]) -> str:
+def _document_of(messages: Sequence[Mapping[str, str]]) -> str:
     user = messages[-1]["content"]
     body = user.split(_DOC_MARKER, 1)[-1]
     return body.rsplit("\n\n", 1)[0]
 
 
-def _default_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
+def _default_respond(messages: Sequence[Mapping[str, str]], kwargs: Mapping[str, object]) -> str:
     """Valid Detailed/Structured JSON when asked for JSON, else prose."""
     if "response_format" in kwargs:
         sentences = provenance.split_sentences(_document_of(messages))
@@ -511,15 +553,22 @@ def _default_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> 
     return _PROSE
 
 
+def _completion(text: str) -> CreateChatCompletionResponse:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]
+    }
+
+
 class _EvalLLM:
     """A model stand-in: records ``reset`` / ``set_seed`` and every completion in ``events``."""
 
-    def __init__(self, respond: Any = None) -> None:
-        self.events: list[tuple[Any, ...]] = []
-        self.completions = 0
-        self.respond = respond or _default_respond
+    def __init__(self, respond: _Respond | None = None) -> None:
+        self.events: list[tuple[str] | tuple[str, int]] = []
+        self.completions: int = 0
+        self.respond: _Respond = respond or _default_respond
+        self.built: list[int] = []  # the n_ctx of each summarizer built around this fake
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, text: bytes, **_options: bool) -> list[int]:
         return [0] * (len(text) // 3)
 
     def reset(self) -> None:
@@ -528,51 +577,47 @@ class _EvalLLM:
     def set_seed(self, seed: int) -> None:
         self.events.append(("set_seed", seed))
 
-    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         self.completions += 1
         self.events.append(("call",))
         text = self.respond(messages, kwargs)
         if stream:
             return self._stream(text)
-        return {
-            "choices": [
-                {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
-            ]
-        }
+        return _completion(text)
 
-    def _stream(self, text: str):
+    def _stream(self, text: str) -> Iterator[CreateChatCompletionStreamResponse]:
         half = len(text) // 2
         for piece in (text[:half], text[half:]):
             yield {"choices": [{"delta": {"content": piece}, "finish_reason": None}]}
         yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
 
-def _shell(fake: Any, n_ctx: int) -> Summarizer:
+def _shell(fake: object, n_ctx: int) -> Summarizer:
     """A Summarizer around ``fake`` without running ``__init__`` (no llama-cpp needed)."""
     s = object.__new__(Summarizer)
-    s.llm = fake
+    s.llm = cast("ChatModel", fake)
     s.n_ctx = n_ctx
     return s
 
 
 @pytest.fixture
-def eval_llm(monkeypatch: pytest.MonkeyPatch) -> Any:
+def eval_llm(monkeypatch: pytest.MonkeyPatch) -> _EvalLLM:
     """Every ``build_summarizer`` returns a shell around one shared fake, at the asked context."""
     fake = _EvalLLM()
-    built: list[int] = []
 
-    def build(model: Path, *, n_ctx: int, n_threads: int | None, n_gpu_layers: int) -> Summarizer:
-        built.append(n_ctx)
+    def build(_model: Path, *, n_ctx: int, **_options: int | None) -> Summarizer:
+        fake.built.append(n_ctx)
         return _shell(fake, n_ctx)
 
     monkeypatch.setattr(run, "build_summarizer", build)
     monkeypatch.setattr(run, "snapshot_now", _empty_snapshot)
     monkeypatch.setattr(sys, "path", list(sys.path))
-    fake.built = built
     return fake
 
 
-def _empty_snapshot() -> Any:
+def _empty_snapshot() -> run.ContentionSnapshot:
     return run.ContentionSnapshot({}, 0, None, "n/a")
 
 
@@ -582,16 +627,15 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
     Catches capturing the post-processed return of ``_complete``, or only the
     final call.
     """
-    import socket
 
-    def refuse(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("socket")
+    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("socket")
 
     monkeypatch.setattr(socket, "socket", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
     snapshots: list[int] = []
 
-    def counted() -> Any:
+    def counted() -> run.ContentionSnapshot:
         snapshots.append(1)
         return _empty_snapshot()
 
@@ -608,7 +652,7 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
     targets = {spec.case.id: metrics.Target("en", None) for spec in specs}
     runs = run.run_cases(summarizer, specs, texts, targets)
 
-    segments: list[list[tuple[Any, ...]]] = []
+    segments: list[list[tuple[str] | tuple[str, int]]] = []
     for event in fake.events:
         if event == ("reset",):
             segments.append([])
@@ -616,8 +660,12 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(segments) == len(specs)
     for case_run, segment in zip(runs, segments, strict=True):
         made = sum(1 for event in segment if event == ("call",))
-        print(
-            f"{case_run.case}: captured {len(case_run.calls)}, made {made}, parts {case_run.parts}"
+        _LOG.info(
+            "%s: captured %s, made %s, parts %s",
+            case_run.case,
+            len(case_run.calls),
+            made,
+            case_run.parts,
         )
         assert segment[:2] == [("reset",), ("set_seed", 0)]
         assert len(case_run.calls) == made
@@ -626,7 +674,7 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
         assert case_run.contention["contended"] is False
         assert case_run.contended is False
     total = sum(len(case_run.calls) for case_run in runs)
-    print(f"captured {total} calls, the fake made {fake.completions}")
+    _LOG.info("captured %s calls, the fake made %s", total, fake.completions)
     assert total == fake.completions
     assert len(snapshots) == 2 * len(specs)
 
@@ -637,7 +685,7 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
 
     sources = sorted((_REPO / "scripts" / "eval").glob("*.py"))
     sites = sum(len(re.findall(r"\bSummarizer\(", p.read_text(encoding="utf-8"))) for p in sources)
-    print(f"Summarizer construction sites in scripts/eval: {sites}")
+    _LOG.info("Summarizer construction sites in scripts/eval: %s", sites)
     assert sites == 1
 
 
@@ -651,19 +699,30 @@ _DE_UNITS = (
 )
 
 
-def _call(seq: int, content: str, finish: str = "stop", json_call: bool = False) -> Any:
-    kwargs = {"response_format": {"type": "json_object"}} if json_call else {}
-    return run.CallRecord(seq, [], kwargs, False, content, finish, None, None, None)
+def _call(
+    seq: int, content: str, finish: str = "stop", *, json_call: bool = False
+) -> run.CallRecord:
+    kwargs: dict[str, object] = {"response_format": {"type": "json_object"}} if json_call else {}
+    return run.CallRecord(
+        seq,
+        [],
+        kwargs,
+        stream=False,
+        content=content,
+        finish_reason=finish,
+        usage=None,
+        perf=None,
+        error=None,
+    )
 
 
 def test_score_case_run_scores_every_call() -> None:
     brief = cases.Case("de-lit-s", SUMMARY_TYPE_BRIEF, "auto")
     result = model_manager.StructuredSummary(SUMMARY_TYPE_BRIEF, _DE_UNITS, [], None, _DE_UNITS)
     calls = [_call(0, _EN_UNITS), _call(1, _DE_UNITS, finish="length"), _call(2, "")]
-    scored = run.score_case_run(
-        brief, result, calls, _DE_UNITS, metrics.Target("de", None), parts=2
-    )
-    print(f"brief: {scored}")
+    asked = run.ScoringInput(brief, _DE_UNITS, metrics.Target("de", None), 2)
+    scored = run.score_case_run(asked, result, calls)
+    _LOG.info("brief: %s", scored)
     assert scored["M2"]["passed"] is False
     assert {off["call"] for off in scored["M2"]["off_target"]} == {0}
     assert scored["M1"]["violations"] == 1
@@ -690,15 +749,16 @@ def test_score_case_run_scores_every_call() -> None:
         _call(0, "not json", json_call=True),
         _call(1, json.dumps(payload), json_call=True),
     ]
-    scored = run.score_case_run(
-        detailed, detailed_result, json_calls, document, metrics.Target("de", None), parts=1
-    )
-    print(f"detailed: {scored}")
+    asked = run.ScoringInput(detailed, document, metrics.Target("de", None), 1)
+    scored = run.score_case_run(asked, detailed_result, json_calls)
+    _LOG.info("detailed: %s", scored)
     assert scored["M2"]["unparsed_calls"] == 1
     assert scored["M2"]["passed"] is True
-    assert scored["M7"]["points"] == 1
-    assert scored["M7"]["cited"] == 1
-    assert scored["M7"]["verbatim"] == 1
+    m7 = scored["M7"]
+    assert m7 is not None
+    assert m7["points"] == 1
+    assert m7["cited"] == 1
+    assert m7["verbatim"] == 1
     assert scored["cell"] == ["de", "json", "single"]
 
 
@@ -711,20 +771,23 @@ def test_m12a_rerun_compares_with_the_first_run(monkeypatch: pytest.MonkeyPatch)
     targets = {case.id: metrics.Target("zh", None) for case in (first, rerun)}
 
     same = run.run_cases(_shell(_EvalLLM(), 8192), specs, texts, targets)
-    print(f"identical: {same[1].metrics['M12a']}")
-    assert same[1].metrics["M12a"]["identical"] is True
-    assert same[1].metrics["M12a"]["violations"] == 0
+    identical = same[1].metrics["M12a"]
+    _LOG.info("identical: %s", identical)
+    assert identical is not None
+    assert identical["identical"] is True
+    assert identical["violations"] == 0
     assert same[0].metrics["M12a"] is None
 
     answers: list[str] = []
 
-    def drifting(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
+    def drifting(*_args: object) -> str:
         answers.append(_PROSE if not answers else _PROSE.replace("early", "earlz"))
         return answers[-1]
 
     drifted = run.run_cases(_shell(_EvalLLM(drifting), 8192), specs, texts, targets)
     m12a = drifted[1].metrics["M12a"]
-    print(f"first_diff: {m12a['first_diff']}")
+    assert m12a is not None
+    _LOG.info("first_diff: %s", m12a["first_diff"])
     assert m12a["identical"] is False
     assert m12a["first_diff"] == _PROSE.index("early") + 4
     assert m12a["violations"] == 1
@@ -752,46 +815,51 @@ def _corpus(tmp_path: Path, ids: tuple[str, ...], long: tuple[str, ...] = ()) ->
     zh texts are long enough to split at ``--n-ctx 2048``; a ``long`` document
     also splits at ``SPLIT_N_CTX``.
     """
-    entries = []
+    entries: list[dict[str, object]] = []
     for doc_id in ids:
         shape = cases.DOCUMENTS[doc_id]
         repeats = 160 if doc_id in long else (40 if shape.label == "zh" else 3)
         text = _SENTENCES[shape.label] * repeats
         script = shape.script or "Simplified"
-        fields = {"script": script} if shape.label == "zh" else {}
+        fields: dict[str, object] = {"script": script} if shape.label == "zh" else {}
         entries.append(_manifest_entry(tmp_path, doc_id, text, **fields))
-    _write_manifest(tmp_path, entries)
+    _ = _write_manifest(tmp_path, entries)
     return tmp_path
 
 
 def _gguf(tmp_path: Path) -> Path:
     model = tmp_path / "model.gguf"
-    model.write_bytes(b"GGUF stand-in")
+    _ = model.write_bytes(b"GGUF stand-in")
     return model
 
 
-def _results(eval_dir: Path) -> list[dict[str, Any]]:
+def _json_lines(path: Path) -> list[dict[str, object]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [cast("dict[str, object]", json.loads(line)) for line in lines]
+
+
+def _results(eval_dir: Path) -> list[dict[str, object]]:
     files = sorted((eval_dir / "results").iterdir())
     assert len(files) == 1, files
-    return [json.loads(line) for line in files[0].read_text(encoding="utf-8").splitlines()]
+    return _json_lines(files[0])
 
 
-def _case_runs(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [line for line in lines if line["kind"] == "case_run"]
+def _case_runs(lines: Sequence[Mapping[str, object]]) -> list[run.CaseRunLine]:
+    return [cast("run.CaseRunLine", line) for line in lines if line["kind"] == "case_run"]
 
 
 def test_cli_smoke_tier_writes_a_complete_results_file(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    eval_llm: _EvalLLM, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     argv = ["--eval-dir", str(eval_dir), "--tier", "smoke", "--model", str(_gguf(tmp_path))]
     code = run.main([*argv, "--n-ctx", "2048"])
     out = capsys.readouterr().out
-    print(out)
+    _LOG.info("%s", out)
     assert code == 0
 
     files = sorted((eval_dir / "results").iterdir())
-    print(f"results files: {[f.name for f in files]}")
+    _LOG.info("results files: %s", [f.name for f in files])
     assert len(files) == 1
     assert re.fullmatch(r"\d{8}T\d{6}Z-smoke-[0-9a-f]+\.jsonl", files[0].name)
     lines = _results(eval_dir)
@@ -811,7 +879,7 @@ def test_cli_smoke_tier_writes_a_complete_results_file(
 
 
 def test_cli_refuses_zero_and_bad_selectors(
-    eval_llm: Any,
+    eval_llm: _EvalLLM,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -823,7 +891,7 @@ def test_cli_refuses_zero_and_bad_selectors(
     def refused(argv: list[str]) -> str:
         code = run.main(argv)
         out = capsys.readouterr().out
-        print(f"{argv[len(base) :]} -> {code}: {out.strip()}")
+        _LOG.info("%s -> %s: %s", argv[len(base) :], code, out.strip())
         assert code == 2
         return out
 
@@ -833,9 +901,9 @@ def test_cli_refuses_zero_and_bad_selectors(
     )
 
     with pytest.raises(SystemExit) as parse_error:
-        run.main([*base, "--tier", "full"])
+        _ = run.main([*base, "--tier", "full"])
     err = capsys.readouterr().err
-    print(f"--tier full -> {parse_error.value.code}: {err.strip()}")
+    _LOG.info("--tier full -> %s: %s", parse_error.value.code, err.strip())
     assert parse_error.value.code == 2
     assert all(tier in err for tier in run.RUNNABLE_TIERS)
 
@@ -845,28 +913,32 @@ def test_cli_refuses_zero_and_bad_selectors(
     assert "absent" in refused(absent)
 
     doc = tmp_path / "f.txt"
-    doc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
+    _ = doc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
     assert "--label" in refused([*base, "--tier", "smoke", "--doc", str(doc)])
 
-    def no_tokens(text: bytes, add_bos: bool = True) -> list[int]:
-        raise RuntimeError("tokenizer unavailable")
+    def no_tokens(_text: bytes, **_options: bool) -> list[int]:
+        msg = "tokenizer unavailable"
+        raise RuntimeError(msg)
 
     monkeypatch.setattr(eval_llm, "tokenize", no_tokens)
     assert "calls=0" in refused([*base, "--tier", "smoke"])
 
 
+@pytest.mark.usefixtures("eval_llm")
 def test_cli_case_and_doc_restrict_the_run(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     model = _gguf(tmp_path)
 
-    def selected(name: str, tier: str, ids: tuple[str, ...], *extra: str) -> list[dict[str, Any]]:
+    def selected(
+        name: str, tier: str, ids: tuple[str, ...], *extra: str
+    ) -> list[dict[str, object]]:
         eval_dir = _corpus(tmp_path / name, ids)
         argv = ["--eval-dir", str(eval_dir), "--model", str(model), "--tier", tier, *extra]
         assert run.main([*argv, "--n-ctx", "2048"]) == 0
-        capsys.readouterr()
+        _ = capsys.readouterr()
         lines = _results(eval_dir)
-        print(f"{extra}: {[line['case'] for line in _case_runs(lines)]}")
+        _LOG.info("%s: %s", extra, [line["case"] for line in _case_runs(lines)])
         return lines
 
     by_doc = _case_runs(selected("doc", "lang", cases.LANGUAGE_SET_IDS, "--case", "de-cred-s"))
@@ -886,7 +958,7 @@ def test_cli_case_and_doc_restrict_the_run(
     ]
 
     adhoc = tmp_path / "f.txt"
-    adhoc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
+    _ = adhoc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
     sha = hashlib.sha256(adhoc.read_bytes()).hexdigest()
     lines = selected("adhoc", "smoke", _SMOKE_DOCS, "--doc", str(adhoc), "--label", "de")
     runs = _case_runs(lines)
@@ -895,11 +967,13 @@ def test_cli_case_and_doc_restrict_the_run(
     ]
     expected = hashlib.sha256(f"{sha[:12]}:{sha}\n".encode()).hexdigest()
     assert lines[0]["corpus_hash"] == expected
-    assert lines[0]["documents"][sha[:12]]["path"] == str(adhoc.resolve())
+    documents = cast("dict[str, dict[str, object]]", lines[0]["documents"])
+    assert documents[sha[:12]]["path"] == str(adhoc.resolve())
 
 
+@pytest.mark.usefixtures("eval_llm")
 def test_repeat_scopes_to_cold_auto_runs(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Only the seed-0 ``auto`` runs that timing reads are repeated.
 
@@ -913,9 +987,13 @@ def test_repeat_scopes_to_cold_auto_runs(
     seed1 = [r for r in runs if r.seed == 1]
     explicit = [r for r in runs if r.case.language != "auto"]
     m12a = [r for r in runs if r.case.m12a]
-    print(
-        f"total {len(runs)}: seed-0 auto {len(seed0_auto)}, seed-1 auto {len(seed1)}, "
-        f"explicit {len(explicit)}, m12a {len(m12a)}"
+    _LOG.info(
+        "total %s: seed-0 auto %s, seed-1 auto %s, explicit %s, m12a %s",
+        len(runs),
+        len(seed0_auto),
+        len(seed1),
+        len(explicit),
+        len(m12a),
     )
     assert len(runs) == 47
     assert (len(seed0_auto), len(seed1), len(explicit), len(m12a)) == (30, 10, 4, 3)
@@ -932,27 +1010,27 @@ def test_repeat_scopes_to_cold_auto_runs(
     assert run.main([*argv, "--n-ctx", "2048", "--repeat", "3"]) == 0
     out = capsys.readouterr().out
     lines = _results(eval_dir)
-    print(f"case_run lines: {len(_case_runs(lines))}")
+    _LOG.info("case_run lines: %s", len(_case_runs(lines)))
     assert len(_case_runs(lines)) == 37
     assert lines[0]["repeat"] == 3
     assert lines[0]["repeat_scope"] == run.REPEAT_SCOPE
     assert "cases=17 case_runs=37" in out
 
     with pytest.raises(SystemExit) as parse_error:
-        run.main([*argv, "--repeat", "0"])
+        _ = run.main([*argv, "--repeat", "0"])
     assert parse_error.value.code == 2
 
 
 def test_lang_tier_runs_the_split_pass(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    eval_llm: _EvalLLM, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     eval_dir = _corpus(tmp_path / "eval", cases.LANGUAGE_SET_IDS, long=("de-cred-s",))
     argv = ["--eval-dir", str(eval_dir), "--model", str(_gguf(tmp_path)), "--tier", "lang"]
     selection = ["--case", "de-cred-s", "--case", "fr-lit-s"]
     assert run.main([*argv, *selection, "--n-ctx", "2048"]) == 0
     out = capsys.readouterr().out
-    print(out)
-    print(f"builds: {eval_llm.built}")
+    _LOG.info("%s", out)
+    _LOG.info("builds: %s", eval_llm.built)
     assert eval_llm.built == [2048, cases.SPLIT_N_CTX]
 
     lines = _results(eval_dir)
@@ -966,6 +1044,19 @@ def test_lang_tier_runs_the_split_pass(
     for case_id in expected:
         assert f"not split: {case_id}" in out
     assert all(line["parts"] > 1 for line in split_runs if line["case"].startswith("de-cred-s"))
+
+
+def test_read_results_refuses_a_line_that_is_not_an_object(tmp_path: Path) -> None:
+    """A results line that is not a JSON object is refused with its line number.
+
+    Catches a reader that skips the line, which would change the reported figures.
+    """
+    path = tmp_path / "results.jsonl"
+    header = json.dumps({"kind": "header"})
+    call = json.dumps({"kind": "call"})
+    _ = path.write_text(f"{header}\n\n{call}\n[1, 2]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"line 4 is not a JSON object"):
+        _ = run.read_results(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -991,12 +1082,13 @@ def _rescored(eval_dir: Path) -> Path:
 def _rescore(eval_dir: Path, source: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
     code = run.main(["--eval-dir", str(eval_dir), "--rescore", str(source)])
     out = capsys.readouterr().out
-    print(out)
+    _LOG.info("%s", out)
     return code, out
 
 
+@pytest.mark.usefixtures("eval_llm")
 def test_rescore_reproduces_every_metric(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Replaying a file through the tree that wrote it reproduces every metric and result.
 
@@ -1005,7 +1097,7 @@ def test_rescore_reproduces_every_metric(
     """
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     source = _source(eval_dir, _gguf(tmp_path))
-    capsys.readouterr()
+    _ = capsys.readouterr()
     code, out = _rescore(eval_dir, source, capsys)
     assert code == 0
 
@@ -1025,9 +1117,10 @@ def test_rescore_reproduces_every_metric(
     header = after.header
     for name in run.HEADER_FIELDS:
         assert header[name] == before.header[name], name
-    git = run.git_state(run._REPO)
-    assert set(header["scored_by"]) == {"commit", "dirty", "gated_hash"}
-    assert header["scored_by"]["commit"] == git.commit
+    git = run.git_state(_REPO)
+    scored_by = cast("dict[str, object]", header["scored_by"])
+    assert set(scored_by) == {"commit", "dirty", "gated_hash"}
+    assert scored_by["commit"] == git.commit
     assert header["rescored_from"] == str(source)
     assert header["arms"] == list(run.RESCORE_ARMS)
     assert f"replayed case_runs=17 calls={len(before.calls)}" in out
@@ -1052,7 +1145,7 @@ _ARMS_POINTS = (
 _ARMS_CASE = "en-lit-s/detailed/auto"
 
 
-def _arms_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
+def _arms_respond(_messages: Sequence[Mapping[str, str]], kwargs: Mapping[str, object]) -> str:
     if "response_format" in kwargs:
         points = [{"text": text, "quote": quote} for text, quote in _ARMS_POINTS]
         lead = "A village bakery, its oven and a school garden in spring."
@@ -1061,18 +1154,18 @@ def _arms_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str
 
 
 def _arms_corpus(eval_dir: Path) -> Path:
-    _write_manifest(eval_dir, [_manifest_entry(eval_dir, "en-lit-s", _ARMS_DOC)])
+    _ = _write_manifest(eval_dir, [_manifest_entry(eval_dir, "en-lit-s", _ARMS_DOC)])
     return eval_dir
 
 
-def _arms_source(eval_llm: Any, tmp_path: Path) -> Path:
+def _arms_source(eval_llm: _EvalLLM, tmp_path: Path) -> Path:
     """A one-case run whose three points cite two verbatim quotes and one loose one."""
     eval_llm.respond = _arms_respond
     return _source(_arms_corpus(tmp_path / "eval"), _gguf(tmp_path), "--case", _ARMS_CASE)
 
 
 def test_rescore_prints_coverage_only_and_production_arms(
-    eval_llm: Any,
+    eval_llm: _EvalLLM,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1087,40 +1180,47 @@ def test_rescore_prints_coverage_only_and_production_arms(
     assert provenance.locate_quote(_ARMS_DROPPED, _ARMS_DOC) is None
     with run.accept_every_match():
         located = provenance.locate_quote(_ARMS_DROPPED, _ARMS_DOC)
-    print(f"located under accept_every_match: {located}")
+    _LOG.info("located under accept_every_match: %s", located)
     assert located is not None
     assert located.quote == _ARMS_LONG
 
     source = _arms_source(eval_llm, tmp_path)
-    capsys.readouterr()
+    _ = capsys.readouterr()
 
-    def arms(eval_dir: Path) -> tuple[str, dict[str, Any]]:
+    def arms(eval_dir: Path) -> tuple[str, tuple[int, int], int]:
+        """The rescore's output, the arms' cited counts and the production arm's points."""
         code, out = _rescore(eval_dir, source, capsys)
         assert code == 0
         lines = run.read_results(_rescored(eval_dir)).case_runs
         assert all("m7_coverage_only" in line for line in lines)
-        return out, next(line for line in lines if line["case"] == _ARMS_CASE)
+        line = cast("run.RescoredLine", next(line for line in lines if line["case"] == _ARMS_CASE))
+        coverage_only, production = line["m7_coverage_only"], line["metrics"]["M7"]
+        assert coverage_only is not None
+        assert production is not None
+        return out, (coverage_only["cited"], production["cited"]), production["points"]
 
-    out, line = arms(tmp_path / "eval")
-    cited = (line["m7_coverage_only"]["cited"], line["metrics"]["M7"]["cited"])
-    print(f"cited (coverage_only, production): {cited}")
-    assert line["metrics"]["M7"]["points"] == 3
+    out, cited, points = arms(tmp_path / "eval")
+    _LOG.info("cited (coverage_only, production): %s", cited)
+    assert points == 3
     assert cited == (3, 2)
     for scope in ("en/json/single", "aggregate"):
         assert f"M7 {scope} coverage_only cited=3/3 tight=3/3 whole_document=0/3" in out
         assert f"M7 {scope} production cited=2/3 tight=2/3 whole_document=0/3" in out
         assert f"verbatim=2/3\nM7 {scope} drop cited=1/3" in out
 
-    monkeypatch.setattr(provenance, "is_verified_match", lambda quote, span_text: False)
-    out, line = arms(_arms_corpus(tmp_path / "rejecting"))
-    cited = (line["m7_coverage_only"]["cited"], line["metrics"]["M7"]["cited"])
-    print(f"rejecting everything, cited (coverage_only, production): {cited}")
+    def reject(_quote: str, _span_text: str) -> bool:
+        return False
+
+    monkeypatch.setattr(provenance, "is_verified_match", reject)
+    out, cited, _ = arms(_arms_corpus(tmp_path / "rejecting"))
+    _LOG.info("rejecting everything, cited (coverage_only, production): %s", cited)
     assert cited == (3, 0)
     assert "M7 aggregate drop cited=3/3" in out
 
 
+@pytest.mark.usefixtures("eval_llm")
 def test_rescore_refuses_a_different_request_sequence(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Replay stops when this tree would ask the model something the stored run did not.
 
@@ -1128,18 +1228,19 @@ def test_rescore_refuses_a_different_request_sequence(
     """
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     source = _source(eval_dir, _gguf(tmp_path), "--case", "zh-lit-m")
-    capsys.readouterr()
-    records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
+    _ = capsys.readouterr()
+    records = _json_lines(source)
     calls = [i for i, record in enumerate(records) if record["kind"] == "call"]
 
-    def rewritten(name: str, kept: list[dict[str, Any]]) -> Path:
+    def rewritten(name: str, kept: Sequence[Mapping[str, object]]) -> Path:
         path = tmp_path / name
-        path.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+        _ = path.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
         return path
 
-    edited = json.loads(json.dumps(records))
+    edited = cast("list[dict[str, object]]", json.loads(json.dumps(records)))
     target = edited[calls[1]]
-    target["messages"][0]["content"] += " Answer in verse."
+    messages = cast("list[dict[str, str]]", target["messages"])
+    messages[0]["content"] += " Answer in verse."
     code, out = _rescore(eval_dir, rewritten("edited.jsonl", edited), capsys)
     assert code == 2
     assert f"replay mismatch: seq {target['seq']} field messages" in out
@@ -1156,36 +1257,38 @@ class _ImportRecorder:
     def __init__(self) -> None:
         self.names: list[str] = []
 
-    def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+    def find_spec(
+        self, name: str, _path: Sequence[str] | None = None, _target: types.ModuleType | None = None
+    ) -> None:
         if name.partition(".")[0] == "llama_cpp":
             self.names.append(name)
 
 
+@pytest.mark.usefixtures("eval_llm")
 def test_rescore_loads_no_model(
-    eval_llm: Any,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     source = _source(eval_dir, _gguf(tmp_path), "--case", "zh-lit-m")
-    capsys.readouterr()
+    _ = capsys.readouterr()
 
-    def no_model(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("a rescore built a model")
+    def no_model(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("a rescore built a model")
 
     recorder = _ImportRecorder()
     monkeypatch.setattr(run, "build_summarizer", no_model)
     monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
     monkeypatch.setattr(sys, "meta_path", [recorder, *sys.meta_path])
     code, _ = _rescore(eval_dir, source, capsys)
-    print(f"llama_cpp imports: {recorder.names}")
+    _LOG.info("llama_cpp imports: %s", recorder.names)
     assert code == 0
     assert recorder.names == []
 
 
 def test_rescore_audits_every_citation(
-    eval_llm: Any,
+    eval_llm: _EvalLLM,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1195,15 +1298,19 @@ def test_rescore_audits_every_citation(
     Catches grounding that attaches a span the quote is not in.
     """
     source = _arms_source(eval_llm, tmp_path)
-    capsys.readouterr()
+    _ = capsys.readouterr()
     code, out = _rescore(tmp_path / "eval", source, capsys)
     assert code == 0
     assert "audit: 2 citations, 0 failed" in out  # the production arm's two, not the three
 
     start = _ARMS_DOC.index(_ARMS_UNRELATED)
     unrelated = provenance.SourceSpan(start, start + len(_ARMS_UNRELATED), _ARMS_UNRELATED, 1.0)
+
     # The grounding step reads the name it imported from provenance.
-    monkeypatch.setattr(model_manager, "locate_quote", lambda *args, **kwargs: unrelated)
+    def misplaced(*_args: object, **_kwargs: object) -> provenance.SourceSpan:
+        return unrelated
+
+    monkeypatch.setattr(model_manager, "locate_quote", misplaced)
     code, out = _rescore(_arms_corpus(tmp_path / "misplaced"), source, capsys)
     assert code == 1
     for index in range(3):
@@ -1211,15 +1318,14 @@ def test_rescore_audits_every_citation(
     assert "audit: 3 citations, 3 failed" in out
 
 
-def test_runner_logs_stay_in_the_eval_dir(
-    eval_llm: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+@pytest.mark.usefixtures("eval_llm", "capsys")
+def test_runner_logs_stay_in_the_eval_dir(tmp_path: Path) -> None:
     source = _source(_corpus(tmp_path / "eval", _SMOKE_DOCS), _gguf(tmp_path), "--case", "zh-lit-m")
     eval_dir = _corpus(tmp_path / "sub", _SMOKE_DOCS)
     inherited = tmp_path / "inherited"
     env = {**os.environ, "XDG_DATA_HOME": str(inherited), "LOCALAPPDATA": str(inherited)}
     argv = ["scripts/eval/run.py", "--eval-dir", str(eval_dir), "--rescore", str(source)]
-    done = subprocess.run(  # noqa: S603
+    done = subprocess.run(
         [sys.executable, "-I", *argv],
         cwd=_REPO,
         env=env,
@@ -1228,10 +1334,10 @@ def test_runner_logs_stay_in_the_eval_dir(
         check=False,
         timeout=300,
     )
-    print(done.stdout, done.stderr)
+    _LOG.info("%s %s", done.stdout, done.stderr)
     assert done.returncode == 0
     logs = list((eval_dir / "appdata").rglob("docsummarizer_*.log"))
-    print(f"logs: {logs}")
+    _LOG.info("logs: %s", logs)
     assert logs
     assert not inherited.exists() or not any(inherited.rglob("*"))
 
@@ -1242,7 +1348,7 @@ def test_runner_logs_stay_in_the_eval_dir(
 
 _COMPARE_FIELDS = ("machine_id", "backend", "metric_version", "corpus_hash", "seeds", "cases")
 _COMPARE_CASES = tuple(f"doc{i}/detailed/auto" for i in range(17))
-_DIFFERENT: dict[str, Any] = {
+_DIFFERENT: dict[str, object] = {
     "machine_id": "another machine",
     "backend": "gpu:another",
     "metric_version": 2,
@@ -1252,8 +1358,8 @@ _DIFFERENT: dict[str, Any] = {
 }
 
 
-def _scored_line(case: str, m4: int, repetition: int) -> dict[str, Any]:
-    scores = {
+def _scored_line(case: str, m4: int, repetition: int) -> dict[str, object]:
+    scores: dict[str, object] = {
         "cell": ["en", "json", "single"],
         "M1": {"violations": 0},
         "M2": {"violations": 0},
@@ -1261,7 +1367,12 @@ def _scored_line(case: str, m4: int, repetition: int) -> dict[str, Any]:
         "M7": {"tight": 2, "points": 3},
         "M12a": None,
     }
-    line = {"kind": "case_run", "case": case, "seed": 0, "repetition": repetition}
+    line: dict[str, object] = {
+        "kind": "case_run",
+        "case": case,
+        "seed": 0,
+        "repetition": repetition,
+    }
     return {**line, "metrics": scores}
 
 
@@ -1271,9 +1382,9 @@ def _compare_file(
     repeat: int = 1,
     flip: str | None = None,
     cases_: tuple[str, ...] = _COMPARE_CASES,
-    **fields: Any,
+    fields: Mapping[str, object] | None = None,
 ) -> Path:
-    header = {
+    header: dict[str, object] = {
         "kind": "header",
         "machine_id": "a machine",
         "backend": "cpu",
@@ -1282,7 +1393,7 @@ def _compare_file(
         "seeds": [0],
         "cases": list(_COMPARE_CASES),
         "repeat": repeat,
-        **fields,
+        **(fields or {}),
     }
     with path.open("w", encoding="utf-8") as fh:
         run.write_line(fh, header)
@@ -1297,7 +1408,7 @@ def _compared(
 ) -> tuple[int, str]:
     code = run.main(["--eval-dir", str(tmp_path), "--compare", str(b), str(c)])
     out = capsys.readouterr().out
-    print(f"--compare {b.name} {c.name} -> {code}\n{out}")
+    _LOG.info("--compare %s %s -> %s\n%s", b.name, c.name, code, out)
     return code, out
 
 
@@ -1311,7 +1422,7 @@ def test_compare_refuses_incomparable_arms(
     of different seeds, machines or documents reads as a change.
     """
     b = _compare_file(tmp_path / "b.jsonl")
-    c = _compare_file(tmp_path / "c.jsonl", **{name: _DIFFERENT[name]})
+    c = _compare_file(tmp_path / "c.jsonl", fields={name: _DIFFERENT[name]})
     code, out = _compared(tmp_path, b, c, capsys)
     assert code == 2
     assert f"differ in {name}" in out
@@ -1334,7 +1445,7 @@ def test_compare_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
         ("repeated", _compare_file(tmp_path / "repeated.jsonl", repeat=3)),
     ):
         code, out = _compared(tmp_path, b, candidate, capsys)
-        print(f"{name}: {code}")
+        _LOG.info("%s: %s", name, code)
         assert code == 0
         assert "B 17 case runs, C 17 case runs" in out
         assert "aggregate" in out
@@ -1355,13 +1466,21 @@ class _CountedLLM(_EvalLLM):
 
     def __init__(self, completion_offset: int = 0) -> None:
         super().__init__()
-        self.ctx = object()
-        self.n_tokens = 0
-        self.perf = {"n_p_eval": 0, "n_eval": 0, "t_p_eval_ms": 0.0, "t_eval_ms": 0.0}
-        self.completion_offset = completion_offset
-        self._previous: Any = None
+        self.ctx: object = object()
+        self.n_tokens: int = 0
+        self.perf: dict[str, float] = {
+            "n_p_eval": 0,
+            "n_eval": 0,
+            "t_p_eval_ms": 0.0,
+            "t_eval_ms": 0.0,
+        }
+        self.completion_offset: int = completion_offset
+        self._previous: Sequence[Mapping[str, str]] | None = None
 
-    def create_chat_completion(self, *, messages, stream=False, **kwargs):
+    @override
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         prompt = sum(len(self.tokenize(m["content"].encode())) for m in messages)
         evaluated = 1 if messages == self._previous else prompt
         self._previous = messages
@@ -1373,24 +1492,31 @@ class _CountedLLM(_EvalLLM):
         self.perf["t_eval_ms"] += 50.0 * out
         self.n_tokens = prompt + out
         response = super().create_chat_completion(messages=messages, stream=stream, **kwargs)
-        if stream:
+        if stream or not isinstance(response, dict):
             return response
-        usage = {"prompt_tokens": prompt, "completion_tokens": out + self.completion_offset}
-        return {**response, "usage": usage}
+        completion = out + self.completion_offset
+        response["usage"] = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        }
+        return response
 
 
 def _counted(monkeypatch: pytest.MonkeyPatch, fake: _CountedLLM) -> None:
-    """Serve ``fake`` from ``build_summarizer`` behind a ``llama_cpp`` module reading its counters."""
-    import types
-
+    """Serve ``fake`` from ``build_summarizer``, and a ``llama_cpp`` that reads its counters."""
     pkg = types.ModuleType("llama_cpp")
     low = types.ModuleType("llama_cpp.llama_cpp")
-    low.llama_perf_context = lambda _ctx: types.SimpleNamespace(**fake.perf)
-    pkg.llama_cpp = low
+
+    def llama_perf_context(_ctx: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(**fake.perf)
+
+    monkeypatch.setattr(low, "llama_perf_context", llama_perf_context, raising=False)
+    monkeypatch.setattr(pkg, "llama_cpp", low, raising=False)
     monkeypatch.setitem(sys.modules, "llama_cpp", pkg)
     monkeypatch.setitem(sys.modules, "llama_cpp.llama_cpp", low)
 
-    def build(model: Path, *, n_ctx: int, n_threads: int | None, n_gpu_layers: int) -> Summarizer:
+    def build(_model: Path, *, n_ctx: int, **_options: int | None) -> Summarizer:
         return _shell(fake, n_ctx)
 
     monkeypatch.setattr(run, "build_summarizer", build)
@@ -1400,7 +1526,7 @@ def _counted(monkeypatch: pytest.MonkeyPatch, fake: _CountedLLM) -> None:
 def _checked(tmp_path: Path, capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     code = run.main(["--eval-dir", str(tmp_path), *argv])
     out = capsys.readouterr().out
-    print(f"{argv} -> {code}\n{out}")
+    _LOG.info("%s -> %s\n%s", argv, code, out)
     return code, out
 
 
@@ -1448,10 +1574,10 @@ def _snapshots(
     local: tuple[int, ...], host: tuple[str, str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``snapshot_now`` returns a start, then an end snapshot of the invented fixtures."""
-    taken: list[Any] = []
+    taken: list[run.ContentionSnapshot] = []
     for at_end in (False, True):
-        table = None if host is None else (lambda cpu=host[at_end]: _host_table(cpu))
-        taken.append(run.take_snapshot(_processes(at_end, local), _OWN_PID, table))
+        table = None if host is None else functools.partial(_host_table, host[at_end])
+        taken.append(run.take_snapshot(_processes(at_end=at_end, only=local), _OWN_PID, table))
     monkeypatch.setattr(run, "snapshot_now", lambda: taken.pop(0))
 
 
@@ -1463,8 +1589,6 @@ def test_contention_mode_exits_1_on_either_side(
     Catches the mutation "exit 0 whenever the local side is clear", so a busy
     host process passes.
     """
-    import time
-
     slept: list[float] = []
     monkeypatch.setattr(time, "sleep", slept.append)
     busy, idle = ("2.0", "7.25"), ("2.0", "2.0")
@@ -1483,7 +1607,7 @@ def test_contention_mode_exits_1_on_either_side(
     assert _checked(tmp_path, capsys, "--contention")[0] == 0
 
     taken = [
-        run.take_snapshot(_processes(at_end, (103, 104)), _OWN_PID, lambda: None)
+        run.take_snapshot(_processes(at_end=at_end, only=(103, 104)), _OWN_PID, lambda: None)
         for at_end in (False, True)
     ]
     monkeypatch.setattr(run, "snapshot_now", lambda: taken.pop(0))
@@ -1537,7 +1661,7 @@ def test_self_test_language_computes_three_rates(
     rows = [{"text": text, "label": label} for label, texts in _LABELLED.items() for text in texts]
     rows.append({"text": "a row without its label"})
     labelled = tmp_path / "labelled.jsonl"
-    labelled.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    _ = labelled.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     code, out = _checked(tmp_path, capsys, "--self-test", "language", str(labelled))
     assert code == 2
@@ -1569,6 +1693,50 @@ def _docs_section() -> str:
     return text[start : end if end >= 0 else len(text)]
 
 
+def test_eval_args_defaults_match_the_parser() -> None:
+    """The typed namespace's defaults are the parser's own, option for option."""
+    parsed = vars(run.build_parser().parse_args(["--checks", "runstats"], namespace=Namespace()))
+    declared = {name: getattr(run.EvalArgs, name) for name in run.EvalArgs.__annotations__}
+    declared |= vars(run.EvalArgs())
+    declared["checks"] = "runstats"
+    assert declared == parsed
+
+
+def _field_names(cls: type) -> list[str]:
+    return [f.name for f in dataclasses.fields(cls)]
+
+
+def test_record_types_mirror_the_records_they_store() -> None:
+    """Each results-file record type names its source's fields, in the order a line holds them."""
+    assert list(run.SpanRecord.__annotations__) == _field_names(provenance.SourceSpan)
+    assert list(run.PointLine.__annotations__) == _field_names(model_manager.SummaryPoint)
+    summary = _field_names(model_manager.StructuredSummary)
+    assert list(run.ResultRecord.__annotations__) == [n for n in summary if n != "run_stats"]
+    assert list(run.OffTargetRecord.__annotations__) == _field_names(metrics.OffTarget)
+    assert list(run.M7Score.__annotations__) == [*_field_names(metrics.M7), "hit_rate"]
+    m12a = [*_field_names(metrics.M12a), "violations", "first"]
+    assert list(run.M12aScore.__annotations__) == m12a
+    where = ["kind", "run", "case", "seed", "repetition"]
+    assert list(run.CallLine.__annotations__) == [*where, *_field_names(run.CallRecord)]
+    assert list(run.CaseRunLine.__annotations__) == ["kind", "run", *_field_names(run.CaseRun)]
+
+
+def test_result_record_is_the_summary_without_its_run_stats() -> None:
+    """A result line holds every summary field but its run stats, nested points included."""
+    quote = "Ein Satz."
+    cited = model_manager.SummaryPoint("Ein Punkt.", provenance.SourceSpan(0, 9, quote, 1.0))
+    bare = model_manager.SummaryPoint("Ohne Quelle.")
+    stats = model_manager.RunStats(1, 0, None, None, None, 3, None, 0.5)
+    result = model_manager.StructuredSummary(
+        SUMMARY_TYPE_DETAILED, "Lead.", [cited], {"Kern": [cited, bare]}, quote, stats
+    )
+    expected = dataclasses.asdict(result)
+    del expected["run_stats"]
+    record = run._result_record(result)
+    assert record == expected
+    assert json.dumps(record) == json.dumps(expected)  # and in the same key order
+
+
 def test_docs_name_every_runner_option() -> None:
     """Every runner option and check is in the evaluation guide; the scripts index lists it."""
     options = sorted(
@@ -1578,7 +1746,7 @@ def test_docs_name_every_runner_option() -> None:
         if option.startswith("--") and option != "--help"
     )
     names = options + sorted(run.CHECKS)
-    print(f"{len(options)} options, {len(run.CHECKS)} checks")
+    _LOG.info("%s options, %s checks", len(options), len(run.CHECKS))
     assert options
     section = _docs_section()
     missing = [

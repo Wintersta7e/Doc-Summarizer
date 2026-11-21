@@ -1,7 +1,7 @@
+pragma ComponentBehavior: Bound
 // Item-rooted mirror of Main.qml's shell, for offscreen rendering via QQuickView
 // (an ApplicationWindow can't be grabbed the same way). Used only by render_qml.py.
 import QtQuick
-import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import QtQuick.Shapes
 import App
@@ -11,6 +11,9 @@ Rectangle {
     width: 1240
     height: 820
     color: Theme.pageBg
+
+    // The ConsoleBridge, handed in by render_qml.py; the screens get it from here.
+    required property var bridge
 
     property string screen: "summary"
     property bool firstRun: false
@@ -65,13 +68,13 @@ Rectangle {
             ctx.clearRect(0, 0, width, height);
             ctx.strokeStyle = Theme.dark ? "rgba(111,195,216,0.03)" : "rgba(40,80,100,0.05)";
             ctx.lineWidth = 1;
-            for (var x = 40; x < width; x += 40) {
+            for (let x = 40; x < width; x += 40) {
                 ctx.beginPath();
                 ctx.moveTo(x, 0);
                 ctx.lineTo(x, height);
                 ctx.stroke();
             }
-            for (var y = 40; y < height; y += 40) {
+            for (let y = 40; y < height; y += 40) {
                 ctx.beginPath();
                 ctx.moveTo(0, y);
                 ctx.lineTo(width, y);
@@ -85,6 +88,7 @@ Rectangle {
         spacing: 0
         TopBar {
             Layout.fillWidth: true
+            bridge: root.bridge
         }
         RowLayout {
             Layout.fillWidth: true
@@ -114,22 +118,31 @@ Rectangle {
     }
     Component {
         id: summaryC
-        SummaryScreen {}
+        SummaryScreen {
+            bridge: root.bridge
+        }
     }
     Component {
         id: extractC
-        ExtractScreen {}
+        ExtractScreen {
+            bridge: root.bridge
+        }
     }
     Component {
         id: batchC
-        BatchScreen {}
+        BatchScreen {
+            bridge: root.bridge
+        }
     }
     Component {
         id: configC
-        ConfigScreen {}
+        ConfigScreen {
+            bridge: root.bridge
+        }
     }
     FirstRunOverlay {
         anchors.fill: parent
+        bridge: root.bridge
         shown: root.firstRun
         visible: shown
     }
@@ -138,7 +151,7 @@ Rectangle {
         id: toast
     }
     Connections {
-        target: bridge
+        target: root.bridge
         function onToast(message) {
             toast.show(message);
         }

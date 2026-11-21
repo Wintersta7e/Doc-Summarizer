@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Basic
@@ -9,7 +10,16 @@ import App
 Item {
     id: screen
 
-    property var summary: ({"summaryType": "detailed", "lead": "", "points": [], "sections": ({}), "text": ""})
+    // The ConsoleBridge, passed down from Main.qml.
+    required property var bridge
+
+    property var summary: ({
+            "summaryType": "detailed",
+            "lead": "",
+            "points": [],
+            "sections": ({}),
+            "text": ""
+        })
     property int activePoint: -1
     property string activeSection: ""
     property int hlStart: -1
@@ -27,14 +37,14 @@ Item {
         return String(s).replace(/!\[/g, "!\\[");
     }
     function renderSource() {
-        var raw = bridge.extractedText;
+        var raw = screen.bridge.extractedText;
         if (raw === "")
             return "";
         if (screen.hlStart >= 0 && screen.hlEnd > screen.hlStart) {
-            var pre = escapeHtml(raw.substring(0, screen.hlStart));
-            var hit = escapeHtml(raw.substring(screen.hlStart, screen.hlEnd));
-            var post = escapeHtml(raw.substring(screen.hlEnd));
-            var style = "background-color:" + cssRgba(Theme.accent, 0.20) + ";color:" + cssRgba(Theme.accent2, 1.0);
+            const pre = escapeHtml(raw.substring(0, screen.hlStart));
+            const hit = escapeHtml(raw.substring(screen.hlStart, screen.hlEnd));
+            const post = escapeHtml(raw.substring(screen.hlEnd));
+            const style = "background-color:" + cssRgba(Theme.accent, 0.20) + ";color:" + cssRgba(Theme.accent2, 1.0);
             return pre + "<span style='" + style + "'>" + hit + "</span>" + post;
         }
         return escapeHtml(raw);
@@ -51,8 +61,8 @@ Item {
         // Scroll the highlighted sentence into view — on a long document it is
         // usually off-screen, so without this the trace looks like it did nothing.
         if (screen.hlStart >= 0) {
-            var r = srcText.positionToRectangle(screen.hlStart);
-            var maxY = Math.max(0, srcText.implicitHeight - srcFlick.height);
+            const r = srcText.positionToRectangle(screen.hlStart);
+            const maxY = Math.max(0, srcText.implicitHeight - srcFlick.height);
             srcFlick.contentY = Math.max(0, Math.min(r.y - srcFlick.height / 3, maxY));
         }
     }
@@ -77,7 +87,7 @@ Item {
     }
 
     Connections {
-        target: bridge
+        target: screen.bridge
         function onSummaryReady(variant) {
             screen.summary = variant;
             screen.resetProvenance();
@@ -91,7 +101,7 @@ Item {
         id: openDialog
         title: "Select a document"
         nameFilters: ["Documents (*.pdf *.docx *.rtf *.txt *.md)", "All files (*)"]
-        onAccepted: bridge.loadDocument(selectedFile.toString())
+        onAccepted: screen.bridge.loadDocument(selectedFile.toString())
     }
 
     // ====================================================================== //
@@ -99,18 +109,18 @@ Item {
     // ====================================================================== //
     DropArea {
         anchors.fill: parent
-        enabled: !bridge.hasDoc
+        enabled: !screen.bridge.hasDoc
         onEntered: dropZone.dragging = true
         onExited: dropZone.dragging = false
         onDropped: drop => {
             dropZone.dragging = false;
             if (drop.hasUrls)
-                bridge.loadDocument(drop.urls[0].toString());
+                screen.bridge.loadDocument(drop.urls[0].toString());
         }
 
         Rectangle {
             id: dropZone
-            visible: !bridge.hasDoc
+            visible: !screen.bridge.hasDoc
             anchors.centerIn: parent
             width: 540
             height: 320
@@ -191,7 +201,7 @@ Item {
         anchors.fill: parent
         anchors.margins: 24
         spacing: 14
-        visible: bridge.hasDoc
+        visible: screen.bridge.hasDoc
 
         // -- Doc header ---------------------------------------------------- //
         RowLayout {
@@ -218,7 +228,7 @@ Item {
                         }
                     }
                     Text {
-                        text: "FILE 0x7F · " + bridge.currentFileName.toUpperCase()
+                        text: "FILE 0x7F · " + screen.bridge.currentFileName.toUpperCase()
                         textFormat: Text.PlainText
                         color: Theme.faint
                         font.family: Theme.mono
@@ -234,12 +244,12 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: bridge.unloadDocument()
+                            onClicked: screen.bridge.unloadDocument()
                         }
                     }
                 }
                 Text {
-                    text: bridge.currentFileName
+                    text: screen.bridge.currentFileName
                     textFormat: Text.PlainText
                     color: Theme.ink
                     font.family: Theme.serif
@@ -247,7 +257,7 @@ Item {
                     font.weight: Font.DemiBold
                 }
                 Text {
-                    text: bridge.extractedText.split(/\s+/).filter(Boolean).length.toLocaleString(Qt.locale(), "f", 0) + " WORDS · " + bridge.extractedText.length.toLocaleString(Qt.locale(), "f", 0) + " CHARS · NOMINAL"
+                    text: screen.bridge.extractedText.split(/\s+/).filter(Boolean).length.toLocaleString(Qt.locale(), "f", 0) + " WORDS · " + screen.bridge.extractedText.length.toLocaleString(Qt.locale(), "f", 0) + " CHARS · NOMINAL"
                     color: Theme.faint
                     font.family: Theme.mono
                     font.pixelSize: 9
@@ -258,9 +268,9 @@ Item {
                 Layout.fillWidth: true
             }
             SegmentedControl {
-                options: bridge.summaryTypes
-                current: bridge.summaryType
-                onSelected: value => bridge.setSummaryType(value)
+                options: screen.bridge.summaryTypes
+                current: screen.bridge.summaryType
+                onSelected: value => screen.bridge.setSummaryType(value)
             }
         }
 
@@ -277,7 +287,7 @@ Item {
                 font.weight: Font.Medium
             }
             Text {
-                text: bridge.extractedText.split(/\s+/).filter(Boolean).length.toLocaleString(Qt.locale(), "f", 0) + "  →  " + screen.compressionLabel()
+                text: screen.bridge.extractedText.split(/\s+/).filter(Boolean).length.toLocaleString(Qt.locale(), "f", 0) + "  →  " + screen.compressionLabel()
                 color: Theme.text
                 font.family: Theme.mono
                 font.pixelSize: 9
@@ -371,7 +381,7 @@ Item {
                     anchors.fill: parent
                     anchors.margins: 16
                     spacing: 10
-                    opacity: bridge.busy ? 0 : 1
+                    opacity: screen.bridge.busy ? 0 : 1
                     RowLayout {
                         Layout.fillWidth: true
                         SectionLabel {
@@ -412,14 +422,15 @@ Item {
                         spacing: 8
                         model: screen.summary.points
                         delegate: Rectangle {
+                            id: point
                             required property var modelData
                             required property int index
                             width: ListView.view ? ListView.view.width : 0
                             height: kpRow.implicitHeight + 22
                             radius: 3
-                            color: index === screen.activePoint ? Theme.navOnBg : Theme.kpRest
+                            color: point.index === screen.activePoint ? Theme.navOnBg : Theme.kpRest
                             border.width: 1
-                            border.color: index === screen.activePoint ? Theme.navOnRing : Theme.line
+                            border.color: point.index === screen.activePoint ? Theme.navOnRing : Theme.line
                             RowLayout {
                                 id: kpRow
                                 x: 12
@@ -428,16 +439,16 @@ Item {
                                 spacing: 12
                                 Hex {
                                     size: 24
-                                    glyph: String(index + 1).padStart(2, "0")
+                                    glyph: String(point.index + 1).padStart(2, "0")
                                     glyphSize: 10
-                                    accentInner: index === screen.activePoint
+                                    accentInner: point.index === screen.activePoint
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 3
                                     Text {
                                         Layout.fillWidth: true
-                                        text: screen.escapeImages(modelData.text)
+                                        text: screen.escapeImages(point.modelData.text)
                                         textFormat: Text.MarkdownText
                                         color: Theme.inkSoft
                                         font.family: Theme.ui
@@ -446,7 +457,7 @@ Item {
                                         wrapMode: Text.WordWrap
                                     }
                                     Text {
-                                        visible: modelData.hasCitation
+                                        visible: point.modelData.hasCitation
                                         text: "▸ traces to source"
                                         color: Theme.accent
                                         font.family: Theme.mono
@@ -459,8 +470,8 @@ Item {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    screen.activePoint = index;
-                                    screen.trace(modelData);
+                                    screen.activePoint = point.index;
+                                    screen.trace(point.modelData);
                                 }
                             }
                         }
@@ -475,6 +486,7 @@ Item {
                         Repeater {
                             model: ["PURPOSE", "METHOD", "RESULTS", "CONCLUSIONS"]
                             delegate: Rectangle {
+                                id: section
                                 required property string modelData
                                 property var pts: (screen.summary.sections && screen.summary.sections[modelData]) ? screen.summary.sections[modelData] : []
                                 property var firstPt: pts.length > 0 ? pts[0] : null
@@ -483,12 +495,12 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: secCol.implicitHeight + 22
                                 radius: 3
-                                color: screen.activeSection === modelData ? Theme.navOnBg : Theme.kpRest
+                                color: screen.activeSection === section.modelData ? Theme.navOnBg : Theme.kpRest
                                 Rectangle {
-                                    visible: traceable
+                                    visible: section.traceable
                                     width: 2
                                     height: parent.height
-                                    color: screen.activeSection === modelData ? Theme.accent : Theme.line2
+                                    color: screen.activeSection === section.modelData ? Theme.accent : Theme.line2
                                 }
                                 ColumnLayout {
                                     id: secCol
@@ -497,7 +509,7 @@ Item {
                                     width: parent.width - 28
                                     spacing: 4
                                     Text {
-                                        text: modelData
+                                        text: section.modelData
                                         color: Theme.label2
                                         font.family: Theme.ui
                                         font.pixelSize: 9
@@ -505,7 +517,7 @@ Item {
                                         font.weight: Font.Medium
                                     }
                                     Repeater {
-                                        model: parent.parent.pts
+                                        model: section.pts
                                         delegate: Text {
                                             required property var modelData
                                             Layout.fillWidth: true
@@ -521,11 +533,11 @@ Item {
                                 }
                                 MouseArea {
                                     anchors.fill: parent
-                                    enabled: traceable
+                                    enabled: section.traceable
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
-                                        screen.activeSection = modelData;
-                                        screen.trace(firstPt);
+                                        screen.activeSection = section.modelData;
+                                        screen.trace(section.firstPt);
                                     }
                                 }
                             }
@@ -554,7 +566,7 @@ Item {
                     anchors.leftMargin: 16
                     anchors.rightMargin: 16
                     anchors.topMargin: 52
-                    visible: bridge.busy
+                    visible: screen.bridge.busy
                 }
             }
         }
@@ -569,10 +581,10 @@ Item {
                     width: 7
                     height: 7
                     radius: 3.5
-                    color: Theme.statusColorFor(bridge.statusColor)
+                    color: Theme.statusColorFor(screen.bridge.statusColor)
                 }
                 Text {
-                    text: bridge.busy ? "GENERATING…" : "GENERATED LOCALLY"
+                    text: screen.bridge.busy ? "GENERATING…" : "GENERATED LOCALLY"
                     color: Theme.faint
                     font.family: Theme.mono
                     font.pixelSize: 9
@@ -584,28 +596,28 @@ Item {
             }
             ConsoleButton {
                 text: "Stop"
-                visible: bridge.busy
-                onClicked: bridge.cancelSummarize()
+                visible: screen.bridge.busy
+                onClicked: screen.bridge.cancelSummarize()
             }
             ConsoleButton {
                 text: "Copy"
-                enabled: !bridge.busy
+                enabled: !screen.bridge.busy
                 onClicked: {
                     copyHelper.text = screen.summary.text;
                     copyHelper.selectAll();
                     copyHelper.copy();
-                    bridge.toast("Summary copied");
+                    screen.bridge.toast("Summary copied");
                 }
             }
             ConsoleButton {
                 text: "Regenerate"
-                enabled: bridge.canSummarize && !bridge.busy
-                onClicked: bridge.regenerate()
+                enabled: screen.bridge.canSummarize && !screen.bridge.busy
+                onClicked: screen.bridge.regenerate()
             }
             ConsoleButton {
                 text: "Save Summary"
                 primary: true
-                enabled: bridge.canSummarize && !bridge.busy
+                enabled: screen.bridge.canSummarize && !screen.bridge.busy
                 onClicked: saveDialog.open()
             }
         }
@@ -623,6 +635,6 @@ Item {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "txt"  // so a name typed without an extension still saves
         nameFilters: ["Text (*.txt)", "Word document (*.docx)"]
-        onAccepted: bridge.saveSummary(selectedFile.toString(), selectedFile.toString().endsWith(".docx"))
+        onAccepted: screen.bridge.saveSummary(selectedFile.toString())
     }
 }

@@ -28,38 +28,73 @@ Technical documentation for developers and advanced users.
 
 ## Development Setup
 
+Prerequisites: [uv](https://docs.astral.sh/uv/) 0.13 or later, and Node.js
+(a current LTS release) for the duplicate-code check, which runs `jscpd`
+through `npx`. Supported Python: 3.11 to 3.15 (`requires-python =
+">=3.11,<3.16"`); CI tests 3.11 and 3.12, and uv fetches a matching
+interpreter when none is installed.
+
 ```bash
 # Clone repository
 git clone https://github.com/Wintersta7e/Doc-Summarizer.git
 cd DocSummarizer
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# or: venv\Scripts\activate  # Windows
-
-# Install the package (and dev tools) in editable mode.
-# `gui` (PySide6) is needed to launch the desktop app and to type-check and
-# test the ui package — without it the UI tests are skipped. Add `runtime`
-# for the heavy llama-cpp-python backend when working end to end.
-pip install -e ".[dev,gui]"
+# Create .venv with the exact dependency set in uv.lock and the package
+# itself in editable mode. `gui` (PySide6) is needed to launch the desktop
+# app and to type-check and test the ui package — without it the UI tests are
+# skipped. Add `--extra runtime` for the llama-cpp-python backend (its CPU
+# wheels are locked too) when working end to end.
+uv sync --locked --extra dev --extra gui
+source .venv/bin/activate  # Linux/macOS
+# or: .venv\Scripts\activate  # Windows
 
 # Quick smoke tests
 python -c "from docsummarizer.document_parser import extract_text; print('Parser OK')"
 python -c "from docsummarizer.model_manager import is_model_downloaded; print('Model manager OK')"
 
-# Quality gate (matches CI)
-ruff check .
-ruff format --check .
-mypy
-pytest --cov=docsummarizer
+# The whole quality gate (matches CI)
+python scripts/check.py all
 ```
 
-Pre-commit hooks mirroring CI are available:
+## Quality gate
+
+`scripts/check.py` is the one gate entry point: the same steps run locally,
+in the git hooks and in CI. `python scripts/check.py all` (the default) runs
+every step in the order below and stops at the first red one, naming it;
+`python scripts/check.py <step>` runs one. Each tool comes from the active
+environment and reads its configuration from `pyproject.toml`; nothing is
+installed by the gate.
+
+| Step | What it checks | CI job |
+|------|----------------|--------|
+| `format` | `ruff format --check .`, and `scripts/check_qml.py --format`: `pyside6-qmlformat` would change no QML file | `lint-and-test` |
+| `lint` | `ruff check .` with every rule selected (`select = ["ALL"]`); each rule switched off carries its reason and hit count in `pyproject.toml` | `lint-and-test` |
+| `types` | `basedpyright`, `typeCheckingMode = "all"`, over `src`, `run.py`, `scripts` and `tests` | `lint-and-test` |
+| `arch` | `lint-imports` (the layer, forbidden, independence and acyclic contracts), `deptry .`, `vulture` (confidence 80), `jscpd` 5.4.3 through `npx` (no clone of 6 lines or more) | `lint-and-test` |
+| `qml` | `scripts/check_qml.py`: `pyside6-qmllint` over every app QML file, every finding fatal except the ahead-of-time `compiler` category | `lint-and-test` |
+| `test` | pytest (strict, random order, warnings as errors, 120 s per-test timeout) with branch coverage of at least 90 % in total, then `check.py --per-file-floor`: every file at least 80 % | `lint-and-test` |
+| — | `pytest -m windows`: the tests that need Windows filesystem semantics | `windows-tests` |
+
+`lint-and-test` runs every step on Python 3.11 and 3.12 (ubuntu-latest);
+`windows-tests` runs on windows-latest with Python 3.12. Both install from
+`uv.lock` with `uv sync --locked`.
+
+No inline suppression is allowed (`noqa`, `type: ignore`, `pyright: ignore`,
+`pragma: no cover`, `qmllint disable`): fix the finding in code.
+
+### Git hooks
 
 ```bash
-pip install pre-commit && pre-commit install
+pre-commit install   # from the activated .venv: the pre-commit and pre-push hooks
 ```
+
+Before a commit: ruff check `--fix` and ruff format (at the ruff version the
+dev extra pins), qmllint and qmlformat when a QML file changed, gitleaks over
+the staged changes, typos, and actionlint. Before a push: `check.py types`
+and `check.py test`. The local hooks run `python` from `PATH`, so commit and
+push with `.venv` activated; a hook run from another environment's
+interpreter (an ephemeral `uvx pre-commit`, say) resolves no project
+dependencies and fails `check.py types`.
 
 ## Module Documentation
 
@@ -274,8 +309,8 @@ summarizer = Summarizer(model_path, n_threads=4, n_gpu_layers=-1)
 ## Testing
 
 ```bash
-# Run the suite with coverage (gate: 60%)
-pytest --cov=docsummarizer --cov-report=term-missing
+# Run the suite with coverage (gate: 90% branch coverage, 80% per file)
+python scripts/check.py test
 
 # Test summarization end to end (needs the runtime extra + a downloaded model)
 docsummarizer-cli test.pdf -t brief
@@ -375,7 +410,7 @@ point's imports, never hand-listed; every results file records their hash.
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes (keep `ruff`, `mypy` and `pytest` green)
+3. Make your changes (keep `ruff`, `basedpyright` and `pytest` green)
 4. Submit a pull request
 
 ## Known Limitations

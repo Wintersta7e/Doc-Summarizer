@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Provenance: locate the source sentence a summary point came from.
 
 Pure, dependency-free (stdlib only) so it is fully unit-testable without the
@@ -174,7 +175,8 @@ def locate_quote(
     quotes against the same source.
     """
     if threshold < DEFAULT_THRESHOLD:
-        raise ValueError(f"threshold must be at least {DEFAULT_THRESHOLD}, got {threshold}")
+        msg = f"threshold must be at least {DEFAULT_THRESHOLD}, got {threshold}"
+        raise ValueError(msg)
     normalized_quote = _normalize(quote)
     if len(normalized_quote) < _MIN_QUOTE_CHARS:
         return None

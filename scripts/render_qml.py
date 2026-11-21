@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Render a DocSummarizer QML screen to a PNG, offscreen — visual QA without a display.
 
 Lets us *see* the Qt/QML UI (and compare it to the design screenshots) without a
@@ -12,56 +13,62 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
+from typing import final
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("QT_QUICK_BACKEND", "software")
+_ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_ = os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from PySide6.QtCore import QEventLoop, QTimer, QUrl  # noqa: E402
-from PySide6.QtGui import QGuiApplication  # noqa: E402
-from PySide6.QtQuick import QQuickView  # noqa: E402
+from PySide6.QtCore import QEventLoop, QTimer, QUrl
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQuick import QQuickView
 
-from docsummarizer.model_manager import StructuredSummary, SummaryPoint  # noqa: E402
-from docsummarizer.provenance import SourceSpan  # noqa: E402
-from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant  # noqa: E402
+from docsummarizer.model_manager import StructuredSummary, SummaryPoint
+from docsummarizer.provenance import SourceSpan
+from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
+from docsummarizer.ui.fonts import register_fonts
 
 _QML_DIR = REPO / "src" / "docsummarizer" / "ui" / "qml"
 _PREVIEW = REPO / "scripts" / "_preview.qml"
+# Every screen _preview.qml shows, and every theme.
+SCREENS = ("summary", "extract", "batch", "config", "firstrun")
+THEMES = ("dark", "light")
 
 SAMPLE_SOURCE = (
-    "The dominant sequence transduction models are based on complex recurrent or "
-    "convolutional neural networks that include an encoder and a decoder. We propose a "
-    "new simple network architecture, the Transformer, based solely on attention "
-    "mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two "
-    "machine translation tasks show these models to be superior in quality while being "
-    "more parallelizable and requiring significantly less time to train."
+    "Most small farm wells today rely on piston pumps that need a skilled mechanic, "
+    "spare seals and a steady supply of grease to keep them running. We describe a "
+    "new simple pump design, the spiral-vane pump, based solely on a turning vane, "
+    "dispensing with pistons and valves entirely. Trials at two village wells show "
+    "these pumps to be superior in output while being easier to repair and requiring "
+    "significantly less time to assemble."
 )
 
 
 def _sample_summary() -> StructuredSummary:
     src = SAMPLE_SOURCE
     q1 = (
-        "We propose a new simple network architecture, the Transformer, based solely on "
-        "attention mechanisms, dispensing with recurrence and convolutions entirely."
+        "We describe a new simple pump design, the spiral-vane pump, based solely on a "
+        "turning vane, dispensing with pistons and valves entirely."
     )
     q2 = (
-        "Experiments on two machine translation tasks show these models to be superior in "
-        "quality while being more parallelizable and requiring significantly less time to train."
+        "Trials at two village wells show these pumps to be superior in output while being "
+        "easier to repair and requiring significantly less time to assemble."
     )
     s1, s2 = src.find(q1), src.find(q2)
     return StructuredSummary(
         "detailed",
-        "Vaswani et al. introduce the Transformer — an attention-only architecture that "
-        "removes recurrence and convolution, trains faster, and sets a new benchmark.",
+        "The authors introduce the spiral-vane pump — a vane-only design that removes "
+        "pistons and valves, assembles faster, and sets a new output record.",
         [
-            SummaryPoint("A pure-attention architecture", SourceSpan(s1, s1 + len(q1), q1, 1.0)),
-            SummaryPoint("Faster, parallelizable training", SourceSpan(s2, s2 + len(q2), q2, 1.0)),
-            SummaryPoint("State-of-the-art translation quality", None),
+            SummaryPoint("A piston-free pump design", SourceSpan(s1, s1 + len(q1), q1, 1.0)),
+            SummaryPoint("Faster, simpler repair", SourceSpan(s2, s2 + len(q2), q2, 1.0)),
+            SummaryPoint("Record output at village wells", None),
         ],
         None,
         "rendered",
@@ -69,45 +76,83 @@ def _sample_summary() -> StructuredSummary:
 
 
 class _FakeSummarizer:
-    def summarize_structured(self, text: str, summary_type: str = "detailed") -> StructuredSummary:
+    def summarize_structured(
+        self, _text: str, _summary_type: str, /, **_options: object
+    ) -> StructuredSummary:
         return _sample_summary()
 
-    def summarize(self, text: str, summary_type: str = "detailed") -> str:
+    def summarize(self, _text: str, _summary_type: str, /, **_options: object) -> str:
         return _sample_summary().lead or ""
 
     def close(self) -> None:
         pass
 
 
-def main() -> int:
-    screen = sys.argv[1] if len(sys.argv) > 1 else "summary"
-    theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
-    out = sys.argv[3] if len(sys.argv) > 3 else str(REPO / f"render-{screen}-{theme}.png")
+def _fake_factory(_model: Path, _threads: int | None, _gpu_layers: int) -> _FakeSummarizer:
+    return _FakeSummarizer()
 
-    app = QGuiApplication(sys.argv)  # noqa: F841 - kept alive for the view
-    from docsummarizer.ui.fonts import register_fonts
 
-    register_fonts()
-    bridge = ConsoleBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=True)
-    bridge._summarizer = _FakeSummarizer()  # mark model-ready
-    bridge._current_file = "attention.pdf"
-    bridge._extracted_text = SAMPLE_SOURCE
+@final
+class _PreviewBridge(ConsoleBridge):
+    """A bridge seeded with a ready model, a document and batch rows, for a still image."""
 
+    def seed_document(self, name: str, text: str) -> None:
+        self._summarizer = _FakeSummarizer()  # mark model-ready
+        self._current_file = name
+        self._extracted_text = text
+
+    def seed_batch_rows(self, rows: list[dict[str, object]]) -> None:
+        self._batch_rows = rows
+        self.batchRowsChanged.emit()
+
+
+class _Args(argparse.Namespace):
+    """The parsed command line."""
+
+    screen: str = "summary"
+    theme: str = "dark"
+    out: str | None = None
+
+
+def _parse_args() -> _Args:
+    parser = argparse.ArgumentParser(description="Render a QML screen to a PNG, offscreen.")
+    _ = parser.add_argument("screen", nargs="?", default=_Args.screen, choices=SCREENS)
+    _ = parser.add_argument("theme", nargs="?", default=_Args.theme, choices=THEMES)
+    _ = parser.add_argument(
+        "out", nargs="?", help="default: render-<screen>-<theme>.png in the repo"
+    )
+    return parser.parse_args(namespace=_Args())
+
+
+def load_preview(screen: str, theme: str) -> QQuickView:
+    """Show screen in theme, seeded with sample state; the caller keeps the returned view.
+
+    Raises ``RuntimeError`` when the QML does not load or the preview shell lacks
+    a property this function sets.
+    """
+    _ = register_fonts()
     view = QQuickView()
+    # The view owns the bridge, so the bridge outlives every binding that reads it;
+    # a bridge freed first turns each of them into a "Cannot read property of null".
+    bridge = _PreviewBridge(summarizer_factory=_fake_factory, synchronous=True, parent=view)
+    bridge.seed_document("spiral-vane-pump.pdf", SAMPLE_SOURCE)
     view.engine().addImportPath(str(_QML_DIR))
-    view.rootContext().setContextProperty("bridge", bridge)
+    view.setInitialProperties({"bridge": bridge})
     view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
     view.resize(1240, 820)
     view.setSource(QUrl.fromLocalFile(str(_PREVIEW)))
     if view.status() != QQuickView.Status.Ready:
-        for err in view.errors():
-            print(err.toString())
-        return 1
+        raise RuntimeError("\n".join(err.toString() for err in view.errors()))
 
     root = view.rootObject()
-    root.setProperty("darkTheme", theme == "dark")
-    root.setProperty("screen", screen)
-    root.setProperty("firstRun", screen == "firstrun")
+    seeded = (
+        root.setProperty("darkTheme", theme == "dark"),
+        root.setProperty("screen", screen),
+        root.setProperty("firstRun", screen == "firstrun"),
+    )
+    if not all(seeded):
+        msg = f"{_PREVIEW.name} lacks a darkTheme, screen or firstRun property"
+        raise RuntimeError(msg)
     view.show()
 
     bridge.modelReadyChanged.emit()
@@ -115,21 +160,38 @@ def main() -> int:
     if screen == "summary":
         bridge.summaryReady.emit(summary_to_variant(_sample_summary()))
     if screen == "batch":
-        bridge._batch_rows = [
-            {"name": "1706.03762.pdf", "status": "DONE", "tokens": 312},
-            {"name": "1810.04805.pdf", "status": "PROCESSING", "tokens": 0},
-            {"name": "2005.14165.pdf", "status": "QUEUED", "tokens": 0},
-        ]
-        bridge.batchRowsChanged.emit()
+        bridge.seed_batch_rows(
+            [
+                {"name": "pump-trial-north.pdf", "status": "DONE", "tokens": 312},
+                {"name": "pump-trial-south.pdf", "status": "PROCESSING", "tokens": 0},
+                {"name": "pump-trial-east.pdf", "status": "QUEUED", "tokens": 0},
+            ]
+        )
+    return view
+
+
+def main() -> int:
+    """Render the screen and theme the command line names; 0 when the PNG is saved."""
+    args = _parse_args()
+    out = args.out or str(REPO / f"render-{args.screen}-{args.theme}.png")
+
+    _app = QGuiApplication(sys.argv)  # kept alive for the view
+    try:
+        view = load_preview(args.screen, args.theme)
+    except RuntimeError as exc:
+        print(f"FAILED: {exc}")
+        return 1
 
     loop = QEventLoop()
     QTimer.singleShot(600, loop.quit)
-    loop.exec()
+    _ = loop.exec()
     image = view.grabWindow()
     if image.isNull() or image.width() == 0:
         print("FAILED: grabbed image is null/empty")
         return 1
-    image.save(out)
+    if not image.save(out):
+        print(f"FAILED: could not write {out}")
+        return 1
     print(f"saved {out}  ({image.width()}x{image.height()})")
     return 0
 

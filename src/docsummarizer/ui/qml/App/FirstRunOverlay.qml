@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Basic
@@ -11,7 +12,10 @@ import App
 Item {
     id: screen
 
-    signal enter()
+    // The ConsoleBridge, passed down from Main.qml.
+    required property var bridge
+
+    signal enter
 
     property bool shown: true
     property bool started: false
@@ -26,7 +30,7 @@ Item {
     }
 
     Connections {
-        target: bridge
+        target: screen.bridge
         function onProgress(pct, msg) {
             screen.statusLine = msg;
         }
@@ -82,9 +86,7 @@ Item {
 
             Text {
                 Layout.fillWidth: true
-                text: "DocSummarizer runs entirely offline. Before the first summary, the "
-                    + "local language model is downloaded once and cached on this machine. "
-                    + "Nothing leaves your device after this step."
+                text: "DocSummarizer runs entirely offline. Before the first summary, the " + "local language model is downloaded once and cached on this machine. " + "Nothing leaves your device after this step."
                 color: Theme.text
                 font.family: Theme.body
                 font.pixelSize: 15
@@ -115,7 +117,7 @@ Item {
                         spacing: 5
                         Text {
                             Layout.fillWidth: true
-                            text: bridge.modelName
+                            text: screen.bridge.modelName
                             color: Theme.inkSoft
                             font.family: Theme.serif
                             font.pixelSize: 19
@@ -123,7 +125,7 @@ Item {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: bridge.modelQuant + " · " + bridge.modelSizeGb + " GB · ONE-TIME"
+                            text: screen.bridge.modelQuant + " · " + screen.bridge.modelSizeGb + " GB · ONE-TIME"
                             color: Theme.faint
                             font.family: Theme.mono
                             font.pixelSize: 10
@@ -132,7 +134,7 @@ Item {
                     }
 
                     Text {
-                        text: Math.round(bridge.downloadPercent) + "%"
+                        text: Math.round(screen.bridge.downloadPercent) + "%"
                         color: Theme.accent
                         font.family: Theme.mono
                         font.pixelSize: 26
@@ -145,7 +147,7 @@ Item {
                 Layout.fillWidth: true
                 from: 0
                 to: 1
-                value: bridge.downloadPercent / 100
+                value: screen.bridge.downloadPercent / 100
             }
 
             Text {
@@ -162,17 +164,13 @@ Item {
             Button {
                 id: action
                 Layout.fillWidth: true
-                enabled: !(screen.started && bridge.downloadPercent < 100)
-                text: bridge.downloadPercent >= 100
-                    ? "Enter Console"
-                    : (screen.started
-                        ? "Downloading… " + Math.round(bridge.downloadPercent) + "%"
-                        : "Begin Download")
+                enabled: !(screen.started && screen.bridge.downloadPercent < 100)
+                text: screen.bridge.downloadPercent >= 100 ? "Enter Console" : (screen.started ? "Downloading… " + Math.round(screen.bridge.downloadPercent) + "%" : "Begin Download")
                 onClicked: {
                     if (!screen.started) {
                         screen.started = true;
-                        bridge.beginDownload();
-                    } else if (bridge.downloadPercent >= 100) {
+                        screen.bridge.beginDownload();
+                    } else if (screen.bridge.downloadPercent >= 100) {
                         screen.enter();
                     }
                 }

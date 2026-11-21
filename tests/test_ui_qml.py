@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Headless QML smoke test: every component must compile AND instantiate.
 
 Runs under the offscreen platform (set in conftest). ``status == Ready`` means
@@ -14,6 +15,8 @@ import pytest
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
+
+from docsummarizer.ui.bridge import ConsoleBridge
 
 _QML_DIR = Path(__file__).resolve().parents[1] / "src" / "docsummarizer" / "ui" / "qml"
 _APP_DIR = _QML_DIR / "App"
@@ -37,23 +40,33 @@ _COMPONENTS = [
     "ConfigScreen",
     "FirstRunOverlay",
 ]
+# The components that declare `required property var bridge`.
+_TAKES_BRIDGE = frozenset(
+    {
+        "Main",
+        "TopBar",
+        "SummaryScreen",
+        "ExtractScreen",
+        "BatchScreen",
+        "ConfigScreen",
+        "FirstRunOverlay",
+    }
+)
 
 
 @pytest.fixture(scope="session")
 def qapp() -> QGuiApplication:
-    return QGuiApplication.instance() or QGuiApplication([])
+    app = QGuiApplication.instance() or QGuiApplication([])
+    assert isinstance(app, QGuiApplication)
+    return app
 
 
 @pytest.fixture
 def engine(qapp: QGuiApplication) -> QQmlApplicationEngine:
-    from docsummarizer.ui.bridge import ConsoleBridge
-
+    # The engine needs the application object to exist first.
+    assert qapp is QGuiApplication.instance()
     eng = QQmlApplicationEngine()
     eng.addImportPath(str(_QML_DIR))
-    bridge = ConsoleBridge()
-    eng.rootContext().setContextProperty("bridge", bridge)
-    # Keep the bridge alive for the engine's lifetime.
-    eng.setProperty("_bridge", bridge)
     return eng
 
 
@@ -61,5 +74,8 @@ def engine(qapp: QGuiApplication) -> QQmlApplicationEngine:
 def test_component_compiles_and_instantiates(engine: QQmlApplicationEngine, name: str) -> None:
     component = QQmlComponent(engine, QUrl.fromLocalFile(str(_APP_DIR / f"{name}.qml")))
     assert component.status() == QQmlComponent.Status.Ready, component.errorString()
-    obj = component.create(engine.rootContext())
+    # The engine owns the bridge, so it outlives every binding that reads it.
+    bridge = ConsoleBridge(parent=engine)
+    initial = {"bridge": bridge} if name in _TAKES_BRIDGE else {}
+    obj = component.createWithInitialProperties(initial, engine.rootContext())
     assert obj is not None, f"{name}.qml failed to instantiate: {component.errorString()}"

@@ -1,6 +1,6 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls.Basic
 import QtQuick.Dialogs
 import App
 
@@ -9,6 +9,9 @@ import App
 Item {
     id: screen
 
+    // The ConsoleBridge, passed down from Main.qml.
+    required property var bridge
+
     property string folder: ""
     property string outDir: ""
     property int doneCount: 0
@@ -16,7 +19,7 @@ Item {
     property real progress: 0
 
     Connections {
-        target: bridge
+        target: screen.bridge
         function onBatchProgress(done, total, name) {
             screen.totalCount = total;
             screen.doneCount = done;  // files completed before the in-flight one
@@ -32,11 +35,11 @@ Item {
     // Let the bridge convert URLs (cross-platform) rather than hand-rolling it.
     FolderDialog {
         id: folderDialog
-        onAccepted: screen.folder = bridge.urlToPath(selectedFolder.toString())
+        onAccepted: screen.folder = screen.bridge.urlToPath(selectedFolder.toString())
     }
     FolderDialog {
         id: outputDialog
-        onAccepted: screen.outDir = bridge.urlToPath(selectedFolder.toString())
+        onAccepted: screen.outDir = screen.bridge.urlToPath(selectedFolder.toString())
     }
 
     ColumnLayout {
@@ -61,7 +64,7 @@ Item {
                     font.weight: Font.DemiBold
                 }
                 Text {
-                    text: bridge.batchRows.length + " DOCUMENTS · OUTPUT → " + (screen.outDir !== "" ? screen.outDir : "—") + " · " + bridge.summaryType.toUpperCase()
+                    text: screen.bridge.batchRows.length + " DOCUMENTS · OUTPUT → " + (screen.outDir !== "" ? screen.outDir : "—") + " · " + screen.bridge.summaryType.toUpperCase()
                     textFormat: Text.PlainText
                     color: Theme.faint
                     font.family: Theme.mono
@@ -73,7 +76,7 @@ Item {
                 Layout.fillWidth: true
             }
             Text {
-                text: screen.doneCount + " / " + (screen.totalCount > 0 ? screen.totalCount : bridge.batchRows.length)
+                text: screen.doneCount + " / " + (screen.totalCount > 0 ? screen.totalCount : screen.bridge.batchRows.length)
                 color: Theme.accent
                 font.family: Theme.mono
                 font.pixelSize: 11
@@ -89,10 +92,10 @@ Item {
                 onClicked: outputDialog.open()
             }
             ConsoleButton {
-                text: bridge.busy ? "Processing…" : "Process All"
+                text: screen.bridge.busy ? "Processing…" : "Process All"
                 primary: true
-                enabled: screen.folder !== "" && screen.outDir !== "" && bridge.modelReady && !bridge.busy
-                onClicked: bridge.batchProcess(screen.folder, screen.outDir)
+                enabled: screen.folder !== "" && screen.outDir !== "" && screen.bridge.modelReady && !screen.bridge.busy
+                onClicked: screen.bridge.batchProcess(screen.folder, screen.outDir)
             }
         }
 
@@ -148,8 +151,9 @@ Item {
             Layout.fillHeight: true
             clip: true
             spacing: 8
-            model: bridge.batchRows
+            model: screen.bridge.batchRows
             delegate: Rectangle {
+                id: row
                 required property var modelData
                 required property int index
                 width: ListView.view ? ListView.view.width : 0
@@ -165,7 +169,7 @@ Item {
                     spacing: 14
                     Hex {
                         size: 22
-                        glyph: String(index + 1).padStart(2, "0")
+                        glyph: String(row.index + 1).padStart(2, "0")
                         glyphSize: 9
                     }
                     ColumnLayout {
@@ -173,7 +177,7 @@ Item {
                         spacing: 3
                         Text {
                             Layout.fillWidth: true
-                            text: modelData.name
+                            text: row.modelData.name
                             textFormat: Text.PlainText
                             color: Theme.inkSoft
                             font.family: Theme.body
@@ -181,7 +185,7 @@ Item {
                             elide: Text.ElideRight
                         }
                         Text {
-                            text: modelData.status === "DONE" ? modelData.tokens + " TOK" : modelData.status.toLowerCase()
+                            text: row.modelData.status === "DONE" ? row.modelData.tokens + " TOK" : row.modelData.status.toLowerCase()
                             color: Theme.faint
                             font.family: Theme.mono
                             font.pixelSize: 9
@@ -189,8 +193,8 @@ Item {
                         }
                     }
                     StatusChip {
-                        status: modelData.status
-                        meta: modelData.status === "DONE" ? modelData.tokens + " TOK" : ""
+                        status: row.modelData.status
+                        meta: row.modelData.status === "DONE" ? row.modelData.tokens + " TOK" : ""
                     }
                 }
             }
@@ -200,7 +204,7 @@ Item {
     // Empty hint when nothing queued yet.
     Text {
         anchors.centerIn: parent
-        visible: bridge.batchRows.length === 0
+        visible: screen.bridge.batchRows.length === 0
         text: "Add a folder of documents to begin"
         color: Theme.faint
         font.family: Theme.mono

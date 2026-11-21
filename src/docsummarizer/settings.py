@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Persisted user settings (CPU threads, GPU offload, appearance, language).
 
 A tiny JSON file under the app-data ``config`` dir. Everything is
@@ -11,11 +12,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
-from .logger import log_debug, log_warning
-from .model_manager import LANGUAGE_AUTO, normalize_language
-from .paths import app_data_dir
+from docsummarizer.logger import log_debug, log_warning
+from docsummarizer.model_manager import LANGUAGE_AUTO, normalize_language
+from docsummarizer.paths import app_data_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # llama.cpp uses -1 to mean "offload every layer to the GPU".
 _ALL_GPU_LAYERS = -1
@@ -64,7 +68,7 @@ def load_settings() -> Settings:
         return Settings()
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = cast("object", json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError) as exc:
         log_warning(f"Could not read settings file ({exc!s}); using defaults")
         return Settings()
@@ -72,26 +76,27 @@ def load_settings() -> Settings:
     if not isinstance(data, dict):
         log_warning("Settings file is not a JSON object; using defaults")
         return Settings()
+    fields = cast("dict[str, object]", data)
 
-    threads = data.get("n_threads")
+    threads = fields.get("n_threads")
     # Tolerate hand-edited garbage: only a positive int is a valid thread
     # count (bool is an int subclass, so exclude it explicitly).
     if not (isinstance(threads, int) and not isinstance(threads, bool) and threads >= 1):
         threads = None
 
-    appearance = data.get("appearance")
+    appearance = fields.get("appearance")
     if appearance not in _VALID_APPEARANCES:
         appearance = _DEFAULT_APPEARANCE
 
     # Deliberately not restricted to the GUI's picker list: a hand-edited
     # language the picker doesn't offer is still honoured, and anything
     # unusable (empty, wrong type, a pasted paragraph) normalizes to "auto".
-    language = data.get("output_language")
+    language = fields.get("output_language")
     language = normalize_language(language) if isinstance(language, str) else LANGUAGE_AUTO
 
     return Settings(
         n_threads=threads,
-        use_gpu=bool(data.get("use_gpu", False)),
+        use_gpu=bool(fields.get("use_gpu", False)),
         appearance=appearance,
         output_language=language,
     )
@@ -110,8 +115,8 @@ def save_settings(settings: Settings) -> None:
         # Write to a sibling temp file then atomically replace, so a crash
         # mid-write can't leave a half-written (corrupt) settings file.
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        _ = tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _ = tmp.replace(path)
         log_debug(f"Settings saved to {path}")
     except OSError as exc:
         log_warning(f"Could not save settings file ({exc!s})")

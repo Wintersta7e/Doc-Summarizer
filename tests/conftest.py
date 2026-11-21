@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Shared pytest fixtures.
 
 The big concern is that the production code derives its log/model
@@ -9,22 +10,25 @@ automatically for every test.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
 # Skip the Qt UI tests where PySide6 isn't installed (keeps a minimal env green).
-try:
-    import PySide6  # noqa: F401
-except ImportError:
+if importlib.util.find_spec("PySide6") is None:
     collect_ignore_glob = ["test_ui_*.py"]
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no
 # display or GPU/GL is required.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("QT_QUICK_BACKEND", "software")
+_ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_ = os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 
 @pytest.fixture(autouse=True)
@@ -43,17 +47,14 @@ def _isolated_app_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _reset_logger_singleton(monkeypatch: pytest.MonkeyPatch):
-    """Reset the lazy `_logger` between tests.
+def _reset_logger_singleton() -> Iterator[None]:
+    """Detach the app logger's handlers between tests.
 
-    `docsummarizer.logger._logger` is a process-wide singleton; without
-    resetting it, the first test creates a logger pointing at one
-    tmp_path and every subsequent test inherits it (with a stale file
-    handler pointing at a now-deleted tmp dir).
+    The named logger is a process-wide singleton; without detaching its
+    handlers, the first test creates a file handler pointing at one
+    tmp_path and every subsequent test inherits it (pointing at a
+    now-deleted tmp dir).
     """
-    from docsummarizer import logger as logger_module
-
-    monkeypatch.setattr(logger_module, "_logger", None)
     # Detach any existing handlers from the named logger so re-init is clean.
     named = logging.getLogger("DocSummarizer")
     for handler in list(named.handlers):
