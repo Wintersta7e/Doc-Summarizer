@@ -8,6 +8,7 @@ summarizer stands in for the llama-cpp-backed one.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -25,6 +26,8 @@ from docsummarizer.provenance import SourceSpan
 from docsummarizer.settings import load_settings
 from docsummarizer.ui import bridge as bridge_mod
 from docsummarizer.ui.bridge import ConsoleBridge, _quant_label, summary_to_variant
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -538,7 +541,7 @@ def test_batch_never_replaces_unchecked_files(qapp, monkeypatch, tmp_path) -> No
         p.read_bytes() == _SENTINEL and p.stat().st_mtime_ns == mtimes[p] for p in mtimes
     )
     written = sum((out / n).exists() for n in ("a.txt.detailed.txt", "b.md.detailed.txt"))
-    print(f"written={written} preexisting_identical={identical}")
+    _LOG.info("written=%s preexisting_identical=%s", written, identical)
     assert rows["c.txt"]["status"] == "SKIPPED"
     assert rows["c.txt"]["reason"] == "summary exists"
     assert written == 2
@@ -558,7 +561,7 @@ def test_batch_outputs_are_distinct_and_unscanned(qapp, monkeypatch, tmp_path) -
     bridge.batchProcess(str(src), str(out))
     second = _rows_by_name(bridge)
 
-    print(f"rows per run: {len(first)}, {len(second)}")
+    _LOG.info("rows per run: %s, %s", len(first), len(second))
     assert sorted(p.name for p in out.iterdir()) == ["a.md.detailed.txt", "a.txt.detailed.txt"]
     assert len(first) == len(second) == 2
     assert all(row["status"] == "DONE" for row in first.values())

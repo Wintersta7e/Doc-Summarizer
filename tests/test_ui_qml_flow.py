@@ -8,6 +8,7 @@ nothing here instantiates a QML file on its own.
 from __future__ import annotations
 
 import http.server
+import logging
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -32,6 +33,8 @@ from typing_extensions import override
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
 from docsummarizer.ui.app import LocalOnlyNetworkAccessManagerFactory, create_engine
 from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -185,11 +188,11 @@ def test_rendered_text_fetches_nothing(
     assert isinstance(image, QQuickItem), component.errorString()
     image.setParentItem(window.contentItem())
     _render_everything(bridge, window, port, lambda: None)
-    print(f"requests={len(hits)} {sorted(hits)}")
+    _LOG.info("requests=%s %s", len(hits), sorted(hits))
     assert hits == [], f"rendering fetched {sorted(hits)}"
     guard = engine.networkAccessManagerFactory()
     assert isinstance(guard, LocalOnlyNetworkAccessManagerFactory)
-    print(f"refused={guard.refused}")
+    _LOG.info("refused=%s", guard.refused)
     assert guard.refused > 0, "no payload reached a renderer: the test proves nothing"
 
 
@@ -220,7 +223,7 @@ def test_local_only_manager_refuses_remote_schemes(
 
     remote = [fetch(QUrl(f"{scheme}://127.0.0.1:{port}/x.png")) for scheme in ("http", "https")]
     local_reply = fetch(QUrl.fromLocalFile(str(local)))
-    print(f"requests={len(hits)} refused={factory.refused}")
+    _LOG.info("requests=%s refused=%s", len(hits), factory.refused)
     assert hits == []
     assert factory.refused == 2
     assert all(r.error() != QNetworkReply.NetworkError.NoError for r in remote)
@@ -269,7 +272,7 @@ def test_content_text_formats_are_explicit(
                     wrong.append(f"{tag} in {name}: textFormat {actual}, expected {expected}")
 
     _render_everything(bridge, window, port, check)
-    print(f"renderers checked per payload: {seen}")
+    _LOG.info("renderers checked per payload: %s", seen)
     assert all(seen.values()), f"a payload reached no renderer: {seen}"
     assert wrong == []
 
@@ -287,7 +290,7 @@ def test_no_qml_opens_a_link() -> None:
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if "LinkActivated" in line
     ]
-    print(f"qml files scanned={len(files)} offenders={offenders}")
+    _LOG.info("qml files scanned=%s offenders=%s", len(files), offenders)
     assert files, "scanned no QML file"
     assert offenders == []
 
@@ -357,7 +360,7 @@ def test_summary_text_loads_no_local_file_image(
     finally:
         _ = qInstallMessageHandler(previous)
     opened = sorted({m for m in messages if "example.invalid" in m})
-    print(f"opened={opened} shown={shown}")
+    _LOG.info("opened=%s shown=%s", opened, shown)
     assert opened == []
     assert all(shown.values()), f"a payload reached no Markdown renderer: {shown}"
     hidden = [tag for tag, texts in shown.items() for t in texts if t.count("![") != 2]

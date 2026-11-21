@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: MIT
 """Published claims the repo must keep true.
 
-Each test reads tracked files as they stand in the working tree, prints what it
+Each test reads tracked files as they stand in the working tree, logs what it
 scanned and fails when it scanned nothing. Phrases match whitespace-insensitively,
 so re-wrapping a line cannot hide one.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -38,9 +41,9 @@ _PYPROJECT_STALE = (
 
 
 def _read(rel: str) -> str:
-    """Return a repo file's text, printing it as scanned; an empty file fails."""
+    """Return a repo file's text, logging it as scanned; an empty file fails."""
     text = (_ROOT / rel).read_text(encoding="utf-8")
-    print(f"scanned {rel}: {len(text.splitlines())} lines")
+    _LOG.info("scanned %s: %s lines", rel, len(text.splitlines()))
     assert text.strip(), f"{rel} is empty"
     return text
 
@@ -57,7 +60,7 @@ def _hits(text: str, phrases: Sequence[str]) -> list[str]:
 
 
 def _tracked_files() -> list[str]:
-    """Return every path git tracks, printing the count; none listed fails."""
+    """Return every path git tracks, logging the count; none listed fails."""
     git = shutil.which("git")
     assert git is not None, "git is not on PATH"
     listing = subprocess.run(
@@ -67,7 +70,7 @@ def _tracked_files() -> list[str]:
         check=True,
     ).stdout
     paths = [rel for rel in listing.decode("utf-8").split("\0") if rel]
-    print(f"tracked files: {len(paths)}")
+    _LOG.info("tracked files: %s", len(paths))
     assert paths, "git ls-files listed 0 files"
     return paths
 
@@ -87,8 +90,8 @@ def test_setup_scripts_and_lockfile_are_gone() -> None:
         for number, line in enumerate((_ROOT / rel).read_bytes().splitlines(), start=1)
         if _REMOVED_FILE_REF.search(line)
     ]
-    print(f"files scanned: {len(scanned)}")
-    print(f"references found: {refs}")
+    _LOG.info("files scanned: %s", len(scanned))
+    _LOG.info("references found: %s", refs)
     assert scanned, "scanned 0 files"
     assert not present, f"still present: {present}"
     assert not refs, f"still referenced: {refs}"
@@ -132,7 +135,7 @@ def test_readme_names_no_macos() -> None:
     lines = _read("README.md").splitlines()
     badges = [line for line in lines if "img.shields.io/badge/platform-" in line]
     os_rows = [line for line in lines if line.startswith("| OS |")]
-    print(f"platform badges: {len(badges)}; OS rows: {len(os_rows)}")
+    _LOG.info("platform badges: %s; OS rows: %s", len(badges), len(os_rows))
     assert len(badges) == 1, f"expected one platform badge, found {len(badges)}"
     assert len(os_rows) == 1, f"expected one OS row, found {len(os_rows)}"
     macos = [line for line in badges + os_rows if "macos" in line.casefold()]
@@ -173,7 +176,7 @@ def test_pre_commit_type_check_hook_uses_the_dev_environment() -> None:
     code = re.sub(r"#.*", "", _read(_PRE_COMMIT))
     repos = re.split(r"^\s*-\s*repo:", code, flags=re.MULTILINE)[1:]
     typed = [repo for repo in repos if _TYPES_HOOK_ID.search(repo)]
-    print(f"repos: {len(repos)}; with a type-check hook: {len(typed)}")
+    _LOG.info("repos: %s; with a type-check hook: %s", len(repos), len(typed))
     assert typed, f"no basedpyright hook in {_PRE_COMMIT}"
     isolated = [repo.split("\n", 1)[0].strip() for repo in typed if "language: system" not in repo]
     assert not isolated, f"type-check hook without the project's dependencies: {isolated}"

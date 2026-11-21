@@ -12,6 +12,7 @@ refusals.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import socket
 import stat
@@ -24,6 +25,8 @@ import pytest
 from docsummarizer import cli, io_helpers
 from docsummarizer.document_parser import find_documents
 from docsummarizer.io_helpers import publish, same_file, write_summary_txt
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -155,7 +158,7 @@ def test_same_file_matches_every_spelling_of_one_path(tmp_path: Path) -> None:
         "hard link": (hardlink, real),
     }
     for label, (a, b) in positives.items():
-        print(f"same_file {label}: {same_file(a, b)}")
+        _LOG.info("same_file %s: %s", label, same_file(a, b))
         assert same_file(a, b), label
 
     assert not same_file(sibling, real)
@@ -263,7 +266,7 @@ def test_folder_run_never_replaces_unchecked_files(
         p.read_bytes() == SENTINEL and p.stat().st_mtime_ns == mtimes[p] for p in mtimes
     )
     written = sum((out / n).exists() for n in ("a.txt.detailed.txt", "b.md.detailed.txt"))
-    print(f"written={written} preexisting_identical={identical}")
+    _LOG.info("written=%s preexisting_identical=%s", written, identical)
     assert written == 2
     assert identical == 2
     assert "c.txt: skipped: summary exists" in printed
@@ -360,7 +363,7 @@ def test_folder_run_never_scans_its_outputs(
     assert _run_cli(monkeypatch, str(src), "-o", str(out)) == 0
     second = capsys.readouterr().out
 
-    print(f"scanned per run: {scanned}")
+    _LOG.info("scanned per run: %s", scanned)
     assert scanned == [3, 3]
     assert first_calls == 3
     assert cli_harness.calls == first_calls  # the second run wrote nothing
@@ -476,6 +479,6 @@ def test_two_writers_concurrent_cli(
             if (saved, appeared, enders) != (1, 1, 1) or _partials(out):
                 violations += 1
 
-    print(f"rounds x inputs = {checked}, violations = {violations}")
+    _LOG.info("rounds x inputs = %s, violations = %s", checked, violations)
     assert checked > 0
     assert violations == 0

@@ -35,6 +35,8 @@ from docsummarizer.model_manager import (
     normalize_language,
 )
 
+_LOG = logging.getLogger(__name__)
+
 _MB = 1024 * 1024
 
 
@@ -67,7 +69,8 @@ def test_summary_types_tuple_matches_constants() -> None:
 
 def test_models_directory_uses_isolated_path(tmp_path: Path) -> None:
     """`conftest._isolated_app_dirs` redirects platform env vars to tmp_path;
-    the resolved models dir must land under it."""
+    the resolved models dir must land under it.
+    """
     d = model_manager.get_models_directory()
     assert str(d).startswith(str(tmp_path))
     assert d.name == "models"
@@ -594,7 +597,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     fake = _PerfLLM(_DETAILED_JSON)
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake).summarize_structured("A short note about the bakery.", SUMMARY_TYPE_DETAILED)
-    print(f"calls counted: a {r.run_stats.calls}")
+    _LOG.info("calls counted: a %s", r.run_stats.calls)
     assert isinstance(r.run_stats, RunStats)
     assert r.run_stats.calls == len(fake.calls) == 1
     _assert_counter_sums(r.run_stats, fake.calls)
@@ -605,7 +608,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     r = _shell(fake).summarize_structured(
         "A short note about the bakery.", SUMMARY_TYPE_DETAILED, should_cancel=lambda: False
     )
-    print(f"calls counted: b {r.run_stats.calls}")
+    _LOG.info("calls counted: b %s", r.run_stats.calls)
     assert fake.calls[0]["stream"] is True
     assert r.run_stats.calls == len(fake.calls) == 1
     assert r.run_stats.prompt_tokens == fake.n_tokens - fake.calls[0]["out"]
@@ -615,7 +618,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     fake = _PerfLLM(_DETAILED_JSON)
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake, n_ctx=2048).summarize_structured(_bakery_document(), SUMMARY_TYPE_DETAILED)
-    print(f"calls counted: c {r.run_stats.calls}")
+    _LOG.info("calls counted: c %s", r.run_stats.calls)
     assert r.run_stats.calls == len(fake.calls) > 1
     _assert_counter_sums(r.run_stats, fake.calls)
 
@@ -623,7 +626,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     fake = _PerfLLM()
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake, n_ctx=2048).summarize_structured(_bakery_document(), SUMMARY_TYPE_BRIEF)
-    print(f"calls counted: d {r.run_stats.calls}")
+    _LOG.info("calls counted: d %s", r.run_stats.calls)
     assert r.run_stats.calls == len(fake.calls) > 1
     _assert_counter_sums(r.run_stats, fake.calls)
 
@@ -633,7 +636,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     s = _shell(fake)
     _ = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
     r = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
-    print(f"calls counted: e {r.run_stats.calls}")
+    _LOG.info("calls counted: e %s", r.run_stats.calls)
     assert r.run_stats.calls == 1
     assert r.run_stats.prompt_evaluated < r.run_stats.prompt_tokens
 
@@ -641,7 +644,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     fake = _PerfLLM(_DETAILED_JSON, counters=False)
     _fake_llama_cpp(monkeypatch, fake)
     r = _shell(fake).summarize_structured("A short note about the bakery.", SUMMARY_TYPE_DETAILED)
-    print(f"calls counted: f {r.run_stats.calls}")
+    _LOG.info("calls counted: f %s", r.run_stats.calls)
     assert r.run_stats.calls == len(fake.calls) == 1
     assert r.run_stats.prompt_evaluated is None
     assert r.run_stats.prompt_seconds is None
@@ -739,7 +742,7 @@ def test_run_stats_log_line_once_per_request(
     calls = fake.calls[first:]
 
     records = _run_stats_records(caplog)
-    print(f"run_stats records: {records}")
+    _LOG.info("parsed run_stats records: %s", records)
     assert len(records) == 1
     record = records[0]
     assert list(record) == _RUN_STATS_KEYS
@@ -751,7 +754,9 @@ def test_run_stats_log_line_once_per_request(
         assert record["prompt_tok_s"] != f"{prompt / prompt_s:.1f}"
 
     log_files = sorted(logger_module.get_log_directory().glob("docsummarizer_*.log"))
-    print(f"caplog records scanned: {len(caplog.records)}; log files scanned: {len(log_files)}")
+    _LOG.info(
+        "caplog records scanned: %s; log files scanned: %s", len(caplog.records), len(log_files)
+    )
     assert caplog.records
     assert log_files
     assert all(_SENTINEL not in r.getMessage() for r in caplog.records)
@@ -800,7 +805,7 @@ def test_run_stats_partial_on_cancel_and_fallback(
                 _bakery_document(), SUMMARY_TYPE_DETAILED, should_cancel=lambda f=fake: f.flag
             )
         records = _run_stats_records(caplog)
-        print(f"cancel after_first_chunk={after_first_chunk}: {records}")
+        _LOG.info("cancel after_first_chunk=%s: %s", after_first_chunk, records)
         assert len(records) == 1
         assert int(records[0]["calls"]) == len(fake.calls) == 1
         assert int(records[0]["prompt_evaluated"]) == fake.calls[0]["evaluated"]
@@ -815,7 +820,7 @@ def test_run_stats_partial_on_cancel_and_fallback(
     )
     json_calls = sum(1 for c in fake.calls if "response_format" in c["kwargs"])
     prose_calls = len(fake.calls) - json_calls
-    print(f"fallback calls: json={json_calls} prose={prose_calls}")
+    _LOG.info("fallback calls: json=%s prose=%s", json_calls, prose_calls)
     assert json_calls > 0
     assert prose_calls > 0
     records = _run_stats_records(caplog)
@@ -840,7 +845,7 @@ def test_no_character_ratio_speed_log() -> None:
         count = sum(1 for line in lines if old_logger in line or ratio.search(line))
         if count:
             hits[path.relative_to(root).as_posix()] = count
-    print(f"files scanned: {len(files)}; hits: {hits}")
+    _LOG.info("files scanned: %s; hits: %s", len(files), hits)
     assert files
     for name, count in hits.items():
         assert count <= allowed.get(name, 0), f"{name}: {count}"

@@ -8,6 +8,7 @@ locate the source sentence it came from, by char offsets into the full text.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import FrozenInstanceError
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -23,6 +24,8 @@ from docsummarizer.provenance import (
     locate_quote,
     split_sentences,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -138,7 +141,7 @@ def test_paraphrase_below_contiguous_bar_is_not_located() -> None:
     sizes = [block.size for block in matcher.get_matching_blocks()]
     coverage = sum(sizes) / len(q)
     longest = max(sizes) / len(q)
-    print(f"coverage={coverage:.3f} longest={longest:.3f}")
+    _LOG.info("coverage=%.3f longest=%.3f", coverage, longest)
     assert coverage >= 0.6
     assert longest < 0.5
     assert locate_quote(quote, _WATER) is None
@@ -194,7 +197,7 @@ def test_verified_predicate_cases() -> None:
     for label, quote, text, threshold, want, want_score in cases:
         span = locate_quote(quote, text, threshold=threshold)
         got = None if span is None else span.quote
-        print(f"{label}: expected={want!r} got={got!r}")
+        _LOG.info("%s: expected=%r got=%r", label, want, got)
         assert got == want, label
         if span is not None:
             assert is_verified_match(quote, span.quote), label
@@ -202,7 +205,7 @@ def test_verified_predicate_cases() -> None:
             if want_score is not None:
                 assert span.score == pytest.approx(want_score, abs=5e-4), label
     assert is_verified_match("pipes", _WATER) is False
-    print("g threshold below default: expected=ValueError")
+    _LOG.info("g threshold below default: expected=ValueError")
     with pytest.raises(ValueError, match="threshold"):
         _ = locate_quote(s2, _WATER, threshold=0.1)
 
@@ -249,10 +252,10 @@ def test_non_verbatim_quotes_are_never_located() -> None:
         assert " ".join(quote.lower().split()) not in collapsed_reference, quote
     located: list[str] = []
     for quote in quotes:
-        print(f"tried: {quote}")
+        _LOG.info("tried: %s", quote)
         if locate_quote(quote, reference) is not None:
             located.append(quote)
-    print(f"tried {len(quotes)}, located {len(located)}")
+    _LOG.info("tried %s, located %s", len(quotes), len(located))
     assert len(quotes) >= 40
     assert located == []
 

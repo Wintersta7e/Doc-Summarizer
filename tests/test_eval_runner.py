@@ -12,6 +12,7 @@ import dataclasses
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import subprocess
@@ -34,13 +35,15 @@ from docsummarizer.model_manager import (
 )
 from eval import cases, metrics, run
 
+_LOG = logging.getLogger(__name__)
+
 _REPO = Path(__file__).resolve().parents[1]
 
 
 def test_tier_matrices_match_the_spec() -> None:
     """The tiers hold exactly the cases the evaluation procedure names, in order."""
     for name, tier in cases.TIERS.items():
-        print(f"tier {name}: {len(tier)} cases")
+        _LOG.info("tier %s: %s cases", name, len(tier))
 
     smoke = cases.TIERS["smoke"]
     assert len(smoke) == 17
@@ -112,15 +115,15 @@ def test_split_documents_exceed_the_split_budget() -> None:
     max_tokens = inspect.signature(Summarizer.summarize).parameters["max_tokens"].default
     prose = cases.SPLIT_N_CTX - max_tokens - model_manager._SCAFFOLD_TOKENS
     json_budget = cases.SPLIT_N_CTX - max_tokens - model_manager._STRUCTURED_SCAFFOLD_TOKENS
-    print(f"split budgets at {cases.SPLIT_N_CTX}: prose {prose}, json {json_budget}")
+    _LOG.info("split budgets at %s: prose %s, json %s", cases.SPLIT_N_CTX, prose, json_budget)
 
     split_docs = sorted({case.doc for case in cases.TIERS["lang"] if case.split})
     budget = max(prose, json_budget)
     for doc in split_docs:
         margin = cases.DOCUMENTS[doc].tokens - budget
-        print(f"{doc}: margin {margin}")
+        _LOG.info("%s: margin %s", doc, margin)
         assert margin > 0, doc
-    print(f"documents checked: {len(split_docs)}")
+    _LOG.info("documents checked: %s", len(split_docs))
     assert split_docs
     assert cases.SPLIT_N_CTX == 4096
 
@@ -135,7 +138,7 @@ def test_no_real_path_in_harness_files() -> None:
     for path in files:
         text = path.read_text(encoding="utf-8")
         hits.extend(f"{path.name}: {needle}" for needle in needles if needle in text)
-    print(f"files scanned: {len(files)}; hits: {hits}")
+    _LOG.info("files scanned: %s; hits: %s", len(files), hits)
     assert files
     assert hits == []
 
@@ -154,7 +157,7 @@ def test_language_classifier_is_a_core_dependency() -> None:
         for entry in project["dependencies"]
         if re.split(r"[<>=!~ \[]", entry, maxsplit=1)[0] == "py3langid"
     ]
-    print(f"core entry: {matched}")
+    _LOG.info("core entry: %s", matched)
     assert "eval" not in project.get("optional-dependencies", {})
     assert len(matched) == 1
     assert (_REPO / "typings" / "py3langid" / "langid.pyi").is_file()
@@ -168,7 +171,9 @@ def test_gated_set_is_derived(tmp_path: Path) -> None:
     """
     package = Path(docsummarizer.__file__).parent
     real = run.derive_gated(package)
-    print(f"gated files: {len(real.files)} {real.files}; missing roots: {real.missing_roots}")
+    _LOG.info(
+        "gated files: %s %s; missing roots: %s", len(real.files), real.files, real.missing_roots
+    )
     assert len(real.files) > 0
     assert {"model_manager.py", "provenance.py"} <= set(real.files)
     assert not set(run.NOT_GATED) & set(real.files)
@@ -186,7 +191,7 @@ def test_gated_set_is_derived(tmp_path: Path) -> None:
     _ = (synthetic / "logger.py").write_text("", encoding="utf-8")
     _ = (synthetic / "provenance.py").write_text("", encoding="utf-8")
     gated = run.derive_gated(synthetic)
-    print(f"synthetic gated: {gated.files}")
+    _LOG.info("synthetic gated: %s", gated.files)
     assert "extra.py" in gated.files
     assert "logger.py" not in gated.files
     assert gated.missing_roots == ("native.py", "hardware.py")
@@ -253,7 +258,7 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     start = run.take_snapshot(_processes(False), _OWN_PID, host_processes=None)
     end = run.take_snapshot(_processes(True), _OWN_PID, host_processes=None)
     result = run.count_contention(start, end)
-    print(f"full table: {result}")
+    _LOG.info("full table: %s", result)
     assert result.local.count == 2
     assert result.local.unknown == 1
     assert set(result.local.busy) == {"inkwell-mapper", "quill-llama-runner"}
@@ -266,8 +271,11 @@ def test_contention_counts_llama_maps_and_access_denied() -> None:
     start = run.take_snapshot(_processes(False, idle_only), _OWN_PID, host_processes=None)
     end = run.take_snapshot(_processes(True, idle_only), _OWN_PID, host_processes=None)
     quiet = run.count_contention(start, end)
-    print(
-        f"idle only: count={quiet.local.count} unknown={quiet.local.unknown} idle={quiet.local.idle}"
+    _LOG.info(
+        "idle only: count=%s unknown=%s idle=%s",
+        quiet.local.count,
+        quiet.local.unknown,
+        quiet.local.idle,
     )
     assert quiet.local.count == 0
     assert quiet.local.unknown == 1
@@ -295,7 +303,7 @@ def test_host_process_table_reads_float_seconds() -> None:
     of the host's table, so the host side counts nothing.
     """
     parsed = run.parse_host_processes(_host_table("2.25"))
-    print(f"parsed host table: {parsed}")
+    _LOG.info("parsed host table: %s", parsed)
     assert parsed == {4242: ("orchard-llama-host", 2.25)}
 
 
@@ -311,7 +319,7 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     busy = run.count_contention(
         start, run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("7.25"))
     )
-    print(f"(a) host advanced 5 s: {busy.host}")
+    _LOG.info("(a) host advanced 5 s: %s", busy.host)
     assert busy.host is not None
     assert busy.host.count == 1
     assert busy.contended
@@ -319,7 +327,7 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     idle = run.count_contention(
         start, run.take_snapshot([], _OWN_PID, host_processes=lambda: _host_table("2.0"))
     )
-    print(f"(b) host idle: {idle.host}")
+    _LOG.info("(b) host idle: %s", idle.host)
     assert idle.host is not None
     assert idle.host.count == 0
     assert idle.host.idle == ("orchard-llama-host",)
@@ -327,7 +335,7 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
 
     blind = run.take_snapshot([], _OWN_PID, host_processes=lambda: None)
     unknown = run.count_contention(blind, blind)
-    print(f"(c) no interop: host_state={blind.host_state} host={unknown.host}")
+    _LOG.info("(c) no interop: host_state=%s host=%s", blind.host_state, unknown.host)
     assert blind.host_state == "unknown"
     assert unknown.host is not None
     assert unknown.host.count is None
@@ -339,7 +347,7 @@ def test_contention_counts_host_side(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run, "under_wsl", lambda: False)
     monkeypatch.setattr(run, "read_host_processes", refuse)
     off_wsl = run.snapshot_now()
-    print(f"(d) off WSL: host_state={off_wsl.host_state}")
+    _LOG.info("(d) off WSL: host_state=%s", off_wsl.host_state)
     assert off_wsl.host_state == "n/a"
     assert run.count_contention(off_wsl, off_wsl).host is None
 
@@ -373,7 +381,7 @@ def test_bootstrap_points_app_data_at_the_eval_dir(
             module = node.module or ""
             if node.level or module.split(".")[0] in banned:
                 hits.append("." * node.level + module)
-    print(f"module-level imports counted: {counted}; banned: {hits}")
+    _LOG.info("module-level imports counted: %s; banned: %s", counted, hits)
     assert counted > 0
     assert hits == []
 
@@ -413,7 +421,7 @@ def test_manifest_absent_unreadable_and_mismatch(tmp_path: Path) -> None:
 
         with pytest.raises(run.ManifestError) as caught:
             attempt()
-        print(f"refused: {caught.value}")
+        _LOG.info("refused: %s", caught.value)
         return str(caught.value)
 
     assert "absent" in refused(tmp_path / "none")
@@ -460,14 +468,14 @@ def test_git_state_distinguishes_missing_git(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     no_repo = run.git_state(tmp_path)
-    print(f"not a repo: {no_repo}")
+    _LOG.info("not a repo: %s", no_repo)
     assert no_repo.commit is None
     assert no_repo.error
     assert "not a git repository" in no_repo.error
 
     monkeypatch.setattr(run.shutil, "which", lambda name: None)
     no_git = run.git_state(tmp_path)
-    print(f"no git: {no_git}")
+    _LOG.info("no git: %s", no_git)
     assert no_git.commit is None
     assert no_git.error == "git not found"
 
@@ -616,8 +624,12 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(segments) == len(specs)
     for case_run, segment in zip(runs, segments, strict=True):
         made = sum(1 for event in segment if event == ("call",))
-        print(
-            f"{case_run.case}: captured {len(case_run.calls)}, made {made}, parts {case_run.parts}"
+        _LOG.info(
+            "%s: captured %s, made %s, parts %s",
+            case_run.case,
+            len(case_run.calls),
+            made,
+            case_run.parts,
         )
         assert segment[:2] == [("reset",), ("set_seed", 0)]
         assert len(case_run.calls) == made
@@ -626,7 +638,7 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
         assert case_run.contention["contended"] is False
         assert case_run.contended is False
     total = sum(len(case_run.calls) for case_run in runs)
-    print(f"captured {total} calls, the fake made {fake.completions}")
+    _LOG.info("captured %s calls, the fake made %s", total, fake.completions)
     assert total == fake.completions
     assert len(snapshots) == 2 * len(specs)
 
@@ -637,7 +649,7 @@ def test_case_loop_captures_every_call(monkeypatch: pytest.MonkeyPatch) -> None:
 
     sources = sorted((_REPO / "scripts" / "eval").glob("*.py"))
     sites = sum(len(re.findall(r"\bSummarizer\(", p.read_text(encoding="utf-8"))) for p in sources)
-    print(f"Summarizer construction sites in scripts/eval: {sites}")
+    _LOG.info("Summarizer construction sites in scripts/eval: %s", sites)
     assert sites == 1
 
 
@@ -662,7 +674,7 @@ def test_score_case_run_scores_every_call() -> None:
     calls = [_call(0, _EN_UNITS), _call(1, _DE_UNITS, finish="length"), _call(2, "")]
     asked = run.ScoringInput(brief, _DE_UNITS, metrics.Target("de", None), 2)
     scored = run.score_case_run(asked, result, calls)
-    print(f"brief: {scored}")
+    _LOG.info("brief: %s", scored)
     assert scored["M2"]["passed"] is False
     assert {off["call"] for off in scored["M2"]["off_target"]} == {0}
     assert scored["M1"]["violations"] == 1
@@ -691,7 +703,7 @@ def test_score_case_run_scores_every_call() -> None:
     ]
     asked = run.ScoringInput(detailed, document, metrics.Target("de", None), 1)
     scored = run.score_case_run(asked, detailed_result, json_calls)
-    print(f"detailed: {scored}")
+    _LOG.info("detailed: %s", scored)
     assert scored["M2"]["unparsed_calls"] == 1
     assert scored["M2"]["passed"] is True
     assert scored["M7"]["points"] == 1
@@ -709,7 +721,7 @@ def test_m12a_rerun_compares_with_the_first_run(monkeypatch: pytest.MonkeyPatch)
     targets = {case.id: metrics.Target("zh", None) for case in (first, rerun)}
 
     same = run.run_cases(_shell(_EvalLLM(), 8192), specs, texts, targets)
-    print(f"identical: {same[1].metrics['M12a']}")
+    _LOG.info("identical: %s", same[1].metrics["M12a"])
     assert same[1].metrics["M12a"]["identical"] is True
     assert same[1].metrics["M12a"]["violations"] == 0
     assert same[0].metrics["M12a"] is None
@@ -722,7 +734,7 @@ def test_m12a_rerun_compares_with_the_first_run(monkeypatch: pytest.MonkeyPatch)
 
     drifted = run.run_cases(_shell(_EvalLLM(drifting), 8192), specs, texts, targets)
     m12a = drifted[1].metrics["M12a"]
-    print(f"first_diff: {m12a['first_diff']}")
+    _LOG.info("first_diff: %s", m12a["first_diff"])
     assert m12a["identical"] is False
     assert m12a["first_diff"] == _PROSE.index("early") + 4
     assert m12a["violations"] == 1
@@ -785,11 +797,11 @@ def test_cli_smoke_tier_writes_a_complete_results_file(
     argv = ["--eval-dir", str(eval_dir), "--tier", "smoke", "--model", str(_gguf(tmp_path))]
     code = run.main([*argv, "--n-ctx", "2048"])
     out = capsys.readouterr().out
-    print(out)
+    _LOG.info("%s", out)
     assert code == 0
 
     files = sorted((eval_dir / "results").iterdir())
-    print(f"results files: {[f.name for f in files]}")
+    _LOG.info("results files: %s", [f.name for f in files])
     assert len(files) == 1
     assert re.fullmatch(r"\d{8}T\d{6}Z-smoke-[0-9a-f]+\.jsonl", files[0].name)
     lines = _results(eval_dir)
@@ -821,7 +833,7 @@ def test_cli_refuses_zero_and_bad_selectors(
     def refused(argv: list[str]) -> str:
         code = run.main(argv)
         out = capsys.readouterr().out
-        print(f"{argv[len(base) :]} -> {code}: {out.strip()}")
+        _LOG.info("%s -> %s: %s", argv[len(base) :], code, out.strip())
         assert code == 2
         return out
 
@@ -833,7 +845,7 @@ def test_cli_refuses_zero_and_bad_selectors(
     with pytest.raises(SystemExit) as parse_error:
         _ = run.main([*base, "--tier", "full"])
     err = capsys.readouterr().err
-    print(f"--tier full -> {parse_error.value.code}: {err.strip()}")
+    _LOG.info("--tier full -> %s: %s", parse_error.value.code, err.strip())
     assert parse_error.value.code == 2
     assert all(tier in err for tier in run.RUNNABLE_TIERS)
 
@@ -864,7 +876,7 @@ def test_cli_case_and_doc_restrict_the_run(
         assert run.main([*argv, "--n-ctx", "2048"]) == 0
         _ = capsys.readouterr()
         lines = _results(eval_dir)
-        print(f"{extra}: {[line['case'] for line in _case_runs(lines)]}")
+        _LOG.info("%s: %s", extra, [line["case"] for line in _case_runs(lines)])
         return lines
 
     by_doc = _case_runs(selected("doc", "lang", cases.LANGUAGE_SET_IDS, "--case", "de-cred-s"))
@@ -911,9 +923,13 @@ def test_repeat_scopes_to_cold_auto_runs(
     seed1 = [r for r in runs if r.seed == 1]
     explicit = [r for r in runs if r.case.language != "auto"]
     m12a = [r for r in runs if r.case.m12a]
-    print(
-        f"total {len(runs)}: seed-0 auto {len(seed0_auto)}, seed-1 auto {len(seed1)}, "
-        f"explicit {len(explicit)}, m12a {len(m12a)}"
+    _LOG.info(
+        "total %s: seed-0 auto %s, seed-1 auto %s, explicit %s, m12a %s",
+        len(runs),
+        len(seed0_auto),
+        len(seed1),
+        len(explicit),
+        len(m12a),
     )
     assert len(runs) == 47
     assert (len(seed0_auto), len(seed1), len(explicit), len(m12a)) == (30, 10, 4, 3)
@@ -930,7 +946,7 @@ def test_repeat_scopes_to_cold_auto_runs(
     assert run.main([*argv, "--n-ctx", "2048", "--repeat", "3"]) == 0
     out = capsys.readouterr().out
     lines = _results(eval_dir)
-    print(f"case_run lines: {len(_case_runs(lines))}")
+    _LOG.info("case_run lines: %s", len(_case_runs(lines)))
     assert len(_case_runs(lines)) == 37
     assert lines[0]["repeat"] == 3
     assert lines[0]["repeat_scope"] == run.REPEAT_SCOPE
@@ -949,8 +965,8 @@ def test_lang_tier_runs_the_split_pass(
     selection = ["--case", "de-cred-s", "--case", "fr-lit-s"]
     assert run.main([*argv, *selection, "--n-ctx", "2048"]) == 0
     out = capsys.readouterr().out
-    print(out)
-    print(f"builds: {eval_llm.built}")
+    _LOG.info("%s", out)
+    _LOG.info("builds: %s", eval_llm.built)
     assert eval_llm.built == [2048, cases.SPLIT_N_CTX]
 
     lines = _results(eval_dir)
@@ -1002,7 +1018,7 @@ def _rescored(eval_dir: Path) -> Path:
 def _rescore(eval_dir: Path, source: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
     code = run.main(["--eval-dir", str(eval_dir), "--rescore", str(source)])
     out = capsys.readouterr().out
-    print(out)
+    _LOG.info("%s", out)
     return code, out
 
 
@@ -1098,7 +1114,7 @@ def test_rescore_prints_coverage_only_and_production_arms(
     assert provenance.locate_quote(_ARMS_DROPPED, _ARMS_DOC) is None
     with run.accept_every_match():
         located = provenance.locate_quote(_ARMS_DROPPED, _ARMS_DOC)
-    print(f"located under accept_every_match: {located}")
+    _LOG.info("located under accept_every_match: %s", located)
     assert located is not None
     assert located.quote == _ARMS_LONG
 
@@ -1114,7 +1130,7 @@ def test_rescore_prints_coverage_only_and_production_arms(
 
     out, line = arms(tmp_path / "eval")
     cited = (line["m7_coverage_only"]["cited"], line["metrics"]["M7"]["cited"])
-    print(f"cited (coverage_only, production): {cited}")
+    _LOG.info("cited (coverage_only, production): %s", cited)
     assert line["metrics"]["M7"]["points"] == 3
     assert cited == (3, 2)
     for scope in ("en/json/single", "aggregate"):
@@ -1125,7 +1141,7 @@ def test_rescore_prints_coverage_only_and_production_arms(
     monkeypatch.setattr(provenance, "is_verified_match", lambda quote, span_text: False)
     out, line = arms(_arms_corpus(tmp_path / "rejecting"))
     cited = (line["m7_coverage_only"]["cited"], line["metrics"]["M7"]["cited"])
-    print(f"rejecting everything, cited (coverage_only, production): {cited}")
+    _LOG.info("rejecting everything, cited (coverage_only, production): %s", cited)
     assert cited == (3, 0)
     assert "M7 aggregate drop cited=3/3" in out
 
@@ -1190,7 +1206,7 @@ def test_rescore_loads_no_model(
     monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
     monkeypatch.setattr(sys, "meta_path", [recorder, *sys.meta_path])
     code, _ = _rescore(eval_dir, source, capsys)
-    print(f"llama_cpp imports: {recorder.names}")
+    _LOG.info("llama_cpp imports: %s", recorder.names)
     assert code == 0
     assert recorder.names == []
 
@@ -1239,10 +1255,10 @@ def test_runner_logs_stay_in_the_eval_dir(
         check=False,
         timeout=300,
     )
-    print(done.stdout, done.stderr)
+    _LOG.info("%s %s", done.stdout, done.stderr)
     assert done.returncode == 0
     logs = list((eval_dir / "appdata").rglob("docsummarizer_*.log"))
-    print(f"logs: {logs}")
+    _LOG.info("logs: %s", logs)
     assert logs
     assert not inherited.exists() or not any(inherited.rglob("*"))
 
@@ -1308,7 +1324,7 @@ def _compared(
 ) -> tuple[int, str]:
     code = run.main(["--eval-dir", str(tmp_path), "--compare", str(b), str(c)])
     out = capsys.readouterr().out
-    print(f"--compare {b.name} {c.name} -> {code}\n{out}")
+    _LOG.info("--compare %s %s -> %s\n%s", b.name, c.name, code, out)
     return code, out
 
 
@@ -1345,7 +1361,7 @@ def test_compare_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
         ("repeated", _compare_file(tmp_path / "repeated.jsonl", repeat=3)),
     ):
         code, out = _compared(tmp_path, b, candidate, capsys)
-        print(f"{name}: {code}")
+        _LOG.info("%s: %s", name, code)
         assert code == 0
         assert "B 17 case runs, C 17 case runs" in out
         assert "aggregate" in out
@@ -1411,7 +1427,7 @@ def _counted(monkeypatch: pytest.MonkeyPatch, fake: _CountedLLM) -> None:
 def _checked(tmp_path: Path, capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     code = run.main(["--eval-dir", str(tmp_path), *argv])
     out = capsys.readouterr().out
-    print(f"{argv} -> {code}\n{out}")
+    _LOG.info("%s -> %s\n%s", argv, code, out)
     return code, out
 
 
@@ -1633,7 +1649,7 @@ def test_docs_name_every_runner_option() -> None:
         if option.startswith("--") and option != "--help"
     )
     names = options + sorted(run.CHECKS)
-    print(f"{len(options)} options, {len(run.CHECKS)} checks")
+    _LOG.info("%s options, %s checks", len(options), len(run.CHECKS))
     assert options
     section = _docs_section()
     missing = [

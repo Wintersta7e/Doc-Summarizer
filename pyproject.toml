@@ -180,9 +180,6 @@ extend-ignore-names = [
     # 99 hits: an assert compares against the literal the behaviour must
     # produce; a named constant would only restate the expected value.
     "PLR2004",
-    # 101 hits: tests print the evidence they measured (files scanned, counts
-    # seen); pytest captures it and shows it beside a failure.
-    "T201",
 ]
 # Standard output is the interface of the CLI and of the dev scripts.
 "src/docsummarizer/cli.py" = ["T201"]
@@ -245,6 +242,9 @@ testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
 addopts = ["-ra"]
 filterwarnings = ["error"]
+# Tests log the evidence they measured (files scanned, counts seen) at INFO;
+# pytest shows it beside a failure, or live with `-o log_cli=true`.
+log_level = "INFO"
 # pytest-timeout: a hung test fails instead of stalling the gate (seconds;
 # the plugin declares the option as a string).
 timeout = "120"

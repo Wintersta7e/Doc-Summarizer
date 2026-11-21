@@ -8,6 +8,7 @@ ferry, one per language the classifier must tell apart.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 from pathlib import Path
@@ -17,6 +18,8 @@ import pytest
 from docsummarizer import model_manager, provenance
 from docsummarizer.model_manager import LANGUAGE_AUTO, OUTPUT_LANGUAGES
 from eval import cases, metrics
+
+_LOG = logging.getLogger(__name__)
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -91,7 +94,7 @@ def test_classify_unit_script_rules() -> None:
     assert metrics.classify_unit("क" * 50 + "x" * 50) == "hi"
     for code, text in FIXTURES.items():
         got = metrics.classify_unit(text)
-        print(f"fixture {code}: {got}")
+        _LOG.info("fixture %s: %s", code, got)
         assert got == code
 
 
@@ -101,14 +104,14 @@ def test_classify_unit_is_restricted_to_output_languages() -> None:
     letters = "abcdefghijklmnopqrstuvwxyz    "
     texts = ["".join(rng.choice(letters) for _ in range(60)) for _ in range(50)]
     got = [metrics.classify_unit(text) for text in texts]
-    print(f"random strings classified: {len(got)}")
+    _LOG.info("random strings classified: %s", len(got))
     assert len(got) == 50
     assert set(got) <= codes
 
 
 def test_unit_script_majority_and_pairs() -> None:
     pairs = metrics.SCRIPT_PAIRS
-    print(f"script pairs: {len(pairs)}")
+    _LOG.info("script pairs: %s", len(pairs))
     assert len(pairs) >= 50
     simplified = {s for s, _ in pairs}
     traditional = {t for _, t in pairs}
@@ -137,7 +140,7 @@ def test_m4_counts_length_finishes() -> None:
 def test_m12a_prints_first_differing_char() -> None:
     assert metrics.m12a("same text", "same text") == metrics.M12a(identical=True, first_diff=None)
     result = metrics.m12a("abcd", "abXd")
-    print(f"m12a: {result}")
+    _LOG.info("m12a: %s", result)
     assert result == metrics.M12a(identical=False, first_diff=2)
     assert metrics.m12a("abc", "abcd") == metrics.M12a(identical=False, first_diff=3)
 
@@ -153,13 +156,13 @@ def test_m2_fails_on_an_off_target_map_call() -> None:
     target = metrics.Target("de", None)
 
     result = metrics.m2([english_map_units, german_final_units], german_final_units, target)
-    print(f"m2 per call: scored={result.scored} off_target={result.off_target}")
+    _LOG.info("m2 per call: scored=%s off_target=%s", result.scored, result.off_target)
     assert result.passed is False
     assert result.off_target
     assert {off.call for off in result.off_target} == {0}
 
     final_only = metrics.m2([], german_final_units, target)
-    print(f"m2 on the result alone: passed={final_only.passed}")
+    _LOG.info("m2 on the result alone: passed=%s", final_only.passed)
     assert final_only.passed is True
 
     unparsed = metrics.m2([None, german_final_units], [], target)
@@ -176,7 +179,7 @@ def test_m2_script_is_gated() -> None:
     assert metrics.target_for(LANGUAGE_AUTO, "zh", "Traditional") == traditional
 
     tied = "这這中文内容讲得很清楚"  # one Simplified, one Traditional listed char
-    print(f"tied unit, unscored for script: {tied}")
+    _LOG.info("tied unit, unscored for script: %s", tied)
     assert metrics.is_scored(tied)
     assert metrics.unit_script(tied) is None
     assert metrics.m2([[tied]], [], traditional).passed is True
@@ -195,7 +198,7 @@ def test_every_output_language_maps_to_an_m2_code() -> None:
     for label, script in labels:
         if label in codes:
             assert metrics.target_for(LANGUAGE_AUTO, label, script).code == label
-    print(f"names and labels checked: {len(names) + len(labels)}; missing: {missing}")
+    _LOG.info("names and labels checked: %s; missing: %s", len(names) + len(labels), missing)
     assert names
     assert labels
     assert missing == []
@@ -206,7 +209,7 @@ def test_eval_never_imports_the_detector() -> None:
     pattern = re.compile(r"detect_language|docsummarizer\.language")
     files = sorted((_REPO / "scripts" / "eval").glob("*.py"))
     hits = [path.name for path in files if pattern.search(path.read_text(encoding="utf-8"))]
-    print(f"files scanned: {len(files)}; hits: {hits}")
+    _LOG.info("files scanned: %s; hits: %s", len(files), hits)
     assert files
     assert hits == []
 
@@ -257,11 +260,11 @@ def test_m7_hit_rate_tracks_the_production_predicate(monkeypatch: pytest.MonkeyP
     """
     assert len(_LONG_SENTENCE) > provenance.MAX_SPAN_CHARS
     unpatched = _m7_of_grounded_points()
-    print(f"m7 unpatched: {unpatched} hit_rate={unpatched.hit_rate}")
+    _LOG.info("m7 unpatched: %s hit_rate=%s", unpatched, unpatched.hit_rate)
 
     monkeypatch.setattr(provenance, "is_verified_match", _reject_every_match)
     rejected = _m7_of_grounded_points()
-    print(f"m7 reject-all: {rejected}")
+    _LOG.info("m7 reject-all: %s", rejected)
     assert rejected.points == len(_M7_QUOTES)
     assert rejected.cited == 0
     assert rejected.hit_rate == 0
@@ -270,7 +273,7 @@ def test_m7_hit_rate_tracks_the_production_predicate(monkeypatch: pytest.MonkeyP
     # floor, so every quote is a whole sentence of six characters or more.
     monkeypatch.setattr(provenance, "is_verified_match", _accept_every_match)
     accepted = _m7_of_grounded_points()
-    print(f"m7 accept-all: {accepted} hit_rate={accepted.hit_rate}")
+    _LOG.info("m7 accept-all: %s hit_rate=%s", accepted, accepted.hit_rate)
     assert accepted.cited == len(_M7_QUOTES)
     assert accepted.tight == accepted.cited - 1
     assert accepted.hit_rate == accepted.tight / accepted.points
@@ -286,7 +289,7 @@ def test_m7_counts_whole_document_and_verbatim() -> None:
         metrics.PointRecord(None, ""),
     ]
     result = metrics.m7(records, document)
-    print(f"m7: {result}")
+    _LOG.info("m7: %s", result)
     assert result.points == 3
     assert result.cited == 2
     assert result.whole_document == 1
@@ -304,7 +307,7 @@ def test_eval_never_calls_difflib_matching() -> None:
         for name in names
         if name in path.read_text(encoding="utf-8")
     ]
-    print(f"files scanned: {len(files)}; hits: {hits}")
+    _LOG.info("files scanned: %s; hits: %s", len(files), hits)
     assert files
     assert hits == []
 
@@ -313,7 +316,7 @@ def test_noise_delta_vectors() -> None:
     expected = {50: 0.143, 100: 0.101, 200: 0.071, 500: 0.050}
     for n, delta in expected.items():
         got = metrics.noise_delta(0.85, n, 0.85, n, metrics.AGG_FLOOR)
-        print(f"n={n}: delta={got:.4f}")
+        _LOG.info("n=%s: delta=%.4f", n, got)
         assert got == pytest.approx(delta, abs=5e-4)
 
 
@@ -336,7 +339,7 @@ def test_verdict_hard_flip_is_a_regression() -> None:
     b = [_score("de-lit-s/brief/auto", 0), _score("en-lit-s/brief/auto", 0)]
     c = [_score("de-lit-s/brief/auto", 0, m2=1), _score("en-lit-s/brief/auto", 0)]
     result = metrics.verdict(b, c)
-    print(f"regressions: {result.regressions}")
+    _LOG.info("regressions: %s", result.regressions)
     assert result.regressed
     assert result.regressions == [metrics.Flip("de-lit-s/brief/auto", 0, "M2")]
     assert not result.improvements
@@ -346,12 +349,12 @@ def test_verdict_improvement_needs_every_seed() -> None:
     case = "de-lit-s/brief/auto"
     b = [_score(case, 0, m2=1), _score(case, 1, m2=1)]
     every_seed = metrics.verdict(b, [_score(case, 0), _score(case, 1)])
-    print(f"every seed: {every_seed.improvements}")
+    _LOG.info("every seed: %s", every_seed.improvements)
     assert every_seed.improvements == [metrics.Flip(case, None, "M2")]
     assert not every_seed.regressed
 
     one_seed = metrics.verdict(b, [_score(case, 0), _score(case, 1, m2=1)])
-    print(f"seed 0 only: {one_seed.improvements}")
+    _LOG.info("seed 0 only: %s", one_seed.improvements)
     assert one_seed.improvements == []
     assert not one_seed.regressed
 
@@ -360,7 +363,7 @@ def test_verdict_reports_insufficient_n() -> None:
     case = "de-lit-s/detailed/auto"
     small = metrics.verdict([_score(case, 0, m7=(19, 19))], [_score(case, 0, m7=(0, 19))])
     for row in small.rows:
-        print(f"row: {row}")
+        _LOG.info("row: %s", row)
     m7_rows = [row for row in small.rows if row.metric == "M7"]
     assert {row.status for row in m7_rows} == {"insufficient n"}
     assert not small.regressed
@@ -391,7 +394,7 @@ def test_verdict_hard_metric_absent_from_a_cell_is_not_a_pass() -> None:
     result = metrics.verdict(runs, runs)
     rows = {row.scope: row for row in result.rows if row.metric == "M12a"}
     for row in rows.values():
-        print(f"M12a row: {row}")
+        _LOG.info("M12a row: %s", row)
     absent = rows["de/json/single"]
     assert (absent.p_b, absent.n_b, absent.p_c, absent.n_c) == (None, 0, None, 0)
     assert absent.status == "n/a"
@@ -406,7 +409,7 @@ def test_verdict_within_delta_is_not_a_regression() -> None:
     def aggregate(b: tuple[int, int], c: tuple[int, int]) -> metrics.VerdictRow:
         result = metrics.verdict([_score(case, 0, m7=b)], [_score(case, 0, m7=c)])
         row = next(r for r in result.rows if r.scope == "aggregate" and r.metric == "M7")
-        print(f"aggregate: {row}; regressed={result.regressed}")
+        _LOG.info("aggregate: %s; regressed=%s", row, result.regressed)
         return row
 
     assert aggregate((85, 100), (82, 100)).status == "ok"
