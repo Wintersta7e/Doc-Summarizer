@@ -660,9 +660,8 @@ def test_score_case_run_scores_every_call() -> None:
     brief = cases.Case("de-lit-s", SUMMARY_TYPE_BRIEF, "auto")
     result = model_manager.StructuredSummary(SUMMARY_TYPE_BRIEF, _DE_UNITS, [], None, _DE_UNITS)
     calls = [_call(0, _EN_UNITS), _call(1, _DE_UNITS, finish="length"), _call(2, "")]
-    scored = run.score_case_run(
-        brief, result, calls, _DE_UNITS, metrics.Target("de", None), parts=2
-    )
+    asked = run.ScoringInput(brief, _DE_UNITS, metrics.Target("de", None), 2)
+    scored = run.score_case_run(asked, result, calls)
     print(f"brief: {scored}")
     assert scored["M2"]["passed"] is False
     assert {off["call"] for off in scored["M2"]["off_target"]} == {0}
@@ -690,9 +689,8 @@ def test_score_case_run_scores_every_call() -> None:
         _call(0, "not json", json_call=True),
         _call(1, json.dumps(payload), json_call=True),
     ]
-    scored = run.score_case_run(
-        detailed, detailed_result, json_calls, document, metrics.Target("de", None), parts=1
-    )
+    asked = run.ScoringInput(detailed, document, metrics.Target("de", None), 1)
+    scored = run.score_case_run(asked, detailed_result, json_calls)
     print(f"detailed: {scored}")
     assert scored["M2"]["unparsed_calls"] == 1
     assert scored["M2"]["passed"] is True

@@ -35,7 +35,9 @@ from typing import IO, TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
-    from docsummarizer.model_manager import StructuredSummary, Summarizer
+    from llama_cpp import Llama
+
+    from docsummarizer.model_manager import RunStats, StructuredSummary, Summarizer
     from eval.cases import Case
     from eval.metrics import CaseScore, Target
 
@@ -210,10 +212,11 @@ class ManifestDocument:
 
 
 _SCRIPTS = ("Simplified", "Traditional")
+_SPLIT_MIN_PARTS = 2  # a split case must reach at least two parts
 _REQUIRED = ("id", "file", "label", "sha256")
 
 
-def _manifest_document(entry: Any, corpus: Path) -> ManifestDocument:
+def _manifest_document(entry: object, corpus: Path) -> ManifestDocument:
     from eval import cases
 
     if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in _REQUIRED):
@@ -328,6 +331,7 @@ class Contention:
 
     @property
     def contended(self) -> bool:
+        """Whether either side counted a contending process."""
         if (self.local.count or 0) > 0:
             return True
         return self.host is not None and (self.host.count or 0) > 0
@@ -476,7 +480,7 @@ class CallRecord:
     error: str | None
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: object) -> object:
     """``value`` when it serializes to JSON, else its type name."""
     try:
         json.dumps(value)
@@ -492,25 +496,28 @@ class CapturingLlama:
     same context pointer and counters.
     """
 
-    def __init__(self, real: Any, snapshot: Callable[[], Any]) -> None:
+    def __init__(self, real: Llama, snapshot: Callable[[], object]) -> None:
+        """Wrap ``real``; ``snapshot`` reads its perf counters, or ``None`` without them."""
         self._real = real
         self._snapshot = snapshot
         self.calls: list[CallRecord] = []
         self.tokenized: dict[str, int] = {}
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
+        """Any attribute not wrapped here is the wrapped model's."""
         return getattr(self._real, name)
 
-    def _perf_since(self, before: Any) -> dict[str, float] | None:
+    def _perf_since(self, before: object) -> dict[str, float] | None:
         after = self._snapshot() if before is not None else None
         if before is None or after is None:
             return None
         return {name: getattr(after, name) - getattr(before, name) for name in _PERF_FIELDS}
 
-    def create_chat_completion(self, **kwargs: Any) -> Any:
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, Any]], stream: bool = False, **kwargs: object
+    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
+        """Forward the completion to the model and record the request and its answer."""
         before = self._snapshot()
-        messages = kwargs.pop("messages")
-        stream = bool(kwargs.pop("stream", False))
         record = CallRecord(
             seq=len(self.calls),
             messages=[dict(message) for message in messages],
@@ -527,7 +534,9 @@ class CapturingLlama:
             chunks = self._real.create_chat_completion(messages=messages, stream=True, **kwargs)
             return self._stream(record, before, chunks)
         try:
-            response = self._real.create_chat_completion(messages=messages, **kwargs)
+            response: dict[str, Any] = self._real.create_chat_completion(
+                messages=messages, **kwargs
+            )
             choice = response["choices"][0]
             record.content = str(choice["message"].get("content") or "")
             record.finish_reason = choice.get("finish_reason")
@@ -539,7 +548,9 @@ class CapturingLlama:
             record.perf = self._perf_since(before)
         return response
 
-    def _stream(self, record: CallRecord, before: Any, chunks: Iterable[Any]) -> Iterator[Any]:
+    def _stream(
+        self, record: CallRecord, before: object, chunks: Iterable[dict[str, Any]]
+    ) -> Iterator[dict[str, Any]]:
         try:
             for chunk in chunks:
                 choice = chunk["choices"][0]
@@ -555,15 +566,18 @@ class CapturingLlama:
             # An aborted stream is recorded too: this runs when the consumer stops.
             record.perf = self._perf_since(before)
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> Any:
-        result = self._real.tokenize(text, add_bos=add_bos)
+    def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
+        """Tokenize through the model and record the token count by text hash."""
+        result: list[int] = self._real.tokenize(text, add_bos=add_bos)
         self.tokenized[hashlib.sha256(text).hexdigest()] = len(result)
         return result
 
     def reset(self) -> None:
+        """Clear the model's context state."""
         self._real.reset()
 
     def set_seed(self, seed: int) -> None:
+        """Seed the model's sampler."""
         self._real.set_seed(seed)
 
 
@@ -647,14 +661,18 @@ def _result_points(result: StructuredSummary) -> list[Any]:
     return points
 
 
+@dataclass(frozen=True)
+class ScoringInput:
+    """What a case run was asked: the case, its document text, its target and its part count."""
+
+    case: Case
+    text: str
+    target: Target
+    parts: int
+
+
 def score_case_run(
-    case: Case,
-    result: StructuredSummary | None,
-    calls: Sequence[CallRecord],
-    text: str,
-    target: Target,
-    *,
-    parts: int,
+    asked: ScoringInput, result: StructuredSummary | None, calls: Sequence[CallRecord]
 ) -> dict[str, Any]:
     """Score one case run: every call's raw content and the returned result.
 
@@ -664,6 +682,7 @@ def score_case_run(
     from docsummarizer.model_manager import SUMMARY_TYPE_BRIEF
     from eval import metrics
 
+    case, text, target, parts = asked.case, asked.text, asked.target, asked.parts
     is_json = ["response_format" in call.kwargs for call in calls]
     call_units = [
         _json_units(call.content) if json_call else metrics.split_units(call.content)
@@ -724,11 +743,13 @@ def _m12a(first: CaseRun | None, rerun: CaseRun) -> dict[str, Any] | None:
 
 
 def _counting_chunks(summarizer: Summarizer, observed: list[int]) -> Callable[..., Any]:
-    """``_chunks_within``, recording the piece count of each top-level call."""
-    original = summarizer._chunks_within
+    """``chunks_within``, recording the piece count of each top-level call."""
+    original = summarizer.chunks_within
     depth = 0
 
-    def counting(text: str, budget_tokens: int, split: Any) -> list[tuple[str, int]]:
+    def counting(
+        text: str, budget_tokens: int, split: Callable[[str, int], list[tuple[str, int]]]
+    ) -> list[tuple[str, int]]:
         nonlocal depth
         depth += 1
         try:
@@ -750,7 +771,7 @@ def _run_one(
     capture.reset()
     capture.set_seed(spec.seed)
     observed: list[int] = []
-    summarizer._chunks_within = _counting_chunks(summarizer, observed)  # type: ignore[method-assign]
+    summarizer.chunks_within = _counting_chunks(summarizer, observed)  # type: ignore[method-assign]
     result: StructuredSummary | None = None
     error: str | None = None
     start = snapshot_now()
@@ -765,7 +786,7 @@ def _run_one(
         error = f"{type(exc).__name__}: {exc}"  # recorded in the results file, never logged
     finally:
         end = snapshot_now()
-        del summarizer._chunks_within
+        del summarizer.chunks_within
     parts = getattr(result, "parts_total", None) or (observed[0] if observed else 0)
     return result, error, parts, count_contention(start, end)
 
@@ -785,7 +806,7 @@ def run_cases(
     """
     capture = summarizer.llm
     if not isinstance(capture, CapturingLlama):
-        capture = CapturingLlama(summarizer.llm, summarizer._perf_snapshot)
+        capture = CapturingLlama(summarizer.llm, summarizer.perf_snapshot)
         summarizer.llm = capture
     done: list[CaseRun] = []
     for spec in runs:
@@ -807,9 +828,8 @@ def run_cases(
             contended=contention.contended,
             error=error,
         )
-        case_run.metrics = score_case_run(
-            case, result, case_run.calls, text, targets[case.id], parts=parts
-        )
+        asked = ScoringInput(case, text, targets[case.id], parts)
+        case_run.metrics = score_case_run(asked, result, case_run.calls)
         if case.m12a:
             case_run.metrics["M12a"] = _m12a(_first_run_of(case, spec.seed, done), case_run)
         done.append(case_run)
@@ -1197,7 +1217,12 @@ def _run_tier(args: argparse.Namespace) -> int:
     partial = final.with_name(final.name + ".partial")
     with partial.open("w", encoding="utf-8") as sink:
         lines, threads = _run_passes(args, runs, texts, targets, sink)
-    not_split = [line["case"] for line in lines if "@split" in line["case"] and line["parts"] < 2]
+    not_split = [
+        line["case"]
+        for line in lines
+        if "@split" in line["case"] and line["parts"] < _SPLIT_MIN_PARTS
+    ]
+
     for case_id in not_split:
         print(f"not split: {case_id}")
     version, lib_dir = _llama_cpp_install()
@@ -1262,16 +1287,17 @@ def _run_tier(args: argparse.Namespace) -> int:
 RESCORE_ARMS = ("coverage_only", "production")
 
 
-class ReplayMismatch(Exception):  # noqa: N818 - a refusal, named for what it found
+class ReplayMismatchError(Exception):
     """This tree asked the model something the stored run did not."""
 
     def __init__(self, seq: int, field: str) -> None:
+        """Name the call (``seq``) and the request field that differed."""
         super().__init__(f"seq {seq} field {field}")
         self.seq = seq
         self.field = field
 
 
-def _normalized(value: Any) -> Any:
+def _normalized(value: object) -> object:
     return json.loads(json.dumps(value))
 
 
@@ -1284,19 +1310,21 @@ class ReplayLlama:
     """
 
     def __init__(self, calls: Sequence[Mapping[str, Any]], tokenized: Mapping[str, int]) -> None:
+        """Replay ``calls`` in order; ``tokenized`` maps a text hash to its token count."""
         self._calls = list(calls)
         self._tokenized = dict(tokenized)
         self.consumed = 0
-        self.mismatch: ReplayMismatch | None = None
+        self.mismatch: ReplayMismatchError | None = None
 
-    def _refuse(self, field: str) -> ReplayMismatch:
+    def _refuse(self, field: str) -> ReplayMismatchError:
         if self.mismatch is None:
-            self.mismatch = ReplayMismatch(self.consumed, field)
+            self.mismatch = ReplayMismatchError(self.consumed, field)
         return self.mismatch
 
     def create_chat_completion(
-        self, *, messages: Sequence[Mapping[str, Any]], **kwargs: Any
+        self, *, messages: Sequence[Mapping[str, Any]], **kwargs: object
     ) -> dict[str, Any]:
+        """Return the stored answer when the request matches the stored one, else refuse."""
         kwargs.pop("stream", None)
         if self.mismatch is not None:
             raise self.mismatch
@@ -1307,7 +1335,7 @@ class ReplayLlama:
         if _normalized([dict(message) for message in messages]) != stored["messages"]:
             msg = "messages"
             raise self._refuse(msg)
-        asked = _normalized({key: _jsonable(value) for key, value in kwargs.items()})
+        asked = {key: _normalized(_jsonable(value)) for key, value in kwargs.items()}
         for key in sorted(set(asked) | set(stored["kwargs"])):
             if asked.get(key) != stored["kwargs"].get(key):
                 raise self._refuse(key)
@@ -1318,7 +1346,9 @@ class ReplayLlama:
         choice = {"message": message, "finish_reason": stored["finish_reason"]}
         return {"choices": [choice], "usage": stored["usage"]}
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
+        """Placeholder tokens, as many as the stored run counted for this text."""
+        del add_bos  # the stored count already reflects it
         # Message equality still guards an unknown text: any chunking difference
         # changes the next request.
         return [0] * self._tokenized.get(hashlib.sha256(text).hexdigest(), len(text) // 3)
@@ -1340,7 +1370,13 @@ def accept_every_match() -> Iterator[None]:
     from docsummarizer import provenance
 
     original = provenance.is_verified_match
-    provenance.is_verified_match = lambda quote, span_text: True
+
+    def accept(quote: str, span_text: str) -> bool:
+        del quote, span_text  # every candidate is accepted
+        return True
+
+    provenance.is_verified_match = accept
+
     try:
         yield
     finally:
@@ -1357,8 +1393,10 @@ def _cited_points(result: Mapping[str, Any]) -> list[tuple[int, Mapping[str, Any
 def audit_citations(
     result: Mapping[str, Any], quotes: Mapping[str, str], document: str
 ) -> list[str]:
-    """Each cited point whose span does not verifiably hold the model's quote, or is not
-    the document's own text at its offsets.
+    """Each cited point whose span fails to hold the model's quote or the document's text.
+
+    A span fails when it does not verifiably hold the quote, or is not the
+    document's own text at its offsets.
     """
     from docsummarizer import provenance
 
@@ -1392,7 +1430,7 @@ def _replay(
 ) -> tuple[StructuredSummary | None, str | None]:
     """One arm's replay of a case run: its result or the error it raised.
 
-    Raises ``ReplayMismatch`` when this tree asks anything the stored run did
+    Raises ``ReplayMismatchError`` when this tree asks anything the stored run did
     not, or fewer calls than it made.
     """
     llm = ReplayLlama(calls, line["tokenized"])
@@ -1406,7 +1444,7 @@ def _replay(
     if llm.mismatch is not None:
         raise llm.mismatch
     if llm.consumed != len(calls):
-        raise ReplayMismatch(llm.consumed, "call count")
+        raise ReplayMismatchError(llm.consumed, "call count")
     return result, error
 
 
@@ -1470,7 +1508,7 @@ def _rescore_one(
 ) -> tuple[CaseRun, dict[str, Any] | None]:
     """Replay one case run in both arms: the production case run and the coverage-only M7.
 
-    A production-arm mismatch raises ``ReplayMismatch``; a coverage-only one is
+    A production-arm mismatch raises ``ReplayMismatchError``; a coverage-only one is
     printed and leaves that arm's M7 ``None``.
     """
     from eval import metrics
@@ -1482,17 +1520,16 @@ def _rescore_one(
         msg = f"{case.id}: {exc}"
         raise _RefusedError(msg) from exc
     records = [_call_record(call) for call in stored]
+    asked = ScoringInput(case, text, target, line["parts"])
     result, error = _replay(case, text, line["n_ctx"], line, stored)
     coverage_m7: dict[str, Any] | None = None
     try:
         with accept_every_match():
             covered, _ = _replay(case, text, line["n_ctx"], line, stored)
-    except ReplayMismatch as exc:
+    except ReplayMismatchError as exc:
         print(f"coverage-only arm: replay mismatch: {exc} ({case.id})")
     else:
-        coverage_m7 = score_case_run(case, covered, records, text, target, parts=line["parts"])[
-            "M7"
-        ]
+        coverage_m7 = score_case_run(asked, covered, records)["M7"]
     result_dict = asdict(result) if result is not None else None
     if result_dict is not None:
         result_dict.pop("run_stats", None)
@@ -1510,7 +1547,7 @@ def _rescore_one(
         contended=line["contended"],
         error=error,
     )
-    case_run.metrics = score_case_run(case, result, records, text, target, parts=line["parts"])
+    case_run.metrics = score_case_run(asked, result, records)
     if case.m12a:
         case_run.metrics["M12a"] = _m12a(_first_run_of(case, case_run.seed, done), case_run)
     return case_run, coverage_m7
@@ -1565,7 +1602,7 @@ def rescore(eval_dir: Path, source: Path) -> int:
         stored, text = calls_of.get(line["run"], []), texts[doc_id]
         try:
             case_run, coverage_m7 = _rescore_one(line, stored, documents[doc_id], text, done)
-        except ReplayMismatch as exc:
+        except ReplayMismatchError as exc:
             print(f"replay mismatch: {exc} ({line['case']})")
             return 2
         done.append(case_run)
@@ -1640,9 +1677,10 @@ def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
     from eval import metrics
 
     arms: list[Results] = []
-    for path in (b, c):
-        if not path.exists() and eval_dir is not None and path.name == str(path):
-            path = eval_dir / "results" / path  # noqa: PLW2901 - the file actually read
+    for given in (b, c):
+        path = given  # the file actually read
+        if not given.exists() and eval_dir is not None and given.name == str(given):
+            path = eval_dir / "results" / given
         try:
             arms.append(read_results(path))
         except (OSError, ValueError) as exc:
@@ -1725,6 +1763,47 @@ def _perf_sums(calls: Sequence[CallRecord]) -> dict[str, float]:
     return {name: sum((call.perf or {}).get(name, 0) for call in calls) for name in _PERF_FIELDS}
 
 
+_SECONDS_TOLERANCE = 1e-6  # run_stats seconds against the counters' milliseconds
+
+
+def _counter_failures(stats: RunStats, sums: Mapping[str, float]) -> list[str]:
+    """The run_stats fields that disagree with the summed counter deltas."""
+    failed = [
+        key
+        for key, got, want in (
+            ("prompt_evaluated", stats.prompt_evaluated, sums["n_p_eval"]),
+            ("generated_tokens", stats.generated_tokens, sums["n_eval"]),
+        )
+        if got != want
+    ]
+    for key, got, want_ms in (
+        ("prompt_seconds", stats.prompt_seconds, sums["t_p_eval_ms"]),
+        ("generation_seconds", stats.generation_seconds, sums["t_eval_ms"]),
+    ):
+        if got is None or abs(got - want_ms / 1000) > _SECONDS_TOLERANCE:
+            failed.append(key)
+    return failed
+
+
+def _usage_failures(last: CallRecord, n_tokens: object) -> list[str]:
+    """The last call's usage against the context's token count, within one token."""
+    usage = last.usage or {}
+    n_eval = (last.perf or {}).get("n_eval", 0)
+    if not isinstance(n_tokens, int) or "prompt_tokens" not in usage:
+        return ["usage"]
+    failed: list[str] = []
+    prompt_tokens = usage["prompt_tokens"]
+    if abs((n_tokens - n_eval) - prompt_tokens) > 1:
+        failed.append(
+            f"prompt_tokens (usage {prompt_tokens}, n_tokens - n_eval {n_tokens - n_eval:g})"
+        )
+    if abs(n_eval - usage.get("completion_tokens", -10)) > 1:
+        failed.append(
+            f"completion_tokens (usage {usage.get('completion_tokens')}, n_eval {n_eval:g})"
+        )
+    return failed
+
+
 def _runstats_leg(
     name: str, summarizer: Summarizer, capture: CapturingLlama, *, reset: bool, stream: bool
 ) -> list[str] | None:
@@ -1737,7 +1816,6 @@ def _runstats_leg(
     if not capture.calls:
         return None
     stats, sums, last = result.run_stats, _perf_sums(capture.calls), capture.calls[-1]
-    usage = last.usage or {}
     n_tokens = getattr(capture, "n_tokens", None)
     print(
         f"leg {name}: calls={len(capture.calls)} deltas "
@@ -1761,41 +1839,15 @@ def _runstats_leg(
     )
     if stats is None:
         return ["run_stats"]
-    failed = [
-        key
-        for key, got, want in (
-            ("prompt_evaluated", stats.prompt_evaluated, sums["n_p_eval"]),
-            ("generated_tokens", stats.generated_tokens, sums["n_eval"]),
-        )
-        if got != want
-    ]
-    for key, got, want_ms in (
-        ("prompt_seconds", stats.prompt_seconds, sums["t_p_eval_ms"]),
-        ("generation_seconds", stats.generation_seconds, sums["t_eval_ms"]),
-    ):
-        if got is None or abs(got - want_ms / 1000) > 1e-6:
-            failed.append(key)
+    failed = _counter_failures(stats, sums)
     if name == "blocking":
-        n_eval = (last.perf or {}).get("n_eval", 0)
-        if not isinstance(n_tokens, int) or "prompt_tokens" not in usage:
-            failed.append("usage")
-        else:
-            if abs((n_tokens - n_eval) - usage["prompt_tokens"]) > 1:
-                failed.append(
-                    f"prompt_tokens (usage {usage['prompt_tokens']}, n_tokens - n_eval {n_tokens - n_eval:g})"
-                )
-            if abs(n_eval - usage.get("completion_tokens", -10)) > 1:
-                failed.append(
-                    f"completion_tokens (usage {usage.get('completion_tokens')}, n_eval {n_eval:g})"
-                )
+        failed.extend(_usage_failures(last, n_tokens))
+    evaluated, prompt_tokens = stats.prompt_evaluated, stats.prompt_tokens
     if name == "prefix repeat" and not (
-        stats.prompt_evaluated is not None
-        and stats.prompt_tokens is not None
-        and stats.prompt_evaluated < stats.prompt_tokens
+        evaluated is not None and prompt_tokens is not None and evaluated < prompt_tokens
     ):
-        failed.append(
-            f"prefix (prompt_evaluated {stats.prompt_evaluated}, prompt_tokens {stats.prompt_tokens})"
-        )
+        failed.append(f"prefix (prompt_evaluated {evaluated}, prompt_tokens {prompt_tokens})")
+
     return failed
 
 
@@ -1811,9 +1863,9 @@ def check_runstats(args: argparse.Namespace) -> int:
         n_gpu_layers=args.n_gpu_layers,
     )
     try:
-        capture = CapturingLlama(summarizer.llm, summarizer._perf_snapshot)
+        capture = CapturingLlama(summarizer.llm, summarizer.perf_snapshot)
         summarizer.llm = capture
-        if summarizer._perf_snapshot() is None:
+        if summarizer.perf_snapshot() is None:
             print("Counters unavailable: llama_perf_context missing")
             return 2
         passed = 0
@@ -1920,10 +1972,12 @@ def self_test_language(path: Path) -> int:
 
 def run_self_test(kind_and_arg: Sequence[str]) -> int:
     """``--self-test KIND [ARG]``; the only kind so far is ``language <set>``."""
-    if len(kind_and_arg) != 2 or kind_and_arg[0] != "language":
-        print("refused: --self-test takes: language <labelled set>")
-        return 2
-    return self_test_language(Path(kind_and_arg[1]))
+    match kind_and_arg:
+        case ["language", labelled_set]:
+            return self_test_language(Path(labelled_set))
+        case _:
+            print("refused: --self-test takes: language <labelled set>")
+            return 2
 
 
 # The default window of a standalone contention count, in seconds.

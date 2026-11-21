@@ -427,7 +427,7 @@ def test_chunks_within_recuts_dense_regions_and_keeps_offsets() -> None:
     text = f"{latin}\n\n{cjk}"
     s = _shell(_FakeLLM())
 
-    pieces = s._chunks_within(text, 300, model_manager._split_into_chunks_with_offsets)
+    pieces = s.chunks_within(text, 300, model_manager._split_into_chunks_with_offsets)
 
     assert len(pieces) > 1
     for chunk, base in pieces:

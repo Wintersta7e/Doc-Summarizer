@@ -229,7 +229,7 @@ def _split_into_chunks(text: str, max_chars: int) -> list[str]:
 
 
 def _paragraph_chunks(text: str, max_chars: int) -> list[tuple[str, int]]:
-    """``_split_into_chunks`` in ``Summarizer._chunks_within``'s pair shape.
+    """``_split_into_chunks`` in ``Summarizer.chunks_within``'s pair shape.
 
     The prose path never reads the offsets, so they are all 0.
     """
@@ -955,7 +955,7 @@ class Summarizer:
         check = self._cancel_check
         if check is not None:
             _raise_if_cancelled(check)
-        before = self._perf_snapshot()
+        before = self.perf_snapshot()
         finish_reason: object = None
         usage: Any = None
         content = ""
@@ -1004,7 +1004,7 @@ class Summarizer:
             self._run_stats = None
             _log_run_stats(stats.finish())
 
-    def _perf_snapshot(self) -> _PerfSnapshot | None:
+    def perf_snapshot(self) -> _PerfSnapshot | None:
         """llama.cpp's perf counters now, or ``None`` when the backend has none."""
         ctx = self._llama_context()
         if ctx is None:
@@ -1036,7 +1036,7 @@ class Summarizer:
             return
         # Runs in _complete's finally: raising here would mask the call's own error.
         try:
-            after = self._perf_snapshot() if before is not None else None
+            after = self.perf_snapshot() if before is not None else None
             perf = _perf_delta(before, after) if before is not None and after is not None else None
             usage_prompt = usage.get("prompt_tokens") if isinstance(usage, dict) else None
             n_tokens = getattr(self.llm, "n_tokens", None)
@@ -1057,7 +1057,7 @@ class Summarizer:
             raise RuntimeError(_CLOSED_MESSAGE)
         return len(self.llm.tokenize(text.encode("utf-8"), add_bos=False))
 
-    def _chunks_within(
+    def chunks_within(
         self,
         text: str,
         budget_tokens: int,
@@ -1079,7 +1079,7 @@ class Summarizer:
         for chunk, base in split(text, max_chars):
             pieces.extend(
                 (piece, base + offset)
-                for piece, offset in self._chunks_within(chunk, budget_tokens, split)
+                for piece, offset in self.chunks_within(chunk, budget_tokens, split)
             )
         return pieces
 
@@ -1126,7 +1126,7 @@ class Summarizer:
 
             budget_tokens = max(self.n_ctx - max_tokens - _SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS)
             chunks = [
-                chunk for chunk, _ in self._chunks_within(text, budget_tokens, _paragraph_chunks)
+                chunk for chunk, _ in self.chunks_within(text, budget_tokens, _paragraph_chunks)
             ]
 
             if len(chunks) == 1:
@@ -1218,7 +1218,7 @@ class Summarizer:
         budget_tokens = max(
             self.n_ctx - max_tokens - _STRUCTURED_SCAFFOLD_TOKENS, _MIN_CHUNK_TOKENS
         )
-        chunks = self._chunks_within(text, budget_tokens, _split_into_chunks_with_offsets)
+        chunks = self.chunks_within(text, budget_tokens, _split_into_chunks_with_offsets)
         instruction = (
             _DETAILED_JSON_INSTRUCTION
             if summary_type == SUMMARY_TYPE_DETAILED
