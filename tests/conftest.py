@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 # Skip the Qt UI tests where PySide6 isn't installed (keeps a minimal env green).
 if importlib.util.find_spec("PySide6") is None:
-    collect_ignore_glob = ["test_ui_*.py"]
+    collect_ignore_glob = ["test_ui_*.py", "test_qml_screens.py", "test_e2e_flow.py"]
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no
 # display or GPU/GL is required.
