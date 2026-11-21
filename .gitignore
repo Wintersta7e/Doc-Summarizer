@@ -13,6 +13,8 @@ __pycache__/
 # Tooling caches & coverage
 .pytest_cache/
 .hypothesis/
+# mutmut's working copy and results
+mutants/
 .mypy_cache/
 .ruff_cache/
 .coverage

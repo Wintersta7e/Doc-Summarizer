@@ -67,6 +67,8 @@ dev = [
     "import-linter==2.17",
     "deptry==0.25.1",
     "vulture==2.16",
+    # Mutation testing (scripts/mutation.py); runs on Linux and macOS only.
+    "mutmut==3.8.1",
     # In the dev environment, so the git hooks' local steps see its tools.
     "pre-commit==4.7.0",
 ]
@@ -196,7 +198,9 @@ extend-ignore-names = [
 # S603 (no option to say so): these files run fixed tool argv lists, never a shell.
 "scripts/check.py" = ["S603"]  # 1 hit
 "scripts/check_binary.py" = ["S603"]  # 1 hit: runs the binary it was asked to check
+"scripts/mutation.py" = ["S603"]  # 2 hits: git and mutmut
 "tests/test_eval_runner.py" = ["S603"]  # 1 hit
+"tests/test_mutation_script.py" = ["S603"]  # 1 hit: git in a throwaway repository
 "tests/test_release_claims.py" = ["S603"]  # 1 hit
 "tests/test_smoke.py" = ["S603"]  # 1 hit
 "scripts/eval/run.py" = [
@@ -364,6 +368,23 @@ log_level = "INFO"
 # the plugin declares the option as a string).
 timeout = "120"
 markers = ["windows: also run by the windows-latest CI job (Windows filesystem semantics)"]
+
+# Mutation testing: `python scripts/mutation.py --changed <ref> | --all`. The
+# whole package is mutated, the Python UI included (QML is not Python). No
+# type_check_command: basedpyright infers an attribute's type from every
+# assignment, so a mutant `self.x = None` in one method moves the error into
+# unmutated methods, and mutmut stops the run when it cannot place an error.
+[tool.mutmut]
+source_paths = ["src/docsummarizer"]
+# What the tests read besides the package and themselves.
+also_copy = ["scripts", "run.py", "typings", "README.md", ".pre-commit-config.yaml", ".github"]
+# Left out of mutant runs: one test reads the package's source text, which in
+# the mutated copy holds every mutant; the release claims read the git index,
+# which the untracked copy is not in. Neither runs the package's code.
+pytest_add_cli_args = [
+    "--deselect=tests/test_model_manager.py::test_no_character_ratio_speed_log",
+    "--ignore=tests/test_release_claims.py",
+]
 
 [tool.coverage.run]
 source = ["docsummarizer"]
