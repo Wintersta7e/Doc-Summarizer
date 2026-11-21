@@ -18,7 +18,7 @@ import re
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Protocol, TypeVar, cast
 
 from PySide6.QtCore import Property, QMutex, QObject, QThreadPool, QUrl, Signal, Slot
 
@@ -53,7 +53,32 @@ from docsummarizer.ui.workers import Worker
 # Context window the model is loaded with (mirrors Summarizer.__init__ default).
 _DEFAULT_CONTEXT = 8192
 
-SummarizerFactory = Callable[[Path, "int | None", int], Summarizer]
+
+class SummaryEngine(Protocol):
+    """The part of ``Summarizer`` the bridge calls; previews and tests pass stand-ins."""
+
+    def summarize(self, text: str, summary_type: str, /, *, language: str) -> str:
+        """The plain-text summary of ``text``."""
+        ...
+
+    def summarize_structured(
+        self,
+        text: str,
+        summary_type: str,
+        /,
+        *,
+        should_cancel: Callable[[], bool] | None,
+        language: str,
+    ) -> StructuredSummary:
+        """The summary of ``text`` with a citation per point."""
+        ...
+
+    def close(self) -> None:
+        """Free the model."""
+        ...
+
+
+SummarizerFactory = Callable[[Path, "int | None", int], SummaryEngine]
 
 _T = TypeVar("_T")
 
@@ -83,7 +108,7 @@ def _url_to_path(url: str) -> str:
     return url
 
 
-def _point_to_variant(point: SummaryPoint) -> dict[str, Any]:
+def _point_to_variant(point: SummaryPoint) -> dict[str, object]:
     """Marshal a SummaryPoint (+ optional citation) to a QML-friendly dict."""
     citation = point.citation
     return {
@@ -96,7 +121,7 @@ def _point_to_variant(point: SummaryPoint) -> dict[str, Any]:
     }
 
 
-def summary_to_variant(summary: StructuredSummary) -> dict[str, Any]:
+def summary_to_variant(summary: StructuredSummary) -> dict[str, object]:
     """Marshal a ``StructuredSummary`` to a plain dict QML can read.
 
     QML cannot consume a frozen dataclass, so points become dicts and section
@@ -117,20 +142,25 @@ def summary_to_variant(summary: StructuredSummary) -> dict[str, Any]:
 
 def _plan_batch(
     files: list[Path], out: Path, summary_type: str
-) -> tuple[list[Path], list[dict[str, Any]]]:
+) -> tuple[list[Path], list[dict[str, object]]]:
     """Each input's output path and its initial batch row.
 
     An output that already exists is checked here, before any inference: its
     row starts ``SKIPPED`` and the run leaves the file alone.
     """
     targets = [out / summary_filename(f, summary_type, "txt") for f in files]
-    rows: list[dict[str, Any]] = [
+    rows: list[dict[str, object]] = [
         {"name": f.name, "status": "SKIPPED", "tokens": 0, "reason": SKIPPED_EXISTS}
         if os.path.lexists(target)
         else {"name": f.name, "status": "QUEUED", "tokens": 0, "reason": ""}
         for f, target in zip(files, targets, strict=True)
     ]
     return targets, rows
+
+
+# Qt takes a C++ type name where the stub types Signal's arguments as Python
+# types; through ``object``, since a string and a type share no members.
+_QVARIANT = cast("type", cast("object", "QVariant"))
 
 
 def _default_factory(model_path: Path, n_threads: int | None, n_gpu_layers: int) -> Summarizer:
@@ -141,26 +171,26 @@ class ConsoleBridge(QObject):
     """Controller object registered with the QML engine as ``bridge``."""
 
     # Property-change notifications.
-    busyChanged = Signal()
-    statusChanged = Signal()
-    modelReadyChanged = Signal()
-    docChanged = Signal()
-    settingsChanged = Signal()
-    summaryTypeChanged = Signal()
-    reloadArmedChanged = Signal()
-    downloadChanged = Signal()
+    busyChanged: Signal = Signal()
+    statusChanged: Signal = Signal()
+    modelReadyChanged: Signal = Signal()
+    docChanged: Signal = Signal()
+    settingsChanged: Signal = Signal()
+    summaryTypeChanged: Signal = Signal()
+    reloadArmedChanged: Signal = Signal()
+    downloadChanged: Signal = Signal()
 
     # One-shot events.
-    progress = Signal(float, str)
+    progress: Signal = Signal(float, str)
     # "QVariant" so the marshalled dict reaches QML as a property-accessible map.
-    summaryReady = Signal("QVariant")  # type: ignore[arg-type]
-    summaryError = Signal(str)
-    loadComplete = Signal(bool, str)
-    toast = Signal(str)
-    savedFlash = Signal()
-    batchProgress = Signal(int, int, str)
-    batchComplete = Signal(int, int, list, str)
-    batchRowsChanged = Signal()
+    summaryReady: Signal = Signal(_QVARIANT)
+    summaryError: Signal = Signal(str)
+    loadComplete: Signal = Signal(bool, str)
+    toast: Signal = Signal(str)
+    savedFlash: Signal = Signal()
+    batchProgress: Signal = Signal(int, int, str)
+    batchComplete: Signal = Signal(int, int, list, str)
+    batchRowsChanged: Signal = Signal()
 
     def __init__(
         self,
@@ -172,24 +202,24 @@ class ConsoleBridge(QObject):
         """Load the settings; ``synchronous`` runs every operation inline (tests)."""
         super().__init__(parent)
         self._settings: Settings = load_settings()
-        self._summarizer: Summarizer | None = None
-        self._mutex = QMutex()
-        self._pool = QThreadPool.globalInstance()
-        self._synchronous = synchronous
+        self._summarizer: SummaryEngine | None = None
+        self._mutex: QMutex = QMutex()
+        self._pool: QThreadPool = QThreadPool.globalInstance()
+        self._synchronous: bool = synchronous
         self._factory: SummarizerFactory = summarizer_factory or _default_factory
 
-        self._busy = False
-        self._status_text = ""
-        self._status_color = "ok"  # ok | warn | error
-        self._current_file = ""
-        self._extracted_text = ""
-        self._summary_type = SUMMARY_TYPE_DETAILED
-        self._reload_armed = False
-        self._download_pct = 0.0
-        self._downloading = False
-        self._batch_rows: list[dict[str, Any]] = []
+        self._busy: bool = False
+        self._status_text: str = ""
+        self._status_color: str = "ok"  # ok | warn | error
+        self._current_file: str = ""
+        self._extracted_text: str = ""
+        self._summary_type: str = SUMMARY_TYPE_DETAILED
+        self._reload_armed: bool = False
+        self._download_pct: float = 0.0
+        self._downloading: bool = False
+        self._batch_rows: list[dict[str, object]] = []
         self._last_summary: StructuredSummary | None = None
-        self._cancel_requested = False
+        self._cancel_requested: bool = False
         # Hold running workers: QThreadPool.start() does not keep a Python
         # reference, so without this the Worker (and its signals) is GC'd before
         # run() finishes and the done/failed signal is silently lost.
@@ -197,7 +227,7 @@ class ConsoleBridge(QObject):
         # canSummarize depends on model-ready as well as the document, but a
         # Qt Property has a single NOTIFY; re-fire docChanged on model changes so
         # the Summarize/Save buttons re-evaluate when the model finishes loading.
-        self.modelReadyChanged.connect(self.docChanged)
+        _ = self.modelReadyChanged.connect(self.docChanged)
 
     # -- threading seam ----------------------------------------------------- #
     def _run(self, work: Callable[[], _T], on_done: Callable[[_T], None]) -> None:
@@ -226,8 +256,8 @@ class ConsoleBridge(QObject):
             log_error(f"{op}: failed after {time.monotonic() - started:.2f}s — {message}")
             self._on_worker_failed(message)
 
-        worker.signals.done.connect(on_success)
-        worker.signals.failed.connect(on_failure)
+        _ = worker.signals.done.connect(on_success)
+        _ = worker.signals.failed.connect(on_failure)
         self._pool.start(worker)
 
     def _on_worker_failed(self, message: str) -> None:
@@ -241,134 +271,134 @@ class ConsoleBridge(QObject):
     def _get_busy(self) -> bool:
         return self._busy
 
-    busy = Property(bool, _get_busy, notify=busyChanged)
+    busy: Property = Property(bool, _get_busy, notify=busyChanged)
 
     def _get_status_text(self) -> str:
         return self._status_text
 
-    statusText = Property(str, _get_status_text, notify=statusChanged)
+    statusText: Property = Property(str, _get_status_text, notify=statusChanged)
 
     def _get_status_color(self) -> str:
         return self._status_color
 
-    statusColor = Property(str, _get_status_color, notify=statusChanged)
+    statusColor: Property = Property(str, _get_status_color, notify=statusChanged)
 
     def _get_model_ready(self) -> bool:
         return self._get_summarizer() is not None
 
-    modelReady = Property(bool, _get_model_ready, notify=modelReadyChanged)
+    modelReady: Property = Property(bool, _get_model_ready, notify=modelReadyChanged)
 
     def _get_model_downloaded(self) -> bool:
         return is_model_downloaded()
 
-    modelDownloaded = Property(bool, _get_model_downloaded, notify=modelReadyChanged)
+    modelDownloaded: Property = Property(bool, _get_model_downloaded, notify=modelReadyChanged)
 
     def _get_model_name(self) -> str:
         return DEFAULT_MODEL.name
 
-    modelName = Property(str, _get_model_name, constant=True)
+    modelName: Property = Property(str, _get_model_name, constant=True)
 
     def _get_model_size(self) -> float:
         return DEFAULT_MODEL.size_gb
 
-    modelSizeGb = Property(float, _get_model_size, constant=True)
+    modelSizeGb: Property = Property(float, _get_model_size, constant=True)
 
     def _get_model_quant(self) -> str:
         return _quant_label(DEFAULT_MODEL.filename)
 
-    modelQuant = Property(str, _get_model_quant, constant=True)
+    modelQuant: Property = Property(str, _get_model_quant, constant=True)
 
     def _get_context_size(self) -> int:
         return _DEFAULT_CONTEXT
 
-    contextSize = Property(int, _get_context_size, constant=True)
+    contextSize: Property = Property(int, _get_context_size, constant=True)
 
     def _get_compute_label(self) -> str:
         threads = self._settings.n_threads or _auto_threads()
         gpu = self._settings.use_gpu and gpu_offload_supported()
         return f"{'GPU' if gpu else 'CPU'} · {threads}T"
 
-    computeLabel = Property(str, _get_compute_label, notify=settingsChanged)
+    computeLabel: Property = Property(str, _get_compute_label, notify=settingsChanged)
 
     def _get_threads(self) -> int:
         return self._settings.n_threads or _auto_threads()
 
-    threads = Property(int, _get_threads, notify=settingsChanged)
+    threads: Property = Property(int, _get_threads, notify=settingsChanged)
 
     def _get_cpu_count(self) -> int:
         return os.cpu_count() or 8
 
-    cpuCount = Property(int, _get_cpu_count, constant=True)
+    cpuCount: Property = Property(int, _get_cpu_count, constant=True)
 
     def _get_gpu(self) -> bool:
         return self._settings.use_gpu
 
-    gpuEnabled = Property(bool, _get_gpu, notify=settingsChanged)
+    gpuEnabled: Property = Property(bool, _get_gpu, notify=settingsChanged)
 
     def _get_gpu_supported(self) -> bool:
         return gpu_offload_supported()
 
-    gpuSupported = Property(bool, _get_gpu_supported, constant=True)
+    gpuSupported: Property = Property(bool, _get_gpu_supported, constant=True)
 
     def _get_appearance(self) -> str:
         return self._settings.appearance
 
-    appearance = Property(str, _get_appearance, notify=settingsChanged)
+    appearance: Property = Property(str, _get_appearance, notify=settingsChanged)
 
     def _get_output_language(self) -> str:
         return self._settings.output_language
 
-    outputLanguage = Property(str, _get_output_language, notify=settingsChanged)
+    outputLanguage: Property = Property(str, _get_output_language, notify=settingsChanged)
 
     def _get_output_languages(self) -> list[str]:
         return list(OUTPUT_LANGUAGES)
 
-    outputLanguages = Property(list, _get_output_languages, constant=True)
+    outputLanguages: Property = Property(list, _get_output_languages, constant=True)
 
     def _get_reload_armed(self) -> bool:
         return self._reload_armed
 
-    reloadArmed = Property(bool, _get_reload_armed, notify=reloadArmedChanged)
+    reloadArmed: Property = Property(bool, _get_reload_armed, notify=reloadArmedChanged)
 
     def _get_has_doc(self) -> bool:
         return bool(self._extracted_text)
 
-    hasDoc = Property(bool, _get_has_doc, notify=docChanged)
+    hasDoc: Property = Property(bool, _get_has_doc, notify=docChanged)
 
     def _get_can_summarize(self) -> bool:
         return self._get_model_ready() and bool(self._extracted_text)
 
-    canSummarize = Property(bool, _get_can_summarize, notify=docChanged)
+    canSummarize: Property = Property(bool, _get_can_summarize, notify=docChanged)
 
     def _get_current_file(self) -> str:
         return self._current_file
 
-    currentFileName = Property(str, _get_current_file, notify=docChanged)
+    currentFileName: Property = Property(str, _get_current_file, notify=docChanged)
 
     def _get_extracted_text(self) -> str:
         return self._extracted_text
 
-    extractedText = Property(str, _get_extracted_text, notify=docChanged)
+    extractedText: Property = Property(str, _get_extracted_text, notify=docChanged)
 
     def _get_summary_type(self) -> str:
         return self._summary_type
 
-    summaryType = Property(str, _get_summary_type, notify=summaryTypeChanged)
+    summaryType: Property = Property(str, _get_summary_type, notify=summaryTypeChanged)
 
     def _get_summary_types(self) -> list[str]:
         return list(SUMMARY_TYPES)
 
-    summaryTypes = Property(list, _get_summary_types, constant=True)
+    summaryTypes: Property = Property(list, _get_summary_types, constant=True)
 
     def _get_download_pct(self) -> float:
         return self._download_pct
 
-    downloadPercent = Property(float, _get_download_pct, notify=downloadChanged)
+    downloadPercent: Property = Property(float, _get_download_pct, notify=downloadChanged)
 
-    def _get_batch_rows(self) -> list[dict[str, Any]]:
+    def _get_batch_rows(self) -> list[dict[str, object]]:
         return self._batch_rows
 
-    batchRows = Property(list, _get_batch_rows, notify=batchRowsChanged)
+    batchRows: Property = Property(list, _get_batch_rows, notify=batchRowsChanged)
 
     # -- internal state setters (emit on change) --------------------------- #
     def _set_busy(self, *, busy: bool) -> None:
@@ -386,14 +416,14 @@ class ConsoleBridge(QObject):
         self._set_busy(busy=False)
         self._set_status(status, color)
 
-    def _get_summarizer(self) -> Summarizer | None:
+    def _get_summarizer(self) -> SummaryEngine | None:
         self._mutex.lock()
         try:
             return self._summarizer
         finally:
             self._mutex.unlock()
 
-    def _set_summarizer(self, summarizer: Summarizer | None) -> None:
+    def _set_summarizer(self, summarizer: SummaryEngine | None) -> None:
         self._mutex.lock()
         old = self._summarizer
         self._summarizer = summarizer
@@ -434,10 +464,10 @@ class ConsoleBridge(QObject):
         if free_old:
             self._set_summarizer(None)
 
-        def work() -> Summarizer:
+        def work() -> SummaryEngine:
             return self._factory(path, n_threads, n_gpu)
 
-        def done(summarizer: Summarizer) -> None:
+        def done(summarizer: SummaryEngine) -> None:
             self._set_summarizer(summarizer)
             self._finish("Ready")
             if emit_complete:
@@ -616,10 +646,11 @@ class ConsoleBridge(QObject):
 
         def work() -> None:
             if as_docx:
-                # The save dialog already confirmed replacing an existing file.
-                write_summary_docx(path, source_name=source, summary=summary.text, replace=True)
+                # The save dialog already confirmed replacing an existing file,
+                # so the "already exists" result cannot occur.
+                _ = write_summary_docx(path, source_name=source, summary=summary.text, replace=True)
             else:
-                write_summary_txt(
+                _ = write_summary_txt(
                     path,
                     source_name=source,
                     summary=summary.text,
@@ -748,7 +779,7 @@ class ConsoleBridge(QObject):
 
     def _run_batch(
         self,
-        summarizer: Summarizer,
+        summarizer: SummaryEngine,
         files: list[Path],
         targets: list[Path],
         summary_type: str,

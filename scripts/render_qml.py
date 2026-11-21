@@ -17,9 +17,10 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import final
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("QT_QUICK_BACKEND", "software")
+_ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_ = os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -73,17 +74,22 @@ def _sample_summary() -> StructuredSummary:
 
 class _FakeSummarizer:
     def summarize_structured(
-        self, _text: str, _summary_type: str = "detailed"
+        self, _text: str, _summary_type: str, /, **_options: object
     ) -> StructuredSummary:
         return _sample_summary()
 
-    def summarize(self, _text: str, _summary_type: str = "detailed") -> str:
+    def summarize(self, _text: str, _summary_type: str, /, **_options: object) -> str:
         return _sample_summary().lead or ""
 
     def close(self) -> None:
         pass
 
 
+def _fake_factory(_model: Path, _threads: int | None, _gpu_layers: int) -> _FakeSummarizer:
+    return _FakeSummarizer()
+
+
+@final
 class _PreviewBridge(ConsoleBridge):
     """A bridge seeded with a ready model, a document and batch rows, for a still image."""
 
@@ -97,25 +103,35 @@ class _PreviewBridge(ConsoleBridge):
         self.batchRowsChanged.emit()
 
 
-def _parse_args() -> argparse.Namespace:
+class _Args(argparse.Namespace):
+    """The parsed command line."""
+
+    screen: str = "summary"
+    theme: str = "dark"
+    out: str | None = None
+
+
+def _parse_args() -> _Args:
     parser = argparse.ArgumentParser(description="Render a QML screen to a PNG, offscreen.")
-    parser.add_argument("screen", nargs="?", default="summary")
-    parser.add_argument("theme", nargs="?", default="dark")
-    parser.add_argument("out", nargs="?", help="default: render-<screen>-<theme>.png in the repo")
-    return parser.parse_args()
+    _ = parser.add_argument("screen", nargs="?", default=_Args.screen)
+    _ = parser.add_argument("theme", nargs="?", default=_Args.theme)
+    _ = parser.add_argument(
+        "out", nargs="?", help="default: render-<screen>-<theme>.png in the repo"
+    )
+    return parser.parse_args(namespace=_Args())
 
 
 def main() -> int:
     """Render the screen and theme the command line names; 0 when the PNG is saved."""
     args = _parse_args()
-    screen: str = args.screen
-    theme: str = args.theme
-    out: str = args.out or str(REPO / f"render-{screen}-{theme}.png")
+    screen = args.screen
+    theme = args.theme
+    out = args.out or str(REPO / f"render-{screen}-{theme}.png")
 
     _app = QGuiApplication(sys.argv)  # kept alive for the view
 
-    register_fonts()
-    bridge = _PreviewBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=True)
+    _ = register_fonts()
+    bridge = _PreviewBridge(summarizer_factory=_fake_factory, synchronous=True)
     bridge.seed_document("spiral-vane-pump.pdf", SAMPLE_SOURCE)
 
     view = QQuickView()
@@ -130,9 +146,14 @@ def main() -> int:
         return 1
 
     root = view.rootObject()
-    root.setProperty("darkTheme", theme == "dark")
-    root.setProperty("screen", screen)
-    root.setProperty("firstRun", screen == "firstrun")
+    seeded = (
+        root.setProperty("darkTheme", theme == "dark"),
+        root.setProperty("screen", screen),
+        root.setProperty("firstRun", screen == "firstrun"),
+    )
+    if not all(seeded):
+        print(f"FAILED: {_PREVIEW.name} lacks a darkTheme, screen or firstRun property")
+        return 1
     view.show()
 
     bridge.modelReadyChanged.emit()
@@ -150,12 +171,14 @@ def main() -> int:
 
     loop = QEventLoop()
     QTimer.singleShot(600, loop.quit)
-    loop.exec()
+    _ = loop.exec()
     image = view.grabWindow()
     if image.isNull() or image.width() == 0:
         print("FAILED: grabbed image is null/empty")
         return 1
-    image.save(out)
+    if not image.save(out):
+        print(f"FAILED: could not write {out}")
+        return 1
     print(f"saved {out}  ({image.width()}x{image.height()})")
     return 0
 
