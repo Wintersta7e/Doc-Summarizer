@@ -33,7 +33,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 
     from docsummarizer.model_manager import (
         ChatCompletionResponseChoice,
@@ -503,7 +503,7 @@ class CallRecord:
 def _jsonable(value: object) -> object:
     """``value`` when it serializes to JSON, else its type name."""
     try:
-        json.dumps(value)
+        _ = json.dumps(value)  # a probe: only whether it serializes matters
     except (TypeError, ValueError):
         return type(value).__name__
     return value
@@ -1046,7 +1046,7 @@ def results_path(eval_dir: Path, tier: str, short_sha: str, now: datetime) -> Pa
 
 def write_line(fh: IO[str], record: Mapping[str, Any]) -> None:
     """One JSON record per line."""
-    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _ = fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 @dataclass(frozen=True)
@@ -1272,7 +1272,8 @@ def _run_passes(
         )
         threads = getattr(summarizer, "n_threads", build.n_threads) if threads is None else threads
         try:
-            run_cases(summarizer, specs, texts, targets, on_run=stream)
+            # Each case run reaches the results file through ``stream`` as it ends.
+            _ = run_cases(summarizer, specs, texts, targets, on_run=stream)
         finally:
             summarizer.close()
     return lines, threads
@@ -1367,7 +1368,7 @@ def _run_tier(args: EvalArgs) -> int:
     }
     with final.open("x", encoding="utf-8") as out:
         write_line(out, header)
-        out.write(partial.read_text(encoding="utf-8"))
+        _ = out.write(partial.read_text(encoding="utf-8"))
     partial.unlink()
     print(f"results: {final}")
     print_table(lines)
@@ -1390,8 +1391,8 @@ class ReplayMismatchError(Exception):
     def __init__(self, seq: int, field: str) -> None:
         """Name the call (``seq``) and the request field that differed."""
         super().__init__(f"seq {seq} field {field}")
-        self.seq = seq
-        self.field = field
+        self.seq: int = seq
+        self.field: str = field
 
 
 def _normalized(value: object) -> object:
@@ -1491,7 +1492,7 @@ def replay_summarizer(llm: ReplayLlama, n_ctx: int) -> Summarizer:
 
 
 @contextmanager
-def accept_every_match() -> Iterator[None]:
+def accept_every_match() -> Generator[None, None, None]:
     """Accept every candidate sentence the coverage pre-filter keeps, then restore."""
     from docsummarizer import provenance
 
