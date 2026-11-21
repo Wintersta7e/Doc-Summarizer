@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""Model Manager Module
-Handles downloading, loading, and running the local LLM.
-"""
+"""Download, load and run the local LLM."""
 
+import ctypes
 import functools
 import json
 import os
@@ -11,11 +10,17 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast, final
 
 from huggingface_hub import hf_hub_download
 
-from docsummarizer.logger import get_memory_usage_mb, log_debug, log_error, log_info, log_warning
+from docsummarizer.logger import (
+    get_logger,
+    get_memory_usage_mb,
+    log_debug,
+    log_error,
+    log_info,
+)
 from docsummarizer.paths import app_data_dir
 from docsummarizer.provenance import SourceSpan, locate_quote, split_sentences
 
@@ -40,7 +45,9 @@ def gpu_offload_supported() -> bool:
         from llama_cpp import llama_supports_gpu_offload
 
         return bool(llama_supports_gpu_offload())
-    except Exception:
+    except Exception:  # no runtime extra, or a library that fails to load
+        logger = get_logger()
+        logger.debug("GPU offload probe failed", exc_info=True)
         return False
 
 
@@ -461,7 +468,7 @@ def _parse_structured_json(raw: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _read_raw_points(value: Any) -> list[tuple[str, str]]:
+def _read_raw_points(value: object) -> list[tuple[str, str]]:
     """Coerce a parsed ``points`` array into ``(text, quote)`` pairs.
 
     Defensive against a small local model's malformed entries: non-string or
@@ -650,13 +657,13 @@ def _build_progress_tqdm(callback: Callable[[float, str], None]) -> type[Any]:
     coalesce to one callback per integer megabyte so the GUI doesn't burn
     Tk main-loop wakeups on no-op text changes.
     """
-    from tqdm.auto import tqdm as _BaseTqdm  # noqa: N812
+    from tqdm.auto import tqdm
 
-    class _ProgressTqdm(_BaseTqdm):  # type: ignore[misc]
+    class _ProgressTqdm(tqdm):  # type: ignore[misc]
         _last_reported_mb = -1
 
-        def update(self, n: int = 1) -> Any:
-            ret = super().update(n)
+        def update(self, n: int = 1) -> bool | None:
+            ret: bool | None = super().update(n)
             try:
                 if not self.total or self.total <= 0:
                     return ret
@@ -667,9 +674,10 @@ def _build_progress_tqdm(callback: Callable[[float, str], None]) -> type[Any]:
                 pct = (self.n / self.total) * 100.0
                 mb_total = self.total / (1024 * 1024)
                 callback(pct, f"Downloading {mb_done} / {mb_total:.0f} MB")
-            except Exception as exc:
+            except Exception:
                 # Progress reporting must never break the download itself.
-                log_debug(f"Progress callback raised: {exc!s}")
+                logger = get_logger()
+                logger.debug("Progress callback raised", exc_info=True)
             return ret
 
     return _ProgressTqdm
@@ -730,13 +738,45 @@ def download_model(
 
     except Exception as e:
         error_msg = f"Failed to download model: {e!s}"
-        log_error(error_msg)
+        logger = get_logger()
+        logger.exception(error_msg)
         log_error(f"Exception type: {type(e).__name__}")
         if progress_callback:
             progress_callback(0.0, error_msg)
         return model_path, error_msg
 
 
+def _reduce_structured(
+    summary_type: str, partials: list[StructuredSummary]
+) -> StructuredSummary | None:
+    """Merge per-chunk summaries, drawing round-robin so every chunk is represented.
+
+    ``None`` when no chunk produced a point, which tells the caller to fall back.
+    """
+    if summary_type == SUMMARY_TYPE_DETAILED:
+        lead = next((partial.lead for partial in partials if partial.lead), None)
+        groups = [partial.points for partial in partials if partial.points]
+        points = _select_round_robin(groups, _DETAILED_POINT_COUNT)
+        if not points:
+            return None
+        return _make_structured(SUMMARY_TYPE_DETAILED, lead, points, None)
+    sections = {
+        name: _select_round_robin(
+            [
+                partial.sections[name]
+                for partial in partials
+                if partial.sections and partial.sections.get(name)
+            ],
+            _DETAILED_POINT_COUNT,
+        )
+        for name in _STRUCTURED_SECTIONS
+    }
+    if not any(sections.values()):
+        return None
+    return _make_structured(SUMMARY_TYPE_STRUCTURED, None, [], sections)
+
+
+@final
 class Summarizer:
     """Handles text summarization using the local LLM."""
 
@@ -750,7 +790,7 @@ class Summarizer:
         n_ctx: int = 8192,
         n_threads: int | None = None,
         n_gpu_layers: int = 0,
-    ):
+    ) -> None:
         """Initialize the summarizer with a model.
 
         Args:
@@ -804,24 +844,28 @@ class Summarizer:
         self._llama_abort_callback: Any | None = None
         self._llama_abort_callback_user_data: Any | None = None
 
-    def _llama_context(self) -> Any | None:
+    def _llama_context(self) -> object | None:
         """Return the low-level llama_context pointer, if this backend exposes it."""
         llm = self.llm
         if llm is None:
             return None
         try:
-            ctx = getattr(llm, "ctx", None)
-        except Exception as exc:
-            log_debug(f"Unable to read llama ctx property: {exc!s}")
+            ctx = cast("object | None", getattr(llm, "ctx", None))
+        except Exception as exc:  # the optional binding varies by build
+            logger = get_logger()
+            logger.debug("Unable to read llama ctx property: %s", exc, exc_info=True)
             ctx = None
         if ctx is not None:
             return ctx
         try:
             internal_ctx = getattr(llm, "_ctx", None)
-            return getattr(internal_ctx, "ctx", None) if internal_ctx is not None else None
-        except Exception as exc:
-            log_debug(f"Unable to read llama _ctx property: {exc!s}")
+            if internal_ctx is not None:
+                ctx = cast("object | None", getattr(internal_ctx, "ctx", None))
+        except Exception as exc:  # the optional binding varies by build
+            logger = get_logger()
+            logger.debug("Unable to read llama _ctx property: %s", exc, exc_info=True)
             return None
+        return ctx
 
     def _install_llama_abort_callback(self, check: Callable[[], bool]) -> bool:
         """Ask llama.cpp to abort the active decode when ``check`` turns true.
@@ -831,11 +875,10 @@ class Summarizer:
         existing streaming cancellation path remains in force.
         """
         try:
-            import ctypes
-
             from llama_cpp import llama_cpp
-        except Exception as exc:
-            log_debug(f"llama abort callback unavailable: {exc!s}")
+        except Exception as exc:  # the optional binding varies by build
+            logger = get_logger()
+            logger.debug("llama abort callback unavailable: %s", exc, exc_info=True)
             return False
 
         set_abort_callback = getattr(llama_cpp, "llama_set_abort_callback", None)
@@ -844,11 +887,13 @@ class Summarizer:
         if not callable(set_abort_callback) or not callable(callback_type) or ctx is None:
             return False
 
-        def abort_callback(_: Any) -> bool:
+        def abort_callback(_: object) -> bool:
             try:
                 return bool(check())
-            except Exception as exc:
-                log_debug(f"Cancel check raised inside llama abort callback: {exc!s}")
+            except Exception:
+                # Runs inside llama.cpp's decode loop: an exception must not reach C.
+                logger = get_logger()
+                logger.debug("Cancel check raised inside llama abort callback", exc_info=True)
                 return False
 
         c_callback = callback_type(abort_callback)
@@ -857,10 +902,11 @@ class Summarizer:
         self._llama_abort_callback_user_data = user_data
         try:
             set_abort_callback(ctx, c_callback, user_data)
-        except Exception as exc:
+        except Exception as exc:  # the optional binding varies by build
             self._llama_abort_callback = None
             self._llama_abort_callback_user_data = None
-            log_debug(f"Unable to install llama abort callback: {exc!s}")
+            logger = get_logger()
+            logger.debug("Unable to install llama abort callback: %s", exc, exc_info=True)
             return False
         return True
 
@@ -869,8 +915,6 @@ class Summarizer:
         if getattr(self, "_llama_abort_callback", None) is None:
             return
         try:
-            import ctypes
-
             from llama_cpp import llama_cpp
 
             set_abort_callback = getattr(llama_cpp, "llama_set_abort_callback", None)
@@ -878,8 +922,9 @@ class Summarizer:
             ctx = self._llama_context()
             if callable(set_abort_callback) and callable(callback_type) and ctx is not None:
                 set_abort_callback(ctx, callback_type(), ctypes.c_void_p())
-        except Exception as exc:
-            log_debug(f"Unable to clear llama abort callback: {exc!s}")
+        except Exception as exc:  # the optional binding varies by build
+            logger = get_logger()
+            logger.debug("Unable to clear llama abort callback: %s", exc, exc_info=True)
         finally:
             self._llama_abort_callback = None
             self._llama_abort_callback_user_data = None
@@ -894,7 +939,7 @@ class Summarizer:
             if installed:
                 self._clear_llama_abort_callback()
 
-    def _complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+    def _complete(self, messages: list[dict[str, str]], **kwargs: object) -> str:
         """One chat completion.
 
         When a cancel-check is active (the GUI Stop path) the response is
@@ -977,12 +1022,13 @@ class Summarizer:
                 float(data.t_p_eval_ms),
                 float(data.t_eval_ms),
             )
-        except Exception as exc:
-            log_debug(f"llama perf counters unavailable: {exc!s}")
+        except Exception as exc:  # the optional binding varies by build
+            logger = get_logger()
+            logger.debug("llama perf counters unavailable: %s", exc, exc_info=True)
             return None
 
     def _record_call(
-        self, before: _PerfSnapshot | None, finish_reason: object, usage: Any, content: str
+        self, before: _PerfSnapshot | None, finish_reason: object, usage: object, content: str
     ) -> None:
         """Add one completion to the open request's stats, if a request is open."""
         stats = self._run_stats
@@ -1001,8 +1047,9 @@ class Summarizer:
                 n_tokens_after=n_tokens if isinstance(n_tokens, int) else None,
                 count_generated=lambda: self._count_tokens(content) if content else 0,
             )
-        except Exception as exc:
-            log_debug(f"Unable to record run stats: {exc!s}")
+        except Exception:
+            logger = get_logger()
+            logger.debug("Unable to record run stats", exc_info=True)
 
     def _count_tokens(self, text: str) -> int:
         """Tokens ``text`` occupies in this model's context window."""
@@ -1056,6 +1103,8 @@ class Summarizer:
             summary_type: one of `SUMMARY_TYPES`. Unknown values fall back to
                 "detailed" to preserve the prior tolerant behavior.
             max_tokens: Maximum tokens in the response
+            should_cancel: Polled between and during model calls; returning
+                true stops the run with ``SummarizationCancelledError``.
             language: Output language. ``LANGUAGE_AUTO`` (the default) tells the
                 model to match the document; any other name pins the summary to
                 that language.
@@ -1144,8 +1193,11 @@ class Summarizer:
                 )
             except SummarizationCancelledError:
                 raise  # a clean stop must not fall back to more inference
-            except Exception as exc:
-                log_warning(f"Structured summarization failed ({exc!s}); falling back to prose")
+            except Exception:
+                logger = get_logger()
+                logger.warning(
+                    "Structured summarization failed; falling back to prose", exc_info=True
+                )
                 result = None
             if result is None:
                 fallback = self._fallback_structured(text, summary_type, max_tokens, language)
@@ -1185,41 +1237,15 @@ class Summarizer:
         # Map each chunk (citations already at global offsets), keeping per-chunk
         # groups. Reduce by drawing across chunks round-robin, so a long document
         # draws from its whole body rather than only the first chunk.
-        lead: str | None = None
-        detailed_groups: list[list[SummaryPoint]] = []
-        section_groups: dict[str, list[list[SummaryPoint]]] = {
-            name: [] for name in _STRUCTURED_SECTIONS
-        }
+        partials: list[StructuredSummary] = []
         for chunk_text, base in chunks:
             _raise_if_cancelled(should_cancel)
             parsed = _parse_structured_json(
                 self._chat_json(f"{instruction}\n\nDocument:\n{chunk_text}", max_tokens)
             )
-            if parsed is None:
-                continue
-            partial = _build_structured(parsed, summary_type, chunk_text, base)
-            if lead is None and partial.lead:
-                lead = partial.lead
-            if partial.points:
-                detailed_groups.append(partial.points)
-            if partial.sections:
-                for name in _STRUCTURED_SECTIONS:
-                    section = partial.sections.get(name)
-                    if section:
-                        section_groups[name].append(section)
-
-        if summary_type == SUMMARY_TYPE_DETAILED:
-            points = _select_round_robin(detailed_groups, _DETAILED_POINT_COUNT)
-            if not points:
-                return None
-            return _make_structured(SUMMARY_TYPE_DETAILED, lead, points, None)
-        sections = {
-            name: _select_round_robin(groups, _DETAILED_POINT_COUNT)
-            for name, groups in section_groups.items()
-        }
-        if not any(sections.values()):
-            return None
-        return _make_structured(SUMMARY_TYPE_STRUCTURED, None, [], sections)
+            if parsed is not None:
+                partials.append(_build_structured(parsed, summary_type, chunk_text, base))
+        return _reduce_structured(summary_type, partials)
 
     def _chat_json(self, user_content: str, max_tokens: int) -> str:
         """One chat completion constrained to a JSON object, low-temperature."""
@@ -1298,7 +1324,9 @@ class Summarizer:
             self.llm = None
 
     def __enter__(self) -> "Summarizer":
+        """Return the summarizer; leaving the block closes it."""
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Close the summarizer, freeing the model."""
         self.close()
