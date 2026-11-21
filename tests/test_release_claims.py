@@ -27,12 +27,6 @@ _REMOVED_FILES = ("setup_and_run.sh", "setup_and_run.bat", "requirements.lock")
 _REMOVED_FILE_REF = re.compile(rb"setup_and_run|requirements\.lock", re.IGNORECASE)
 # Phrases of the removed lockfile section only: a hash-locked requirements file
 # for release builds may be documented with the same tool and the same word.
-_LOCKFILE_PROCEDURE = (
-    "Reproducible installs (lockfile)",
-    "pip install -r requirements.lock",
-    "-o requirements.lock",
-    "Dependabot will refresh the lockfile",
-)
 # A comment may wrap mid-phrase ("the setup" / "# scripts"), so these span a "#".
 _PYPROJECT_STALE = (
     re.compile(r"setup\s*(#\s*)?scripts", re.IGNORECASE),
@@ -97,16 +91,6 @@ def test_setup_scripts_and_lockfile_are_gone() -> None:
     assert not refs, f"still referenced: {refs}"
 
 
-def test_development_has_no_lockfile_procedure() -> None:
-    """DEVELOPMENT.md carries no ``requirements.lock`` procedure.
-
-    Restoring the "Reproducible installs (lockfile)" heading, its install or
-    regenerate command, or its Dependabot sentence fails this test.
-    """
-    hits = _hits(_read("DEVELOPMENT.md"), _LOCKFILE_PROCEDURE)
-    assert not hits, f"lockfile procedure still in DEVELOPMENT.md: {hits}"
-
-
 def test_pyproject_names_no_setup_scripts() -> None:
     """pyproject.toml no longer sends users to the setup scripts.
 
@@ -123,7 +107,6 @@ _README_TIMINGS = (
     "Approx. CPU time",
     "A CUDA build is several times faster",
 )
-_DEVELOPMENT_GPU_CLAIMS = ("Performance Comparison", "no local CUDA toolkit required")
 
 
 def test_readme_names_no_macos() -> None:
@@ -150,16 +133,6 @@ def test_readme_has_no_unsourced_timings() -> None:
     """
     hits = _hits(_read("README.md"), _README_TIMINGS)
     assert not hits, f"unsourced timings still in README: {hits}"
-
-
-def test_development_has_no_unsourced_gpu_claims() -> None:
-    """DEVELOPMENT.md has no GPU timing table and no "no CUDA toolkit" promise.
-
-    Restoring the "Performance Comparison" table or the phrase "no local CUDA
-    toolkit required" fails this test.
-    """
-    hits = _hits(_read("DEVELOPMENT.md"), _DEVELOPMENT_GPU_CLAIMS)
-    assert not hits, f"unsourced GPU claims still in DEVELOPMENT.md: {hits}"
 
 
 _PRE_COMMIT = ".pre-commit-config.yaml"

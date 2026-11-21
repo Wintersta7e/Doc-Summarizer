@@ -108,7 +108,6 @@ include = [
     "run.py",
     "README.md",
     "LICENSE",
-    "DEVELOPMENT.md",
     "DocSummarizer.spec",
 ]
 

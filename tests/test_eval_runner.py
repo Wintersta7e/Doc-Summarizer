@@ -1681,18 +1681,6 @@ def test_self_test_language_computes_three_rates(
     assert code == 2
 
 
-_DOCS_HEADING = "## Evaluating a model, prompt or pipeline change"
-
-
-def _docs_section() -> str:
-    text = (_REPO / "DEVELOPMENT.md").read_text(encoding="utf-8")
-    start = text.find(_DOCS_HEADING)
-    if start < 0:
-        return ""
-    end = text.find("\n## ", start + len(_DOCS_HEADING))
-    return text[start : end if end >= 0 else len(text)]
-
-
 def test_eval_args_defaults_match_the_parser() -> None:
     """The typed namespace's defaults are the parser's own, option for option."""
     parsed = vars(run.build_parser().parse_args(["--checks", "runstats"], namespace=Namespace()))
@@ -1737,21 +1725,7 @@ def test_result_record_is_the_summary_without_its_run_stats() -> None:
     assert json.dumps(record) == json.dumps(expected)  # and in the same key order
 
 
-def test_docs_name_every_runner_option() -> None:
-    """Every runner option and check is in the evaluation guide; the scripts index lists it."""
-    options = sorted(
-        option
-        for action in run.build_parser()._actions
-        for option in action.option_strings
-        if option.startswith("--") and option != "--help"
-    )
-    names = options + sorted(run.CHECKS)
-    _LOG.info("%s options, %s checks", len(options), len(run.CHECKS))
-    assert options
-    section = _docs_section()
-    missing = [
-        name for name in names if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", section)
-    ]
-    assert missing == []
+def test_scripts_index_lists_the_runner() -> None:
+    """The scripts index has a row for the evaluation runner."""
     readme = (_REPO / "scripts" / "README.md").read_text(encoding="utf-8")
     assert any(line.startswith("|") and "`eval/run.py`" in line for line in readme.splitlines())

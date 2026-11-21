@@ -171,12 +171,11 @@ separate from the universal CPU release.
 ## Development
 
 Tooling is intentionally strict (broad Ruff ruleset, basedpyright `all`, pytest with a coverage floor).
-See [DEVELOPMENT.md](DEVELOPMENT.md). The quality gate (matches CI):
+The quality gate (matches CI):
 
 ```bash
-ruff check . && ruff format --check .
-basedpyright
-pytest --cov=docsummarizer
+uv sync --locked --extra dev --extra gui
+python scripts/check.py all
 ```
 
 ## License

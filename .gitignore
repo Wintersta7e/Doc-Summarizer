@@ -63,6 +63,9 @@ AGENTS.md
 GEMINI.md
 docs
 
+# Internal developer docs and local tools (never published)
+.dev/
+
 # Local test inputs (sample PDFs for manual app testing — not committed)
 test-pdfs/
 
