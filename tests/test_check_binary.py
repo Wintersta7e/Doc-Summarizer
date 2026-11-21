@@ -68,29 +68,6 @@ def test_a_passing_smoke_run_has_no_problems(tmp_path: Path) -> None:
     assert check_binary.smoke_problems(command, _TIMEOUT_S) == []
 
 
-def test_the_smoke_run_gets_the_bundled_fonts_dir(tmp_path: Path) -> None:
-    """A frozen Windows build has no ``PySide6/lib/fonts``, where offscreen Qt looks.
-
-    Without ``QT_QPA_FONTDIR`` naming a folder of fonts, Qt warns and the app's
-    own smoke test fails on that warning, though the native platform is clean.
-    """
-    script = tmp_path / "needs_fonts.py"
-    _ = script.write_text(
-        "import os, sys\n"
-        "from pathlib import Path\n"
-        "fonts = Path(os.environ.get('QT_QPA_FONTDIR', ''))\n"
-        "args = sys.argv[1:]\n"
-        "if os.environ.get('QT_QPA_FONTDIR') and any(fonts.glob('*.ttf')):\n"
-        "    Path(args[args.index('--smoke-result') + 1]).write_text(\n"
-        f"        {check_binary.expected_line()!r}, encoding='utf-8')\n"
-        "    sys.exit(0)\n"
-        "sys.exit(1)\n",
-        encoding="utf-8",
-    )
-
-    assert check_binary.smoke_problems([sys.executable, str(script)], _TIMEOUT_S) == []
-
-
 @pytest.mark.skipif(importlib.util.find_spec("PySide6") is None, reason="the app needs Qt to start")
 def test_the_real_app_passes_the_smoke_check() -> None:
     command = [sys.executable, str(_REPO / "run.py")]

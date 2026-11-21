@@ -43,7 +43,7 @@ from docsummarizer.logger import get_logger, log_error, log_info, log_startup
 from docsummarizer.paths import redirected_app_data
 from docsummarizer.settings import load_settings, save_settings, settings_path
 from docsummarizer.ui.bridge import ConsoleBridge
-from docsummarizer.ui.fonts import register_fonts
+from docsummarizer.ui.fonts import register_fonts, use_bundled_font_dir
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -314,6 +314,7 @@ def _smoke_main(args: list[str]) -> int:
     ):
         try:
             log_startup()
+            use_bundled_font_dir()
             return smoke_test(_application(args), result)
         finally:
             # Close the run's log file so the directory can be deleted (Windows

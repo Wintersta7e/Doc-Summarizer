@@ -10,6 +10,7 @@ system sans. Safe to call when the fonts are absent (returns an empty list).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtGui import QFontDatabase
@@ -30,3 +31,12 @@ def register_fonts() -> list[str]:
             families.extend(QFontDatabase.applicationFontFamilies(font_id))
     log_debug(f"Registered {len(families)} bundled font families")
     return families
+
+
+def use_bundled_font_dir() -> None:
+    """Point Qt's font folder at the bundled fonts, unless one is already set.
+
+    Offscreen Qt reads fonts from a folder, and Windows PySide6 (pip or frozen)
+    ships none, so Qt warns at startup. Native platforms use the system's fonts.
+    """
+    _ = os.environ.setdefault("QT_QPA_FONTDIR", str(_FONTS_DIR))

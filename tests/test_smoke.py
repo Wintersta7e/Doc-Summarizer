@@ -377,6 +377,46 @@ def test_the_smoke_run_gives_qt_the_command_line_without_its_own_flags(
     assert capsys.readouterr().out == _SMOKE_OK
 
 
+def _font_dir_at_startup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str | None]:
+    """Run the smoke test; return ``QT_QPA_FONTDIR`` as the app saw it at creation."""
+    seen: list[str | None] = []
+    running = app_mod._application
+
+    def application(args: list[str]) -> QGuiApplication:
+        seen.append(os.environ.get("QT_QPA_FONTDIR"))
+        return running(args)
+
+    monkeypatch.setattr(app_mod, "_application", application)
+    result = tmp_path / "result.txt"
+    assert app_mod.main(["DocSummarizer", "--smoke-test", "--smoke-result", str(result)]) == 0
+    return seen
+
+
+def test_the_smoke_run_gives_offscreen_qt_the_bundled_fonts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows PySide6 ships no ``lib/fonts``; offscreen Qt warns without a font folder.
+
+    The smoke test fails on any Qt warning, so on a Windows runner it failed
+    though the native platform starts clean.
+    """
+    monkeypatch.setenv("QT_QPA_FONTDIR", "restored-at-teardown")
+    monkeypatch.delenv("QT_QPA_FONTDIR")
+
+    (font_dir,) = _font_dir_at_startup(monkeypatch, tmp_path)
+
+    assert font_dir is not None
+    assert sorted(Path(font_dir).glob("*.ttf"))
+
+
+def test_the_smoke_run_keeps_a_font_folder_already_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QT_QPA_FONTDIR", str(tmp_path))
+
+    assert _font_dir_at_startup(monkeypatch, tmp_path) == [str(tmp_path)]
+
+
 @pytest.mark.usefixtures("qapp")
 def test_the_smoke_run_leaves_the_app_logger_only_a_null_handler(
     capsys: pytest.CaptureFixture[str],
