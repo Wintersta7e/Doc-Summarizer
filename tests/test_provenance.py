@@ -107,7 +107,7 @@ def test_locate_quote_threshold_governs_fuzzy_match() -> None:
     quote = "the ferry needs neither sails nor an engine"
     assert locate_quote(quote, _SOURCE, threshold=0.99) is None
     with pytest.raises(ValueError, match="threshold"):
-        locate_quote(quote, _SOURCE, threshold=0.1)
+        _ = locate_quote(quote, _SOURCE, threshold=0.1)
 
 
 def test_paraphrase_below_contiguous_bar_is_not_located() -> None:
@@ -188,7 +188,7 @@ def test_verified_predicate_cases() -> None:
     assert is_verified_match("pipes", _WATER) is False
     print("g threshold below default: expected=ValueError")
     with pytest.raises(ValueError, match="threshold"):
-        locate_quote(s2, _WATER, threshold=0.1)
+        _ = locate_quote(s2, _WATER, threshold=0.1)
 
 
 _CJK_SOURCE = "山谷裡的小鎮每年春天\n都會舉行一場盛大的\n燈籠節慶祝豐收"

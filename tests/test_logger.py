@@ -43,7 +43,7 @@ def test_get_logger_thread_safe() -> None:
     results: list[logging.Logger] = []
 
     def worker():
-        barrier.wait()
+        _ = barrier.wait()
         results.append(logger_module.get_logger())
 
     threads = [threading.Thread(target=worker) for _ in range(8)]

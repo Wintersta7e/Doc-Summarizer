@@ -63,29 +63,29 @@ def test_save_writes_expected_json() -> None:
 
 
 def test_corrupt_file_falls_back_to_defaults() -> None:
-    settings_path().write_text("{not valid json", encoding="utf-8")
+    _ = settings_path().write_text("{not valid json", encoding="utf-8")
     assert load_settings() == Settings()  # must not raise
 
 
 def test_non_object_json_falls_back() -> None:
-    settings_path().write_text("[1, 2, 3]", encoding="utf-8")
+    _ = settings_path().write_text("[1, 2, 3]", encoding="utf-8")
     assert load_settings() == Settings()
 
 
 def test_partial_keys_use_defaults() -> None:
-    settings_path().write_text(json.dumps({"use_gpu": True}), encoding="utf-8")
+    _ = settings_path().write_text(json.dumps({"use_gpu": True}), encoding="utf-8")
     s = load_settings()
     assert s.use_gpu is True
     assert s.n_threads is None
 
 
 def test_garbage_threads_coerced_to_none() -> None:
-    settings_path().write_text(json.dumps({"n_threads": "lots"}), encoding="utf-8")
+    _ = settings_path().write_text(json.dumps({"n_threads": "lots"}), encoding="utf-8")
     assert load_settings().n_threads is None
 
 
 def test_unknown_keys_ignored() -> None:
-    settings_path().write_text(json.dumps({"surprise": 1, "use_gpu": True}), encoding="utf-8")
+    _ = settings_path().write_text(json.dumps({"surprise": 1, "use_gpu": True}), encoding="utf-8")
     assert load_settings().use_gpu is True
 
 
@@ -96,18 +96,18 @@ def test_output_language_round_trips() -> None:
 
 def test_output_language_defaults_to_auto() -> None:
     assert load_settings().output_language == "auto"
-    settings_path().write_text(json.dumps({"use_gpu": True}), encoding="utf-8")
+    _ = settings_path().write_text(json.dumps({"use_gpu": True}), encoding="utf-8")
     assert load_settings().output_language == "auto"
 
 
 def test_unusable_output_language_falls_back_to_auto() -> None:
     """A hand-edited file must never put junk into the prompt."""
     for junk in ("", "   ", 42, None, ["English"]):
-        settings_path().write_text(json.dumps({"output_language": junk}), encoding="utf-8")
+        _ = settings_path().write_text(json.dumps({"output_language": junk}), encoding="utf-8")
         assert load_settings().output_language == "auto"
 
 
 def test_unlisted_output_language_is_kept() -> None:
     """The GUI's picker list is not a whitelist — a hand-edited name survives."""
-    settings_path().write_text(json.dumps({"output_language": "Swahili"}), encoding="utf-8")
+    _ = settings_path().write_text(json.dumps({"output_language": "Swahili"}), encoding="utf-8")
     assert load_settings().output_language == "Swahili"

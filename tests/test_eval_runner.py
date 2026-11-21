@@ -178,13 +178,13 @@ def test_gated_set_is_derived(tmp_path: Path) -> None:
 
     synthetic = tmp_path / "pkg"
     synthetic.mkdir()
-    (synthetic / "model_manager.py").write_text(
+    _ = (synthetic / "model_manager.py").write_text(
         "from . import logger\n\n\ndef load():\n    from .extra import x\n\n    return x\n",
         encoding="utf-8",
     )
-    (synthetic / "extra.py").write_text("x = 1\n", encoding="utf-8")
-    (synthetic / "logger.py").write_text("", encoding="utf-8")
-    (synthetic / "provenance.py").write_text("", encoding="utf-8")
+    _ = (synthetic / "extra.py").write_text("x = 1\n", encoding="utf-8")
+    _ = (synthetic / "logger.py").write_text("", encoding="utf-8")
+    _ = (synthetic / "provenance.py").write_text("", encoding="utf-8")
     gated = run.derive_gated(synthetic)
     print(f"synthetic gated: {gated.files}")
     assert "extra.py" in gated.files
@@ -192,10 +192,10 @@ def test_gated_set_is_derived(tmp_path: Path) -> None:
     assert gated.missing_roots == ("native.py", "hardware.py")
 
     before = run.gated_hash(synthetic, gated.files)
-    (synthetic / "extra.py").write_text("x = 2\n", encoding="utf-8")
+    _ = (synthetic / "extra.py").write_text("x = 2\n", encoding="utf-8")
     after_extra = run.gated_hash(synthetic, gated.files)
     assert after_extra != before
-    (synthetic / "logger.py").write_text("y = 1\n", encoding="utf-8")
+    _ = (synthetic / "logger.py").write_text("y = 1\n", encoding="utf-8")
     assert run.gated_hash(synthetic, run.derive_gated(synthetic).files) == after_extra
 
 
@@ -382,14 +382,14 @@ def _write_manifest(eval_dir: Path, docs: list[dict[str, Any]]) -> Path:
     corpus = eval_dir / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
     manifest = corpus / "manifest.json"
-    manifest.write_text(json.dumps({"documents": docs}), encoding="utf-8")
+    _ = manifest.write_text(json.dumps({"documents": docs}), encoding="utf-8")
     return manifest
 
 
 def _manifest_entry(eval_dir: Path, doc_id: str, text: str, **fields: Any) -> dict[str, Any]:
     corpus = eval_dir / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
-    (corpus / f"{doc_id}.txt").write_text(text, encoding="utf-8")
+    _ = (corpus / f"{doc_id}.txt").write_text(text, encoding="utf-8")
     entry = {
         "id": doc_id,
         "file": f"{doc_id}.txt",
@@ -424,32 +424,32 @@ def test_manifest_absent_unreadable_and_mismatch(tmp_path: Path) -> None:
 
     bad_json = tmp_path / "bad-json"
     (bad_json / "corpus").mkdir(parents=True)
-    (bad_json / "corpus" / "manifest.json").write_text("{not json", encoding="utf-8")
+    _ = (bad_json / "corpus" / "manifest.json").write_text("{not json", encoding="utf-8")
     assert "unreadable" in refused(bad_json)
 
     text = "Die Bäckerei im Dorf öffnet jeden Morgen um fünf Uhr."
     missing = tmp_path / "missing"
     entry = _manifest_entry(missing, "de-lit-s", text)
-    _write_manifest(missing, [entry])
+    _ = _write_manifest(missing, [entry])
     (missing / "corpus" / "de-lit-s.txt").unlink()
     assert "absent: de-lit-s" in refused(missing, verify=True)
 
     changed = tmp_path / "changed"
-    _write_manifest(changed, [_manifest_entry(changed, "de-lit-s", text, sha256="0" * 64)])
+    _ = _write_manifest(changed, [_manifest_entry(changed, "de-lit-s", text, sha256="0" * 64)])
     assert "sha256: de-lit-s" in refused(changed, verify=True)
 
     relabelled = tmp_path / "relabelled"
-    _write_manifest(relabelled, [_manifest_entry(relabelled, "de-lit-s", text, label="fr")])
+    _ = _write_manifest(relabelled, [_manifest_entry(relabelled, "de-lit-s", text, label="fr")])
     assert "label: de-lit-s" in refused(relabelled)
 
     no_script = tmp_path / "no-script"
-    _write_manifest(
+    _ = _write_manifest(
         no_script, [_manifest_entry(no_script, "zh-lit-s", "村里的面包店每天清晨开门。")]
     )
     assert "script: zh-lit-s" in refused(no_script)
 
     good = tmp_path / "good"
-    _write_manifest(good, [_manifest_entry(good, "de-lit-s", text)])
+    _ = _write_manifest(good, [_manifest_entry(good, "de-lit-s", text)])
     documents = run.load_manifest(good)
     run.verify_documents(documents.values())
     assert documents["de-lit-s"].label == "de"
@@ -758,13 +758,13 @@ def _corpus(tmp_path: Path, ids: tuple[str, ...], long: tuple[str, ...] = ()) ->
         script = shape.script or "Simplified"
         fields = {"script": script} if shape.label == "zh" else {}
         entries.append(_manifest_entry(tmp_path, doc_id, text, **fields))
-    _write_manifest(tmp_path, entries)
+    _ = _write_manifest(tmp_path, entries)
     return tmp_path
 
 
 def _gguf(tmp_path: Path) -> Path:
     model = tmp_path / "model.gguf"
-    model.write_bytes(b"GGUF stand-in")
+    _ = model.write_bytes(b"GGUF stand-in")
     return model
 
 
@@ -831,7 +831,7 @@ def test_cli_refuses_zero_and_bad_selectors(
     )
 
     with pytest.raises(SystemExit) as parse_error:
-        run.main([*base, "--tier", "full"])
+        _ = run.main([*base, "--tier", "full"])
     err = capsys.readouterr().err
     print(f"--tier full -> {parse_error.value.code}: {err.strip()}")
     assert parse_error.value.code == 2
@@ -843,7 +843,7 @@ def test_cli_refuses_zero_and_bad_selectors(
     assert "absent" in refused(absent)
 
     doc = tmp_path / "f.txt"
-    doc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
+    _ = doc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
     assert "--label" in refused([*base, "--tier", "smoke", "--doc", str(doc)])
 
     def no_tokens(text: bytes, add_bos: bool = True) -> list[int]:
@@ -862,7 +862,7 @@ def test_cli_case_and_doc_restrict_the_run(
         eval_dir = _corpus(tmp_path / name, ids)
         argv = ["--eval-dir", str(eval_dir), "--model", str(model), "--tier", tier, *extra]
         assert run.main([*argv, "--n-ctx", "2048"]) == 0
-        capsys.readouterr()
+        _ = capsys.readouterr()
         lines = _results(eval_dir)
         print(f"{extra}: {[line['case'] for line in _case_runs(lines)]}")
         return lines
@@ -884,7 +884,7 @@ def test_cli_case_and_doc_restrict_the_run(
     ]
 
     adhoc = tmp_path / "f.txt"
-    adhoc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
+    _ = adhoc.write_text(_SENTENCES["de"] * 3, encoding="utf-8")
     sha = hashlib.sha256(adhoc.read_bytes()).hexdigest()
     lines = selected("adhoc", "smoke", _SMOKE_DOCS, "--doc", str(adhoc), "--label", "de")
     runs = _case_runs(lines)
@@ -937,7 +937,7 @@ def test_repeat_scopes_to_cold_auto_runs(
     assert "cases=17 case_runs=37" in out
 
     with pytest.raises(SystemExit) as parse_error:
-        run.main([*argv, "--repeat", "0"])
+        _ = run.main([*argv, "--repeat", "0"])
     assert parse_error.value.code == 2
 
 
@@ -1016,7 +1016,7 @@ def test_rescore_reproduces_every_metric(
     """
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     source = _source(eval_dir, _gguf(tmp_path))
-    capsys.readouterr()
+    _ = capsys.readouterr()
     code, out = _rescore(eval_dir, source, capsys)
     assert code == 0
 
@@ -1072,7 +1072,7 @@ def _arms_respond(messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str
 
 
 def _arms_corpus(eval_dir: Path) -> Path:
-    _write_manifest(eval_dir, [_manifest_entry(eval_dir, "en-lit-s", _ARMS_DOC)])
+    _ = _write_manifest(eval_dir, [_manifest_entry(eval_dir, "en-lit-s", _ARMS_DOC)])
     return eval_dir
 
 
@@ -1103,7 +1103,7 @@ def test_rescore_prints_coverage_only_and_production_arms(
     assert located.quote == _ARMS_LONG
 
     source = _arms_source(eval_llm, tmp_path)
-    capsys.readouterr()
+    _ = capsys.readouterr()
 
     def arms(eval_dir: Path) -> tuple[str, dict[str, Any]]:
         code, out = _rescore(eval_dir, source, capsys)
@@ -1139,13 +1139,13 @@ def test_rescore_refuses_a_different_request_sequence(
     """
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     source = _source(eval_dir, _gguf(tmp_path), "--case", "zh-lit-m")
-    capsys.readouterr()
+    _ = capsys.readouterr()
     records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
     calls = [i for i, record in enumerate(records) if record["kind"] == "call"]
 
     def rewritten(name: str, kept: list[dict[str, Any]]) -> Path:
         path = tmp_path / name
-        path.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+        _ = path.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
         return path
 
     edited = json.loads(json.dumps(records))
@@ -1180,7 +1180,7 @@ def test_rescore_loads_no_model(
 ) -> None:
     eval_dir = _corpus(tmp_path / "eval", _SMOKE_DOCS)
     source = _source(eval_dir, _gguf(tmp_path), "--case", "zh-lit-m")
-    capsys.readouterr()
+    _ = capsys.readouterr()
 
     def no_model(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a rescore built a model")
@@ -1206,7 +1206,7 @@ def test_rescore_audits_every_citation(
     Catches grounding that attaches a span the quote is not in.
     """
     source = _arms_source(eval_llm, tmp_path)
-    capsys.readouterr()
+    _ = capsys.readouterr()
     code, out = _rescore(tmp_path / "eval", source, capsys)
     assert code == 0
     assert "audit: 2 citations, 0 failed" in out  # the production arm's two, not the three
@@ -1548,7 +1548,7 @@ def test_self_test_language_computes_three_rates(
     rows = [{"text": text, "label": label} for label, texts in _LABELLED.items() for text in texts]
     rows.append({"text": "a row without its label"})
     labelled = tmp_path / "labelled.jsonl"
-    labelled.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    _ = labelled.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     code, out = _checked(tmp_path, capsys, "--self-test", "language", str(labelled))
     assert code == 2

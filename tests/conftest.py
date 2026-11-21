@@ -27,8 +27,8 @@ except ImportError:
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no
 # display or GPU/GL is required.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("QT_QUICK_BACKEND", "software")
+_ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_ = os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 
 @pytest.fixture(autouse=True)

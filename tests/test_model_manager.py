@@ -80,7 +80,7 @@ def test_is_model_downloaded_when_missing() -> None:
 
 def test_is_model_downloaded_when_present(default_model_filename: str) -> None:
     models_dir = model_manager.get_models_directory()
-    (models_dir / default_model_filename).write_bytes(b"fake gguf payload")
+    _ = (models_dir / default_model_filename).write_bytes(b"fake gguf payload")
     assert model_manager.is_model_downloaded() is True
 
 
@@ -111,7 +111,7 @@ def test_download_model_short_circuits_when_file_exists(
     hf_hub_download and must report success.
     """
     models_dir = model_manager.get_models_directory()
-    (models_dir / default_model_filename).write_bytes(b"fake")
+    _ = (models_dir / default_model_filename).write_bytes(b"fake")
 
     def _fake_download(**_kwargs):
         raise AssertionError("hf_hub_download must not be invoked when the file exists")
@@ -133,7 +133,7 @@ def test_download_model_short_circuit_fires_progress_callback(
 ) -> None:
     """The 100% sentinel still goes out so the GUI can hide its spinner."""
     models_dir = model_manager.get_models_directory()
-    (models_dir / default_model_filename).write_bytes(b"fake")
+    _ = (models_dir / default_model_filename).write_bytes(b"fake")
     monkeypatch.setattr(
         model_manager,
         "hf_hub_download",
@@ -141,7 +141,7 @@ def test_download_model_short_circuit_fires_progress_callback(
     )
 
     calls: list[tuple[float, str]] = []
-    model_manager.download_model(progress_callback=lambda pct, msg: calls.append((pct, msg)))
+    _ = model_manager.download_model(progress_callback=lambda pct, msg: calls.append((pct, msg)))
     assert calls == [(100.0, "Model already downloaded")]
 
 
@@ -156,7 +156,7 @@ def test_progress_tqdm_fires_callback_per_megabyte() -> None:
 
     bar = tqdm_cls(total=4 * _MB, file=io.StringIO(), mininterval=0)
     for _ in range(4):
-        bar.update(_MB)
+        _ = bar.update(_MB)
     bar.close()
 
     # 4 MB total, fired once per whole-MB transition => 4 callbacks.
@@ -174,8 +174,8 @@ def test_progress_tqdm_swallows_callback_errors() -> None:
 
     tqdm_cls = model_manager._build_progress_tqdm(bad_cb)
     bar = tqdm_cls(total=2 * _MB, file=io.StringIO(), mininterval=0)
-    bar.update(_MB)
-    bar.update(_MB)
+    _ = bar.update(_MB)
+    _ = bar.update(_MB)
     bar.close()
 
 
@@ -354,7 +354,7 @@ def test_summarize_single_pass_uses_chat_completion() -> None:
 def test_summarize_unknown_type_falls_back_to_detailed() -> None:
     fake = _FakeLLM()
     s = _shell(fake)
-    s.summarize("doc", "nonsense-type")
+    _ = s.summarize("doc", "nonsense-type")
     user = fake.calls[0]["messages"][1]["content"]
     assert "Provide a detailed summary" in user
 
@@ -362,7 +362,7 @@ def test_summarize_unknown_type_falls_back_to_detailed() -> None:
 def test_summarize_structured_uses_structured_instruction() -> None:
     fake = _FakeLLM()
     s = _shell(fake)
-    s.summarize("doc", SUMMARY_TYPE_STRUCTURED)
+    _ = s.summarize("doc", SUMMARY_TYPE_STRUCTURED)
     user = fake.calls[0]["messages"][1]["content"]
     assert "**Key Points:**" in user
 
@@ -398,7 +398,7 @@ def test_summarize_budgets_cjk_text_in_tokens() -> None:
     fake = _ContextLLM(n_ctx=4096)
     s = _shell(fake, n_ctx=4096)
 
-    s.summarize(_cjk_document(), SUMMARY_TYPE_DETAILED)
+    _ = s.summarize(_cjk_document(), SUMMARY_TYPE_DETAILED)
 
     assert max(fake.prompt_tokens) + 1024 <= 4096  # 1024 = summarize's default max_tokens
     map_calls = [c for c in fake.calls if "Document:" in c["messages"][1]["content"]]
@@ -440,7 +440,7 @@ def test_summarize_raises_after_close() -> None:
     s = _shell(_FakeLLM())
     s.llm = None
     with pytest.raises(RuntimeError):
-        s.summarize("anything")
+        _ = s.summarize("anything")
 
 
 def test_summarize_handles_empty_content() -> None:
@@ -481,7 +481,7 @@ def test_auto_language_directive_reaches_both_turns() -> None:
     fake = _FakeLLM(content="S")
     s = _shell(fake)
 
-    s.summarize("a short document", SUMMARY_TYPE_BRIEF)
+    _ = s.summarize("a short document", SUMMARY_TYPE_BRIEF)
 
     system, user = fake.calls[0]["messages"]
     assert "same language as the document" in system["content"]
@@ -494,7 +494,7 @@ def test_explicit_language_pins_the_summary() -> None:
     fake = _FakeLLM(content="S")
     s = _shell(fake)
 
-    s.summarize("a short document", SUMMARY_TYPE_BRIEF, language="Chinese")
+    _ = s.summarize("a short document", SUMMARY_TYPE_BRIEF, language="Chinese")
 
     system, user = fake.calls[0]["messages"]
     assert "Write the summary in Chinese" in system["content"]
@@ -508,7 +508,7 @@ def test_language_survives_map_reduce() -> None:
     s = _shell(fake, n_ctx=2048)
 
     para = ("word " * 80).strip()
-    s.summarize("\n\n".join([para] * 30), SUMMARY_TYPE_DETAILED, language="Japanese")
+    _ = s.summarize("\n\n".join([para] * 30), SUMMARY_TYPE_DETAILED, language="Japanese")
 
     assert len(fake.calls) >= 3
     assert all("Write the summary in Japanese" in c["messages"][1]["content"] for c in fake.calls)
@@ -518,7 +518,7 @@ def test_structured_json_prompt_carries_language() -> None:
     fake = _FakeLLM(content='{"lead": "L", "points": []}')
     s = _shell(fake)
 
-    s.summarize_structured("a short document", SUMMARY_TYPE_DETAILED, language="German")
+    _ = s.summarize_structured("a short document", SUMMARY_TYPE_DETAILED, language="German")
 
     system, user = fake.calls[0]["messages"]
     assert "Write the summary in German" in system["content"]
@@ -532,7 +532,7 @@ def test_unknown_language_is_passed_through_verbatim() -> None:
     fake = _FakeLLM(content="S")
     s = _shell(fake)
 
-    s.summarize("doc", SUMMARY_TYPE_BRIEF, language="Swahili")
+    _ = s.summarize("doc", SUMMARY_TYPE_BRIEF, language="Swahili")
 
     assert "Write the summary in Swahili" in fake.calls[0]["messages"][1]["content"]
 
@@ -631,7 +631,7 @@ def test_run_stats_counts_from_perf_counters(monkeypatch: pytest.MonkeyPatch) ->
     fake = _PerfLLM("A short paragraph.")
     _fake_llama_cpp(monkeypatch, fake)
     s = _shell(fake)
-    s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
+    _ = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
     r = s.summarize_structured("A short note about the bakery.", SUMMARY_TYPE_BRIEF)
     print(f"calls counted: e {r.run_stats.calls}")
     assert r.run_stats.calls == 1
@@ -728,9 +728,9 @@ def test_run_stats_log_line_once_per_request(
 
     def request() -> None:
         if entry == "prose":
-            s.summarize(text, summary_type)
+            _ = s.summarize(text, summary_type)
         else:
-            s.summarize_structured(text, summary_type)
+            _ = s.summarize_structured(text, summary_type)
 
     request()  # warm the fake so a single-part repeat is a prefix hit
     caplog.clear()
@@ -796,7 +796,7 @@ def test_run_stats_partial_on_cancel_and_fallback(
         fake = _CancellingLLM(_DETAILED_JSON, after_first_chunk)
         _fake_llama_cpp(monkeypatch, fake)
         with pytest.raises(model_manager.SummarizationCancelledError):
-            _shell(fake, n_ctx=2048).summarize_structured(
+            _ = _shell(fake, n_ctx=2048).summarize_structured(
                 _bakery_document(), SUMMARY_TYPE_DETAILED, should_cancel=lambda f=fake: f.flag
             )
         records = _run_stats_records(caplog)

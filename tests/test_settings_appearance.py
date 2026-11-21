@@ -34,14 +34,14 @@ def test_save_writes_appearance_into_json() -> None:
 
 def test_invalid_appearance_falls_back_to_system() -> None:
     path = settings_path()
-    path.write_text(json.dumps({"appearance": "Chartreuse"}), encoding="utf-8")
+    _ = path.write_text(json.dumps({"appearance": "Chartreuse"}), encoding="utf-8")
     assert load_settings().appearance == "System"
 
 
 def test_missing_appearance_key_defaults_to_system() -> None:
     # Backward compatibility: an old settings.json predates the field.
     path = settings_path()
-    path.write_text(json.dumps({"n_threads": 4, "use_gpu": False}), encoding="utf-8")
+    _ = path.write_text(json.dumps({"n_threads": 4, "use_gpu": False}), encoding="utf-8")
     loaded = load_settings()
     assert loaded.appearance == "System"
     assert loaded.n_threads == 4

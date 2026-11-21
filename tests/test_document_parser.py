@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 def test_extract_unsupported_extension(tmp_path: Path) -> None:
     target = tmp_path / "thing.xyz"
-    target.write_text("doesn't matter")
+    _ = target.write_text("doesn't matter")
     text, error = extract_text(str(target))
     assert text == ""
     assert error is not None
@@ -36,7 +36,7 @@ def test_extract_missing_file(tmp_path: Path) -> None:
 
 def test_extract_txt_utf8(tmp_path: Path) -> None:
     target = tmp_path / "hello.txt"
-    target.write_text("hello world\n", encoding="utf-8")
+    _ = target.write_text("hello world\n", encoding="utf-8")
     text, error = extract_text(str(target))
     assert error is None
     assert "hello world" in text
@@ -44,7 +44,7 @@ def test_extract_txt_utf8(tmp_path: Path) -> None:
 
 def test_extract_txt_latin1_encoding_detection(tmp_path: Path) -> None:
     target = tmp_path / "latin.txt"
-    target.write_bytes("caf\xe9 m\xfcnchen\n".encode("latin-1"))
+    _ = target.write_bytes("caf\xe9 m\xfcnchen\n".encode("latin-1"))
     text, error = extract_text(str(target))
     assert error is None
     # We don't promise exact decoding — only that we got *something*
@@ -54,7 +54,7 @@ def test_extract_txt_latin1_encoding_detection(tmp_path: Path) -> None:
 
 def test_extract_md_routes_to_txt(tmp_path: Path) -> None:
     target = tmp_path / "notes.md"
-    target.write_text("# heading\n\nbody\n", encoding="utf-8")
+    _ = target.write_text("# heading\n\nbody\n", encoding="utf-8")
     text, error = extract_text(str(target))
     assert error is None
     assert "heading" in text
@@ -77,7 +77,7 @@ def test_extract_docx_basic(tmp_path: Path) -> None:
 def test_extract_rtf_basic(tmp_path: Path) -> None:
     pytest.importorskip("striprtf")
     target = tmp_path / "doc.rtf"
-    target.write_text(r"{\rtf1\ansi hello rtf body}", encoding="utf-8")
+    _ = target.write_text(r"{\rtf1\ansi hello rtf body}", encoding="utf-8")
     text, error = extract_text(str(target))
     assert error is None
     assert "hello rtf body" in text
@@ -86,7 +86,7 @@ def test_extract_rtf_basic(tmp_path: Path) -> None:
 def test_legacy_doc_not_supported(tmp_path: Path) -> None:
     """`.doc` (binary OLE) was dropped: python-docx can't read it."""
     target = tmp_path / "old.doc"
-    target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")  # OLE magic
+    _ = target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")  # OLE magic
     text, error = extract_text(str(target))
     assert text == ""
     assert error is not None
@@ -103,7 +103,7 @@ def test_supported_extension_set_canonical() -> None:
 
 def test_get_document_info_existing(tmp_path: Path) -> None:
     target = tmp_path / "f.txt"
-    target.write_bytes(b"x" * 2048)
+    _ = target.write_bytes(b"x" * 2048)
 
     info = get_document_info(str(target))
     assert info["name"] == "f.txt"
@@ -120,22 +120,22 @@ def test_get_document_info_missing(tmp_path: Path) -> None:
 
 def test_find_documents_on_single_supported_file(tmp_path: Path) -> None:
     target = tmp_path / "report.pdf"
-    target.write_bytes(b"%PDF-")
+    _ = target.write_bytes(b"%PDF-")
     assert find_documents(target) == [target]
 
 
 def test_find_documents_on_single_unsupported_file(tmp_path: Path) -> None:
     target = tmp_path / "thing.xyz"
-    target.write_text("nope")
+    _ = target.write_text("nope")
     assert find_documents(target) == []
 
 
 def test_find_documents_in_directory_filters_to_supported(tmp_path: Path) -> None:
-    (tmp_path / "a.pdf").write_bytes(b"")
-    (tmp_path / "b.docx").write_bytes(b"")
-    (tmp_path / "c.exe").write_bytes(b"")
+    _ = (tmp_path / "a.pdf").write_bytes(b"")
+    _ = (tmp_path / "b.docx").write_bytes(b"")
+    _ = (tmp_path / "c.exe").write_bytes(b"")
     (tmp_path / "subdir").mkdir()
-    (tmp_path / "subdir" / "ignored.pdf").write_bytes(b"")  # non-recursive
+    _ = (tmp_path / "subdir" / "ignored.pdf").write_bytes(b"")  # non-recursive
 
     found = {p.name for p in find_documents(tmp_path)}
     assert found == {"a.pdf", "b.docx"}

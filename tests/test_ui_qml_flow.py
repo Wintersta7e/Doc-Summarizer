@@ -95,7 +95,7 @@ def console(
 def _spin(ms: int) -> None:
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    _ = loop.exec()
 
 
 def _items(window: QQuickWindow) -> Iterator[QQuickItem]:
@@ -120,14 +120,14 @@ def _render_everything(
     calling ``after_each`` once each view has laid out and painted."""
 
     def settle() -> None:
-        window.grabWindow()
+        _ = window.grabWindow()
         _spin(500)  # loader threads issue image requests after layout
         after_each()
 
     bridge._current_file = _payload(port, "FILEMARK")
     bridge._extracted_text = f"{_payload(port, 'DOCMARK')}\nsecond line"
     bridge.docChanged.emit()
-    window.setProperty("activeScreen", "summary")
+    _ = window.setProperty("activeScreen", "summary")
     for summary in (
         StructuredSummary(
             "detailed",
@@ -143,13 +143,13 @@ def _render_everything(
     ):
         bridge.summaryReady.emit(summary_to_variant(summary))
         settle()
-    window.setProperty("activeScreen", "extract")
+    _ = window.setProperty("activeScreen", "extract")
     settle()
     bridge._batch_rows = [{"name": _payload(port, "ROWMARK"), "status": "QUEUED", "tokens": 0}]
     bridge.batchRowsChanged.emit()
     batch = next(i for i in _items(window) if "BatchScreen" in i.metaObject().className())
-    batch.setProperty("outDir", _payload(port, "OUTDIRMARK"))
-    window.setProperty("activeScreen", "batch")
+    _ = batch.setProperty("outDir", _payload(port, "OUTDIRMARK"))
+    _ = window.setProperty("activeScreen", "batch")
     bridge.toast.emit(_payload(port, "TOASTMARK"))
     settle()
 
@@ -198,7 +198,7 @@ def test_local_only_manager_refuses_remote_schemes(
 
     port, hits = loopback
     local = tmp_path / "local.txt"
-    local.write_text("local bytes", encoding="utf-8")
+    _ = local.write_text("local bytes", encoding="utf-8")
     factory = LocalOnlyNetworkAccessManagerFactory()
     parent = QObject()
     manager = factory.create(parent)
@@ -207,9 +207,9 @@ def test_local_only_manager_refuses_remote_schemes(
         reply = manager.get(QNetworkRequest(url))
         if not reply.isFinished():
             loop = QEventLoop()
-            reply.finished.connect(loop.quit)
+            _ = reply.finished.connect(loop.quit)
             QTimer.singleShot(5000, loop.quit)
-            loop.exec()
+            _ = loop.exec()
         return reply
 
     remote = [fetch(QUrl(f"{scheme}://127.0.0.1:{port}/x.png")) for scheme in ("http", "https")]
@@ -315,7 +315,7 @@ def test_summary_text_loads_no_local_file_image(
     bridge._current_file = "local.txt"
     bridge._extracted_text = "document text"
     bridge.docChanged.emit()
-    window.setProperty("activeScreen", "summary")
+    _ = window.setProperty("activeScreen", "summary")
     previous = qInstallMessageHandler(handler)
     try:
         for summary in (
@@ -335,7 +335,7 @@ def test_summary_text_loads_no_local_file_image(
             ),
         ):
             bridge.summaryReady.emit(summary_to_variant(summary))
-            window.grabWindow()
+            _ = window.grabWindow()
             _spin(500)
             for item in _items(window):
                 if not item.metaObject().className().startswith("QQuickText"):
@@ -347,7 +347,7 @@ def test_summary_text_loads_no_local_file_image(
                         document.setMarkdown(text)
                         shown[tag].append(document.toPlainText())
     finally:
-        qInstallMessageHandler(previous)
+        _ = qInstallMessageHandler(previous)
     opened = sorted({m for m in messages if "example.invalid" in m})
     print(f"opened={opened} shown={shown}")
     assert opened == []

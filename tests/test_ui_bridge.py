@@ -253,7 +253,7 @@ def test_async_load_document_completes_off_thread(qapp, monkeypatch, tmp_path) -
     doc.write_text("Hello world. Real off-thread extraction here.", encoding="utf-8")
 
     loop = QEventLoop()
-    bridge.docChanged.connect(lambda: bridge._extracted_text and loop.quit())
+    _ = bridge.docChanged.connect(lambda: bridge._extracted_text and loop.quit())
     timed_out = {"v": False}
 
     def on_timeout() -> None:
@@ -262,7 +262,7 @@ def test_async_load_document_completes_off_thread(qapp, monkeypatch, tmp_path) -
 
     QTimer.singleShot(8000, on_timeout)
     bridge.loadDocument(doc.as_uri())
-    loop.exec()
+    _ = loop.exec()
 
     assert not timed_out["v"], "async loadDocument hung (worker GC'd before completion)"
     assert bridge._get_has_doc() is True

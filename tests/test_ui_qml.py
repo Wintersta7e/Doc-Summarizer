@@ -54,7 +54,7 @@ def engine(qapp: QGuiApplication) -> QQmlApplicationEngine:
     bridge = ConsoleBridge()
     eng.rootContext().setContextProperty("bridge", bridge)
     # Keep the bridge alive for the engine's lifetime.
-    eng.setProperty("_bridge", bridge)
+    _ = eng.setProperty("_bridge", bridge)
     return eng
 
 

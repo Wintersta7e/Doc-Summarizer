@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 def test_txt_stats_from_real_file(tmp_path: Path) -> None:
     f = tmp_path / "note.txt"
-    f.write_text("Hello world. Foo bar baz.", encoding="utf-8")
+    _ = f.write_text("Hello world. Foo bar baz.", encoding="utf-8")
 
     stats = analyze_document(str(f))
 
@@ -34,7 +34,7 @@ def test_txt_stats_from_real_file(tmp_path: Path) -> None:
 
 def test_md_uses_text_parser_label(tmp_path: Path) -> None:
     f = tmp_path / "readme.md"
-    f.write_text("# Title\n\nSome body text here.", encoding="utf-8")
+    _ = f.write_text("# Title\n\nSome body text here.", encoding="utf-8")
     stats = analyze_document(str(f))
     assert stats["parser"] == "chardet"
     assert stats["pages"] is None
@@ -66,7 +66,7 @@ def test_pdf_reports_pages(monkeypatch) -> None:
 
 def test_analyze_extracts_when_text_not_supplied(tmp_path: Path) -> None:
     f = tmp_path / "doc.txt"
-    f.write_text("alpha beta gamma delta", encoding="utf-8")
+    _ = f.write_text("alpha beta gamma delta", encoding="utf-8")
     stats = analyze_document(str(f))  # no text= → extracts internally
     assert stats["words"] == 4
 

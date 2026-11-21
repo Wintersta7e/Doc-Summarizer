@@ -109,7 +109,7 @@ def test_detailed_returns_three_grounded_points() -> None:
 def test_detailed_requests_json_at_low_temperature() -> None:
     fake = _JsonLLM(_detailed_payload())
     s = _shell(fake)
-    s.summarize_structured(_SOURCE, SUMMARY_TYPE_DETAILED)
+    _ = s.summarize_structured(_SOURCE, SUMMARY_TYPE_DETAILED)
     kwargs = fake.calls[0]["kwargs"]
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["temperature"] <= 0.15
@@ -206,7 +206,7 @@ def test_summarize_structured_raises_after_close() -> None:
     s = _shell(_JsonLLM("{}"))
     s.llm = None
     with pytest.raises(RuntimeError):
-        s.summarize_structured(_SOURCE)
+        _ = s.summarize_structured(_SOURCE)
 
 
 # --------------------------------------------------------------------------- #
