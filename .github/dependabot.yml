@@ -1,13 +1,25 @@
 version: 2
 updates:
+  # One grouped pull request per ecosystem per week, taking only releases at
+  # least a week old: a hijacked or broken release is usually pulled by then.
   - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]
     open-pull-requests-limit: 10
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
     open-pull-requests-limit: 5
