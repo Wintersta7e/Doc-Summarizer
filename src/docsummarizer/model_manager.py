@@ -3,6 +3,7 @@
 
 import ctypes
 import functools
+import importlib
 import json
 import os
 import time
@@ -10,7 +11,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, cast, final, overload
+from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict, cast, final, overload
 
 from huggingface_hub import hf_hub_download
 from typing_extensions import override
@@ -26,11 +27,6 @@ from docsummarizer.paths import app_data_dir
 from docsummarizer.provenance import SourceSpan, locate_quote, split_sentences
 
 if TYPE_CHECKING:
-    from llama_cpp import (
-        CompletionUsage,
-        CreateChatCompletionResponse,
-        CreateChatCompletionStreamResponse,
-    )
     from tqdm import tqdm
 
 # Supported summary types. Kept as module-level string constants (rather than
@@ -51,13 +47,60 @@ def gpu_offload_supported() -> bool:
     fixed for a given build, and importing llama-cpp is expensive.
     """
     try:
-        from llama_cpp import llama_supports_gpu_offload
-
-        return bool(llama_supports_gpu_offload())
+        return bool(_load_llama_cpp().llama_supports_gpu_offload())
     except Exception:  # no runtime extra, or a library that fails to load
         logger = get_logger()
         logger.debug("GPU offload probe failed", exc_info=True)
         return False
+
+
+class ChatCompletionResponseMessage(TypedDict):
+    """The answer of a blocking completion."""
+
+    role: str
+    content: str | None
+
+
+class ChatCompletionResponseChoice(TypedDict):
+    """One choice of a blocking completion."""
+
+    message: ChatCompletionResponseMessage
+    finish_reason: str | None
+
+
+class CompletionUsage(TypedDict):
+    """The token counts llama-cpp reports for a blocking completion."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class CreateChatCompletionResponse(TypedDict):
+    """The fields of llama-cpp's blocking completion response that callers read."""
+
+    choices: list[ChatCompletionResponseChoice]
+    usage: NotRequired[CompletionUsage | None]
+
+
+class ChatCompletionStreamResponseDelta(TypedDict, total=False):
+    """The text a streamed chunk adds."""
+
+    role: str
+    content: str | None
+
+
+class ChatCompletionStreamResponseChoice(TypedDict):
+    """One choice of a streamed chunk."""
+
+    delta: ChatCompletionStreamResponseDelta
+    finish_reason: str | None
+
+
+class CreateChatCompletionStreamResponse(TypedDict):
+    """The fields of llama-cpp's streamed completion chunk that callers read."""
+
+    choices: list[ChatCompletionStreamResponseChoice]
 
 
 class ChatModel(Protocol):
@@ -84,6 +127,36 @@ class ChatModel(Protocol):
     def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
         """The token ids of ``text``."""
         ...
+
+
+class _LlamaFactory(Protocol):
+    """``llama_cpp.Llama``'s constructor: the model path, then its integer and flag options."""
+
+    def __call__(self, *, model_path: str, **options: int) -> ChatModel: ...
+
+
+class _LlamaCpp(Protocol):
+    """The members of the ``llama_cpp`` package this module uses."""
+
+    Llama: _LlamaFactory
+    # The low-level ctypes binding. Its functions vary by build, so ``_binding``
+    # probes each one by name.
+    llama_cpp: object
+
+    def llama_supports_gpu_offload(self) -> bool:
+        """Whether this build can offload layers to a GPU."""
+        ...
+
+
+def _load_llama_cpp() -> _LlamaCpp:
+    """The optional ``llama_cpp`` runtime extra; ``ImportError`` when it is not installed.
+
+    Loaded by name so that the type checker reads the protocol above, not the
+    package, which the gate environment does not install.
+    """
+    # Through ``object``: a module and a protocol share no declared members.
+    module = cast("object", importlib.import_module("llama_cpp"))
+    return cast("_LlamaCpp", module)
 
 
 class _PerfCounters(Protocol):
@@ -862,7 +935,7 @@ class Summarizer:
                 keeps inference fully on the CPU for portability; `-1` offloads
                 all layers. Ignored by CPU-only llama-cpp builds.
         """
-        from llama_cpp import Llama
+        llama = _load_llama_cpp().Llama
 
         self.n_ctx = n_ctx
         cpu_count = os.cpu_count() or 8
@@ -881,7 +954,7 @@ class Summarizer:
 
         start_time = time.time()
 
-        self.llm: ChatModel | None = Llama(
+        self.llm: ChatModel | None = llama(
             model_path=str(model_path),
             n_ctx=n_ctx,
             n_threads=self.n_threads,
@@ -934,7 +1007,7 @@ class Summarizer:
         existing streaming cancellation path remains in force.
         """
         try:
-            from llama_cpp import llama_cpp
+            llama_cpp = _load_llama_cpp().llama_cpp
         except Exception as exc:  # the optional binding varies by build
             logger = get_logger()
             logger.debug("llama abort callback unavailable: %s", exc, exc_info=True)
@@ -974,8 +1047,7 @@ class Summarizer:
         if getattr(self, "_llama_abort_callback", None) is None:
             return
         try:
-            from llama_cpp import llama_cpp
-
+            llama_cpp = _load_llama_cpp().llama_cpp
             set_abort_callback = _binding(llama_cpp, "llama_set_abort_callback")
             callback_type = _binding(llama_cpp, "ggml_abort_callback")
             ctx = self._llama_context()
@@ -1069,8 +1141,7 @@ class Summarizer:
         if ctx is None:
             return None
         try:
-            from llama_cpp import llama_cpp
-
+            llama_cpp = _load_llama_cpp().llama_cpp
             perf_context = _binding(llama_cpp, "llama_perf_context")
             if not callable(perf_context):
                 return None

@@ -30,16 +30,36 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import IO, TYPE_CHECKING, Any, Literal
+from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
-    from llama_cpp import Llama
-
-    from docsummarizer.model_manager import RunStats, StructuredSummary, Summarizer
+    from docsummarizer.model_manager import (
+        ChatCompletionResponseChoice,
+        ChatCompletionResponseMessage,
+        ChatModel,
+        CompletionUsage,
+        CreateChatCompletionResponse,
+        CreateChatCompletionStreamResponse,
+        RunStats,
+        StructuredSummary,
+        Summarizer,
+    )
     from eval.cases import Case
     from eval.metrics import CaseScore, Target
+
+    class SeededModel(ChatModel, Protocol):
+        """A loaded ``llama_cpp.Llama``: the chat calls plus its context reset and sampler seed."""
+
+        def reset(self) -> None:
+            """Clear the context state."""
+            ...
+
+        def set_seed(self, seed: int) -> None:
+            """Seed the sampler."""
+            ...
+
 
 _REPO = Path(__file__).resolve().parents[2]
 _PACKAGE = "docsummarizer"
@@ -475,7 +495,7 @@ class CallRecord:
     stream: bool
     content: str
     finish_reason: str | None
-    usage: dict[str, Any] | None
+    usage: CompletionUsage | None
     perf: dict[str, float] | None  # the call's counter deltas; None without counters
     error: str | None
 
@@ -496,10 +516,10 @@ class CapturingLlama:
     same context pointer and counters.
     """
 
-    def __init__(self, real: Llama, snapshot: Callable[[], object]) -> None:
+    def __init__(self, real: SeededModel, snapshot: Callable[[], object]) -> None:
         """Wrap ``real``; ``snapshot`` reads its perf counters, or ``None`` without them."""
-        self._real = real
-        self._snapshot = snapshot
+        self._real: SeededModel = real
+        self._snapshot: Callable[[], object] = snapshot
         self.calls: list[CallRecord] = []
         self.tokenized: dict[str, int] = {}
 
@@ -513,9 +533,27 @@ class CapturingLlama:
             return None
         return {name: getattr(after, name) - getattr(before, name) for name in _PERF_FIELDS}
 
+    @overload
     def create_chat_completion(
-        self, *, messages: Sequence[Mapping[str, Any]], stream: bool = False, **kwargs: object
-    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[False] = False,
+        **kwargs: object,
+    ) -> CreateChatCompletionResponse: ...
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[True],
+        **kwargs: object,
+    ) -> Iterator[CreateChatCompletionStreamResponse]: ...
+
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         """Forward the completion to the model and record the request and its answer."""
         before = self._snapshot()
         record = CallRecord(
@@ -534,9 +572,7 @@ class CapturingLlama:
             chunks = self._real.create_chat_completion(messages=messages, stream=True, **kwargs)
             return self._stream(record, before, chunks)
         try:
-            response: dict[str, Any] = self._real.create_chat_completion(
-                messages=messages, **kwargs
-            )
+            response = self._real.create_chat_completion(messages=messages, stream=False, **kwargs)
             choice = response["choices"][0]
             record.content = str(choice["message"].get("content") or "")
             record.finish_reason = choice.get("finish_reason")
@@ -549,8 +585,11 @@ class CapturingLlama:
         return response
 
     def _stream(
-        self, record: CallRecord, before: object, chunks: Iterable[dict[str, Any]]
-    ) -> Iterator[dict[str, Any]]:
+        self,
+        record: CallRecord,
+        before: object,
+        chunks: Iterable[CreateChatCompletionStreamResponse],
+    ) -> Iterator[CreateChatCompletionStreamResponse]:
         try:
             for chunk in chunks:
                 choice = chunk["choices"][0]
@@ -579,6 +618,20 @@ class CapturingLlama:
     def set_seed(self, seed: int) -> None:
         """Seed the model's sampler."""
         self._real.set_seed(seed)
+
+
+def capture_calls(summarizer: Summarizer) -> CapturingLlama:
+    """Wrap the summarizer's model in a ``CapturingLlama``, once."""
+    llm = summarizer.llm
+    if isinstance(llm, CapturingLlama):
+        return llm
+    if llm is None:
+        msg = "the summarizer is closed"
+        raise RuntimeError(msg)
+    # build_summarizer loads a llama_cpp.Llama, which has reset and set_seed.
+    capture = CapturingLlama(cast("SeededModel", llm), summarizer.perf_snapshot)
+    summarizer.llm = capture
+    return capture
 
 
 def build_summarizer(
@@ -804,10 +857,7 @@ def run_cases(
     ``m12a`` is compared with repetition 0 of the same case without the flag.
     ``on_run`` sees each case run as soon as it is scored.
     """
-    capture = summarizer.llm
-    if not isinstance(capture, CapturingLlama):
-        capture = CapturingLlama(summarizer.llm, summarizer.perf_snapshot)
-        summarizer.llm = capture
+    capture = capture_calls(summarizer)
     done: list[CaseRun] = []
     for spec in runs:
         case, text = spec.case, texts[spec.case.doc]
@@ -1311,9 +1361,9 @@ class ReplayLlama:
 
     def __init__(self, calls: Sequence[Mapping[str, Any]], tokenized: Mapping[str, int]) -> None:
         """Replay ``calls`` in order; ``tokenized`` maps a text hash to its token count."""
-        self._calls = list(calls)
-        self._tokenized = dict(tokenized)
-        self.consumed = 0
+        self._calls: list[Mapping[str, Any]] = list(calls)
+        self._tokenized: dict[str, int] = dict(tokenized)
+        self.consumed: int = 0
         self.mismatch: ReplayMismatchError | None = None
 
     def _refuse(self, field: str) -> ReplayMismatchError:
@@ -1321,11 +1371,34 @@ class ReplayLlama:
             self.mismatch = ReplayMismatchError(self.consumed, field)
         return self.mismatch
 
+    @overload
     def create_chat_completion(
-        self, *, messages: Sequence[Mapping[str, Any]], **kwargs: object
-    ) -> dict[str, Any]:
-        """Return the stored answer when the request matches the stored one, else refuse."""
-        kwargs.pop("stream", None)
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[False] = False,
+        **kwargs: object,
+    ) -> CreateChatCompletionResponse: ...
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[True],
+        **kwargs: object,
+    ) -> Iterator[CreateChatCompletionStreamResponse]: ...
+
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Return the stored answer when the request matches the stored one, else refuse.
+
+        A replay runs without a cancel check, so the pipeline never streams to it.
+        """
+        if stream:
+            msg = "stream"
+            raise self._refuse(msg)
         if self.mismatch is not None:
             raise self.mismatch
         if self.consumed >= len(self._calls):
@@ -1342,8 +1415,14 @@ class ReplayLlama:
         self.consumed += 1
         if stored["error"]:
             raise RuntimeError(stored["error"])  # the stored call failed: fail the same way
-        message = {"role": "assistant", "content": stored["content"]}
-        choice = {"message": message, "finish_reason": stored["finish_reason"]}
+        message: ChatCompletionResponseMessage = {
+            "role": "assistant",
+            "content": stored["content"],
+        }
+        choice: ChatCompletionResponseChoice = {
+            "message": message,
+            "finish_reason": stored["finish_reason"],
+        }
         return {"choices": [choice], "usage": stored["usage"]}
 
     def tokenize(self, text: bytes, *, add_bos: bool = True) -> list[int]:
@@ -1863,8 +1942,7 @@ def check_runstats(args: argparse.Namespace) -> int:
         n_gpu_layers=args.n_gpu_layers,
     )
     try:
-        capture = CapturingLlama(summarizer.llm, summarizer.perf_snapshot)
-        summarizer.llm = capture
+        capture = capture_calls(summarizer)
         if summarizer.perf_snapshot() is None:
             print("Counters unavailable: llama_perf_context missing")
             return 2
