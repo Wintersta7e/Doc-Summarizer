@@ -11,8 +11,6 @@ from pathlib import Path
 from types import TracebackType
 from typing import Literal, cast, final
 
-import psutil
-
 from docsummarizer.paths import app_data_dir
 
 
@@ -88,6 +86,8 @@ def get_system_info() -> dict[str, object]:
         "cpu_count": os.cpu_count(),
     }
 
+    import psutil
+
     mem = psutil.virtual_memory()
     info["total_memory_gb"] = round(mem.total / (1024**3), 2)
     info["available_memory_gb"] = round(mem.available / (1024**3), 2)
@@ -129,6 +129,8 @@ def log_startup() -> None:
 
 def get_memory_usage_mb() -> float:
     """Get current process memory usage in MB."""
+    import psutil
+
     process = psutil.Process(os.getpid())
     return float(round(process.memory_info().rss / (1024**2), 2))
 

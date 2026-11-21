@@ -13,10 +13,14 @@ import argparse
 import ast
 import csv
 import hashlib
+import importlib.metadata
+import importlib.util
+import inspect
 import io
 import json
 import os
 import platform
+import random
 import shutil
 import subprocess
 import sys
@@ -1088,9 +1092,6 @@ def _file_sha256(path: Path) -> str:
 
 def _llama_cpp_install() -> tuple[str | None, str | None]:
     """The installed llama-cpp-python version and its library dir, without importing it."""
-    import importlib.metadata
-    import importlib.util
-
     try:
         version: str | None = importlib.metadata.version("llama-cpp-python")
     except importlib.metadata.PackageNotFoundError:
@@ -1113,8 +1114,6 @@ def _peak_rss_bytes() -> int | None:
 
 
 def _default_n_ctx() -> int:
-    import inspect
-
     from docsummarizer.model_manager import Summarizer
 
     return int(inspect.signature(Summarizer.__init__).parameters["n_ctx"].default)
@@ -1865,8 +1864,6 @@ def _rate_line(name: str, num: int, den: int, bar: float) -> bool:
 
 def self_test_language(path: Path) -> int:
     """The M2 classifier's three error rates over a labelled set of sentences."""
-    import random
-
     from eval import metrics
 
     by_label: dict[str, list[str]] = {}
@@ -1902,7 +1899,7 @@ def self_test_language(path: Path) -> int:
         (t, label) for label, texts in by_label.items() for t in texts if metrics.is_scored(t)
     ]
     wrong = sum(1 for text, label in scored if metrics.classify_unit(text) != label)
-    rng = random.Random(0)  # noqa: S311 - a reproducible sample, not a secret
+    rng = random.Random(0)  # a reproducible sample, not a secret
     labels = sorted(by_label)
     false_fail = missed = 0
     for _ in range(_SELF_TEST_OUTPUTS):

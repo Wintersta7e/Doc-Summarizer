@@ -23,13 +23,14 @@ os.environ.setdefault("QT_QUICK_BACKEND", "software")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from PySide6.QtCore import QEventLoop, QTimer, QUrl  # noqa: E402
-from PySide6.QtGui import QGuiApplication  # noqa: E402
-from PySide6.QtQuick import QQuickView  # noqa: E402
+from PySide6.QtCore import QEventLoop, QTimer, QUrl
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQuick import QQuickView
 
-from docsummarizer.model_manager import StructuredSummary, SummaryPoint  # noqa: E402
-from docsummarizer.provenance import SourceSpan  # noqa: E402
-from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant  # noqa: E402
+from docsummarizer.model_manager import StructuredSummary, SummaryPoint
+from docsummarizer.provenance import SourceSpan
+from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
+from docsummarizer.ui.fonts import register_fonts
 
 _QML_DIR = REPO / "src" / "docsummarizer" / "ui" / "qml"
 _PREVIEW = REPO / "scripts" / "_preview.qml"
@@ -85,8 +86,7 @@ def main() -> int:
     theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
     out = sys.argv[3] if len(sys.argv) > 3 else str(REPO / f"render-{screen}-{theme}.png")
 
-    app = QGuiApplication(sys.argv)  # noqa: F841 - kept alive for the view
-    from docsummarizer.ui.fonts import register_fonts
+    _app = QGuiApplication(sys.argv)  # kept alive for the view
 
     register_fonts()
     bridge = ConsoleBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=True)

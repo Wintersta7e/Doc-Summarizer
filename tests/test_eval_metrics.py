@@ -98,7 +98,7 @@ def test_classify_unit_script_rules() -> None:
 
 
 def test_classify_unit_is_restricted_to_output_languages() -> None:
-    rng = random.Random(0)  # noqa: S311 - seeded test data
+    rng = random.Random(0)  # seeded test data
     codes = set(metrics.LANGUAGE_CODES.values())
     letters = "abcdefghijklmnopqrstuvwxyz    "
     texts = ["".join(rng.choice(letters) for _ in range(60)) for _ in range(50)]

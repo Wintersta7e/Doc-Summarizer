@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from docsummarizer import provenance
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -396,8 +398,6 @@ class M7:
 
 def m7(points: Sequence[PointRecord], document: str) -> M7:
     """Score the citations the production grounding returned; never re-locate a quote."""
-    from docsummarizer import provenance
-
     cited = [point.citation for point in points if point.citation is not None]
     whole = document.strip()
     quotes = [point.quote for point in points if point.quote]

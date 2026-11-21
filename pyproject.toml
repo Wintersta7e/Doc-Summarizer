@@ -142,6 +142,7 @@ ban-relative-imports = "all"
 banned-module-level-imports = [
     "docx",
     "llama_cpp",
+    "psutil",
     "py3langid",
     "pypdf",
     "resource",
@@ -173,12 +174,24 @@ extend-ignore-names = [
 # Standard output is the interface of the CLI and of the dev scripts.
 "src/docsummarizer/cli.py" = ["T201"]
 "scripts/**" = ["T201"]
-# These files run fixed tool argv lists, never a shell; S603 has no option to
-# say so.
+# S603 (no option to say so): these files run fixed tool argv lists, never a shell.
 "scripts/check.py" = ["S603"]  # 1 hit
-"scripts/eval/run.py" = ["S603"]  # 3 hits
 "tests/test_eval_runner.py" = ["S603"]  # 1 hit
 "tests/test_release_claims.py" = ["S603"]  # 1 hit
+"scripts/eval/run.py" = [
+    "S603",  # 3 hits: fixed tool argv lists, never a shell
+    # 24 hits: bootstrap() must pin sys.path and app data before any first-party
+    # import (test_bootstrap_points_app_data_at_the_eval_dir).
+    "PLC0415",
+    # 1 hit: a seeded random.Random for reproducible sampling, never security;
+    # another sampler would change the language self-test's reported rates.
+    "S311",
+]
+# 7 hits: sys.path must point at this checkout's src before the PySide6 and
+# first-party imports.
+"scripts/render_qml.py" = ["E402"]
+# 1 hit: seeded random.Random test data, never security.
+"tests/test_eval_metrics.py" = ["S311"]
 
 [tool.ruff.format]
 docstring-code-format = true
