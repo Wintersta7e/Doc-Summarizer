@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -71,28 +72,51 @@ def _sample_summary() -> StructuredSummary:
 
 
 class _FakeSummarizer:
-    def summarize_structured(self, text: str, summary_type: str = "detailed") -> StructuredSummary:
+    def summarize_structured(
+        self, _text: str, _summary_type: str = "detailed"
+    ) -> StructuredSummary:
         return _sample_summary()
 
-    def summarize(self, text: str, summary_type: str = "detailed") -> str:
+    def summarize(self, _text: str, _summary_type: str = "detailed") -> str:
         return _sample_summary().lead or ""
 
     def close(self) -> None:
         pass
 
 
+class _PreviewBridge(ConsoleBridge):
+    """A bridge seeded with a ready model, a document and batch rows, for a still image."""
+
+    def seed_document(self, name: str, text: str) -> None:
+        self._summarizer = _FakeSummarizer()  # mark model-ready
+        self._current_file = name
+        self._extracted_text = text
+
+    def seed_batch_rows(self, rows: list[dict[str, object]]) -> None:
+        self._batch_rows = rows
+        self.batchRowsChanged.emit()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Render a QML screen to a PNG, offscreen.")
+    parser.add_argument("screen", nargs="?", default="summary")
+    parser.add_argument("theme", nargs="?", default="dark")
+    parser.add_argument("out", nargs="?", help="default: render-<screen>-<theme>.png in the repo")
+    return parser.parse_args()
+
+
 def main() -> int:
-    screen = sys.argv[1] if len(sys.argv) > 1 else "summary"
-    theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
-    out = sys.argv[3] if len(sys.argv) > 3 else str(REPO / f"render-{screen}-{theme}.png")
+    """Render the screen and theme the command line names; 0 when the PNG is saved."""
+    args = _parse_args()
+    screen: str = args.screen
+    theme: str = args.theme
+    out: str = args.out or str(REPO / f"render-{screen}-{theme}.png")
 
     _app = QGuiApplication(sys.argv)  # kept alive for the view
 
     register_fonts()
-    bridge = ConsoleBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=True)
-    bridge._summarizer = _FakeSummarizer()  # mark model-ready
-    bridge._current_file = "attention.pdf"
-    bridge._extracted_text = SAMPLE_SOURCE
+    bridge = _PreviewBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=True)
+    bridge.seed_document("attention.pdf", SAMPLE_SOURCE)
 
     view = QQuickView()
     view.engine().addImportPath(str(_QML_DIR))
@@ -116,12 +140,13 @@ def main() -> int:
     if screen == "summary":
         bridge.summaryReady.emit(summary_to_variant(_sample_summary()))
     if screen == "batch":
-        bridge._batch_rows = [
-            {"name": "1706.03762.pdf", "status": "DONE", "tokens": 312},
-            {"name": "1810.04805.pdf", "status": "PROCESSING", "tokens": 0},
-            {"name": "2005.14165.pdf", "status": "QUEUED", "tokens": 0},
-        ]
-        bridge.batchRowsChanged.emit()
+        bridge.seed_batch_rows(
+            [
+                {"name": "1706.03762.pdf", "status": "DONE", "tokens": 312},
+                {"name": "1810.04805.pdf", "status": "PROCESSING", "tokens": 0},
+                {"name": "2005.14165.pdf", "status": "QUEUED", "tokens": 0},
+            ]
+        )
 
     loop = QEventLoop()
     QTimer.singleShot(600, loop.quit)
