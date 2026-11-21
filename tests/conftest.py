@@ -43,17 +43,14 @@ def _isolated_app_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _reset_logger_singleton(monkeypatch: pytest.MonkeyPatch):
-    """Reset the lazy `_logger` between tests.
+def _reset_logger_singleton():
+    """Detach the app logger's handlers between tests.
 
-    `docsummarizer.logger._logger` is a process-wide singleton; without
-    resetting it, the first test creates a logger pointing at one
-    tmp_path and every subsequent test inherits it (with a stale file
-    handler pointing at a now-deleted tmp dir).
+    The named logger is a process-wide singleton; without detaching its
+    handlers, the first test creates a file handler pointing at one
+    tmp_path and every subsequent test inherits it (pointing at a
+    now-deleted tmp dir).
     """
-    from docsummarizer import logger as logger_module
-
-    monkeypatch.setattr(logger_module, "_logger", None)
     # Detach any existing handlers from the named logger so re-init is clean.
     named = logging.getLogger("DocSummarizer")
     for handler in list(named.handlers):
