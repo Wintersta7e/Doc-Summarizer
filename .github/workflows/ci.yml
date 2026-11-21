@@ -118,6 +118,8 @@ jobs:
           # Every version is pinned by the lock: audit those, resolve nothing.
           no-deps: true
           extra-index-urls: https://abetlen.github.io/llama-cpp-python/whl/cpu
+          # The reason and the expiry live in osv-scanner.toml; keep the two equal.
+          ignore-vulns: PYSEC-2026-2447
 
       # Links between files in the repository; the weekly run follows web links too.
       - name: lychee (offline)

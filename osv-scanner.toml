@@ -1,0 +1,10 @@
+# Advisories the osv-scanner CI step ignores. Each one says why, and expires so
+# it is re-checked; pip-audit's ignore-vulns in ci.yml mirrors this list.
+
+[[IgnoredVulns]]
+# diskcache <= 5.6.3 unpickles what it reads from its cache directory; an attacker
+# who can write there runs code. It is here only as llama-cpp-python's dependency
+# for LlamaDiskCache, which this app never creates, and no release fixes it.
+id = "PYSEC-2026-2447"
+ignoreUntil = 2027-02-21T00:00:00Z
+reason = "diskcache unused: the app never sets a llama-cpp-python disk cache; no fixed release"
