@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """DocSummarizer's command line interface, for users who prefer a terminal to the GUI."""
 

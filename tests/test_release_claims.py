@@ -69,6 +69,35 @@ def _tracked_files() -> list[str]:
     return paths
 
 
+def test_shebang_files_are_executable_in_git() -> None:
+    """A tracked file starts with ``#!`` exactly when git records it executable.
+
+    Reads git's own modes, not the disk's: ruff skips its shebang checks under WSL,
+    where every file on a Windows mount reads as executable, so only CI saw them.
+    """
+    git = shutil.which("git")
+    assert git is not None, "git is not on PATH"
+    listing = subprocess.run(
+        [git, "ls-files", "-s", "-z"],
+        cwd=_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    entries = [entry.split("\t", 1) for entry in listing.decode("utf-8").split("\0") if entry]
+    mismatched: list[str] = []
+    for meta, rel in entries:
+        path = _ROOT / rel
+        if not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            shebang = handle.read(2) == b"#!"
+        if shebang != meta.startswith("100755"):
+            mismatched.append(f"{rel} ({meta.split()[0]}, shebang={shebang})")
+    _LOG.info("checked %s tracked files for shebang/mode agreement", len(entries))
+    assert entries, "git ls-files listed 0 files"
+    assert mismatched == []
+
+
 def test_setup_scripts_and_lockfile_are_gone() -> None:
     """The setup scripts and the lockfile are gone, and no tracked file names them.
 
