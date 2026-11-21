@@ -123,6 +123,54 @@ def test_smoke_test_prints_the_version_and_exits_zero(capsys: pytest.CaptureFixt
     assert err == ""
 
 
+@pytest.mark.usefixtures("qapp")
+def test_smoke_result_receives_the_ok_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = tmp_path / "result.txt"
+
+    status = app_mod.main(["DocSummarizer", "--smoke-test", "--smoke-result", str(result)])
+
+    assert status == 0
+    assert result.read_text(encoding="utf-8") == _SMOKE_OK
+    assert capsys.readouterr().out == _SMOKE_OK
+
+
+@pytest.mark.usefixtures("qapp")
+def test_smoke_result_is_the_proof_when_there_is_no_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A windowed Windows build starts with no stdout at all.
+    monkeypatch.setattr(sys, "stdout", None)
+    result = tmp_path / "result.txt"
+
+    status = app_mod.main(["DocSummarizer", "--smoke-result", str(result), "--smoke-test"])
+
+    assert status == 0
+    assert result.read_text(encoding="utf-8") == _SMOKE_OK
+
+
+@pytest.mark.usefixtures("qapp")
+def test_a_failed_smoke_run_writes_no_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(app_mod, "register_fonts", list)
+    result = tmp_path / "result.txt"
+
+    status = app_mod.main(["DocSummarizer", "--smoke-test", "--smoke-result", str(result)])
+
+    assert status == 1
+    assert not result.exists()
+    assert "no bundled fonts" in capsys.readouterr().err
+
+
+def test_smoke_result_without_a_path_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    status = app_mod.main(["DocSummarizer", "--smoke-test", "--smoke-result"])
+
+    assert status == app_mod.USAGE_ERROR
+    assert "--smoke-result needs a path" in capsys.readouterr().err
+
+
 def _saved_settings() -> Path:
     """Write the settings file an earlier session left: compact, non-default and old.
 

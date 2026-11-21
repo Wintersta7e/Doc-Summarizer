@@ -6,7 +6,9 @@ context object, and loads ``App/Main.qml``. Run with ``python -m docsummarizer.u
 (a console entry point replaces ``run.py`` when the CustomTkinter GUI is retired).
 ``--smoke-test`` starts everything but the model, prints
 ``DocSummarizer <version> smoke ok`` and exits 0, or names what failed and exits 1.
-It keeps its app data in a temp dir it deletes, never the user's.
+It keeps its app data in a temp dir it deletes, never the user's. With
+``--smoke-result <path>`` it also writes that line to the path: the proof a
+windowed build gives, since it may have no stdout.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import tempfile
 import threading
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, cast, final
 
 from PySide6.QtCore import (
     QEventLoop,
@@ -51,6 +53,9 @@ _QML_DIR = Path(__file__).parent / "qml"
 _MAIN_QML = _QML_DIR / "App" / "Main.qml"
 _LOCAL_SCHEMES = frozenset({"file", "qrc"})
 SMOKE_TEST_FLAG = "--smoke-test"
+SMOKE_RESULT_FLAG = "--smoke-result"
+# The exit status for a command line the app cannot run.
+USAGE_ERROR = 2
 # How long the smoke run lets the window run before teardown: long enough for
 # its first bindings, timers and animations to fire.
 _SMOKE_SETTLE_MS = 250
@@ -229,12 +234,16 @@ def _smoke_steps(app: QGuiApplication) -> None:
         bridge.shutdown()
 
 
-def smoke_test(app: QGuiApplication) -> int:
+def smoke_test(app: QGuiApplication, result: Path | None = None) -> int:
     """Run the smoke steps; a failed step or any Qt warning on the way is a failure.
 
+    Args:
+        app: The running application.
+        result: Where the passing line is also written, if anywhere.
+
     Returns:
-        0 after printing ``DocSummarizer <version> smoke ok``; 1 after writing
-        what failed to stderr.
+        0 after printing ``DocSummarizer <version> smoke ok`` (to ``result`` as
+        well, when given); 1 after writing what failed to stderr.
     """
     problems: list[str] = []
 
@@ -257,7 +266,12 @@ def smoke_test(app: QGuiApplication) -> int:
         _ = sys.stderr.write("".join(f"{problem}\n" for problem in problems))
         return 1
     log_info("Smoke test passed")
-    _ = sys.stdout.write(f"DocSummarizer {__version__} smoke ok\n")
+    line = f"DocSummarizer {__version__} smoke ok\n"
+    if result is not None:
+        _ = result.write_text(line, encoding="utf-8")
+    # The stubs promise a stream; a windowed Windows build has none.
+    if cast("object", sys.stdout) is not None:
+        _ = sys.stdout.write(line)
     return 0
 
 
@@ -278,16 +292,29 @@ def _smoke_main(args: list[str]) -> int:
     The user's settings, logs and models are never read or written: a settings
     read that fell back to defaults would otherwise be saved over their file.
 
+    Args:
+        args: The command line without ``--smoke-test``; a ``--smoke-result``
+            in it is taken out with its path.
+
     Returns:
-        The smoke test's exit status.
+        The smoke test's exit status, or ``USAGE_ERROR`` when
+        ``--smoke-result`` has no path.
     """
+    result: Path | None = None
+    if SMOKE_RESULT_FLAG in args:
+        at = args.index(SMOKE_RESULT_FLAG)
+        if at + 1 == len(args):
+            _ = sys.stderr.write(f"{SMOKE_RESULT_FLAG} needs a path\n")
+            return USAGE_ERROR
+        result = Path(args[at + 1])
+        args = args[:at] + args[at + 2 :]
     with (
         tempfile.TemporaryDirectory(prefix="DocSummarizer-smoke-") as tmp,
         redirected_app_data(Path(tmp)),
     ):
         try:
             log_startup()
-            return smoke_test(_application(args))
+            return smoke_test(_application(args), result)
         finally:
             # Close the run's log file so the directory can be deleted (Windows
             # refuses to delete an open file). The handler left in its place

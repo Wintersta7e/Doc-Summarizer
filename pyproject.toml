@@ -195,6 +195,7 @@ extend-ignore-names = [
 "scripts/**" = ["T201"]
 # S603 (no option to say so): these files run fixed tool argv lists, never a shell.
 "scripts/check.py" = ["S603"]  # 1 hit
+"scripts/check_binary.py" = ["S603"]  # 1 hit: runs the binary it was asked to check
 "tests/test_eval_runner.py" = ["S603"]  # 1 hit
 "tests/test_release_claims.py" = ["S603"]  # 1 hit
 "tests/test_smoke.py" = ["S603"]  # 1 hit
