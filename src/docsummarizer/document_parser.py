@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""
-Document Parser Module
+"""Document Parser Module
 Extracts text from various document formats: PDF, DOCX, TXT, RTF.
 
 Legacy binary `.doc` (OLE compound) is intentionally not supported —

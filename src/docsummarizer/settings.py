@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from docsummarizer.logger import log_debug, log_warning
 from docsummarizer.model_manager import LANGUAGE_AUTO, normalize_language
 from docsummarizer.paths import app_data_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # llama.cpp uses -1 to mean "offload every layer to the GPU".
 _ALL_GPU_LAYERS = -1

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""
-I/O helpers shared between the GUI and CLI.
+"""I/O helpers shared between the GUI and CLI.
 
 Both entry points need to write summaries to text or docx files with the
 same header format. Keeping that here means the format only has to be

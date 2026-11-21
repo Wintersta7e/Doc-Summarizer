@@ -10,12 +10,14 @@ controller (``self.after(0, ...)``), but with Qt's queued signal/slot delivery.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from docsummarizer.logger import log_error
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class WorkerSignals(QObject):

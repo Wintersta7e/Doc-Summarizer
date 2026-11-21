@@ -22,7 +22,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
@@ -30,6 +29,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+
     from docsummarizer.model_manager import StructuredSummary, Summarizer
     from eval.cases import Case
     from eval.metrics import CaseScore, Target
@@ -50,7 +51,8 @@ def bootstrap(app_data: Path) -> None:
 
     location = Path(str(docsummarizer.__file__)).resolve()
     if not location.is_relative_to(_REPO / "src"):
-        raise SystemExit(f"docsummarizer resolves from {location.parent}, not {_REPO / 'src'}")
+        msg = f"docsummarizer resolves from {location.parent}, not {_REPO / 'src'}"
+        raise SystemExit(msg)
 
 
 # --------------------------------------------------------------------------- #
@@ -211,21 +213,26 @@ def _manifest_document(entry: Any, corpus: Path) -> ManifestDocument:
     from eval import cases
 
     if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in _REQUIRED):
-        raise ManifestError(f"manifest unreadable: an entry lacks one of {_REQUIRED}")
+        msg = f"manifest unreadable: an entry lacks one of {_REQUIRED}"
+        raise ManifestError(msg)
     doc_id = entry["id"]
     shape = cases.DOCUMENTS.get(doc_id)
     if shape is None:
-        raise ManifestError(f"manifest unknown: {doc_id} (ad-hoc documents go through --doc)")
+        msg = f"manifest unknown: {doc_id} (ad-hoc documents go through --doc)"
+        raise ManifestError(msg)
     if entry["label"] != shape.label:
-        raise ManifestError(f"manifest label: {doc_id} ({entry['label']!r}, not {shape.label!r})")
+        msg = f"manifest label: {doc_id} ({entry['label']!r}, not {shape.label!r})"
+        raise ManifestError(msg)
     script = entry.get("script")
     if shape.label == "zh" and (
         script not in _SCRIPTS or (shape.script is not None and script != shape.script)
     ):
-        raise ManifestError(f"manifest script: {doc_id} ({script!r})")
+        msg = f"manifest script: {doc_id} ({script!r})"
+        raise ManifestError(msg)
     path = (corpus / entry["file"]).resolve()
     if not path.is_relative_to(corpus.resolve()):
-        raise ManifestError(f"manifest file outside the corpus: {doc_id}")
+        msg = f"manifest file outside the corpus: {doc_id}"
+        raise ManifestError(msg)
     return ManifestDocument(doc_id, path, entry["label"], script, entry["sha256"])
 
 
@@ -236,17 +243,21 @@ def load_manifest(eval_dir: Path) -> dict[str, ManifestDocument]:
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise ManifestError(f"manifest absent: {manifest}") from None
+        msg = f"manifest absent: {manifest}"
+        raise ManifestError(msg) from None
     except (OSError, ValueError) as exc:
-        raise ManifestError(f"manifest unreadable: {manifest}: {exc}") from exc
+        msg = f"manifest unreadable: {manifest}: {exc}"
+        raise ManifestError(msg) from exc
     entries = data.get("documents") if isinstance(data, dict) else None
     if not isinstance(entries, list):
-        raise ManifestError(f"manifest unreadable: {manifest}: no documents list")
+        msg = f"manifest unreadable: {manifest}: no documents list"
+        raise ManifestError(msg)
     documents: dict[str, ManifestDocument] = {}
     for entry in entries:
         doc = _manifest_document(entry, corpus)
         if doc.id in documents:
-            raise ManifestError(f"manifest duplicate: {doc.id}")
+            msg = f"manifest duplicate: {doc.id}"
+            raise ManifestError(msg)
         documents[doc.id] = doc
     return documents
 
@@ -852,14 +863,16 @@ def _seed_list(text: str) -> tuple[int, ...]:
     try:
         seeds = tuple(int(part) for part in text.split(","))
     except ValueError:
-        raise argparse.ArgumentTypeError(f"not a comma-separated list of seeds: {text!r}") from None
+        msg = f"not a comma-separated list of seeds: {text!r}"
+        raise argparse.ArgumentTypeError(msg) from None
     return seeds
 
 
 def _at_least_one(text: str) -> int:
     value = int(text)
     if value < 1:
-        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+        msg = f"must be at least 1, got {value}"
+        raise argparse.ArgumentTypeError(msg)
     return value
 
 
@@ -949,7 +962,8 @@ def read_results(path: Path) -> Results:
     """Read a results file; the header must be its first line."""
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     if not lines or lines[0].get("kind") != "header":
-        raise ValueError(f"{path}: the first line is not a header")
+        msg = f"{path}: the first line is not a header"
+        raise ValueError(msg)
     calls = [line for line in lines if line.get("kind") == "call"]
     case_runs = [line for line in lines if line.get("kind") == "case_run"]
     return Results(lines[0], calls, case_runs)
@@ -1008,7 +1022,8 @@ def _select_cases(args: argparse.Namespace) -> list[Case]:
         for selector in args.case:
             matched = {case.id for case in tier if selector in (case.id, case.doc)}
             if not matched:
-                raise _RefusedError(f"--case {selector}: no case in tier {args.tier} matches")
+                msg = f"--case {selector}: no case in tier {args.tier} matches"
+                raise _RefusedError(msg)
             chosen |= matched
         selected = [case for case in tier if case.id in chosen]
     for doc in _adhoc_documents(args):
@@ -1021,14 +1036,16 @@ def _select_cases(args: argparse.Namespace) -> list[Case]:
 
 def _adhoc_documents(args: argparse.Namespace) -> list[ManifestDocument]:
     if len(args.label) != len(args.doc) or len(args.script) not in (0, len(args.doc)):
-        raise _RefusedError("each --doc needs a --label (and, if any is given, a --script)")
+        msg = "each --doc needs a --label (and, if any is given, a --script)"
+        raise _RefusedError(msg)
     scripts = args.script or [None] * len(args.doc)
     documents = []
     for path, label, script in zip(args.doc, args.label, scripts, strict=True):
         try:
             sha = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
-            raise _RefusedError(f"--doc {path}: {exc}") from exc
+            msg = f"--doc {path}: {exc}"
+            raise _RefusedError(msg) from exc
         documents.append(ManifestDocument(sha[:12], path.resolve(), label, script, sha))
     return documents
 
@@ -1040,7 +1057,8 @@ def _documents_for(args: argparse.Namespace, runs: Sequence[RunSpec]) -> list[Ma
     manifest = load_manifest(args.eval_dir) if corpus else {}
     lacking = [doc_id for doc_id in corpus if doc_id not in manifest]
     if lacking:
-        raise _RefusedError(f"manifest lacks: {', '.join(lacking)}")
+        msg = f"manifest lacks: {', '.join(lacking)}"
+        raise _RefusedError(msg)
     documents = [manifest[doc_id] for doc_id in corpus]
     verify_documents(documents)
     return [*documents, *(adhoc[doc_id] for doc_id in needed if doc_id in adhoc)]
@@ -1055,7 +1073,8 @@ def _targets(runs: Sequence[RunSpec], documents: Mapping[str, ManifestDocument])
         try:
             targets[spec.case.id] = metrics.target_for(spec.case.language, doc.label, doc.script)
         except ValueError as exc:
-            raise _RefusedError(f"{spec.case.id}: {exc}") from exc
+            msg = f"{spec.case.id}: {exc}"
+            raise _RefusedError(msg) from exc
     return targets
 
 
@@ -1156,11 +1175,14 @@ def _run_tier(args: argparse.Namespace) -> int:
     from eval import cases, metrics
 
     if tuple(args.seeds) != (0,):
-        raise _RefusedError("--seeds: seed 0 only until the seed API lands")
+        msg = "--seeds: seed 0 only until the seed API lands"
+        raise _RefusedError(msg)
     if args.eval_dir is None or args.model is None:
-        raise _RefusedError("a tier run needs --eval-dir and --model")
+        msg = "a tier run needs --eval-dir and --model"
+        raise _RefusedError(msg)
     if not args.model.is_file():
-        raise _RefusedError(f"model not found: {args.model}")
+        msg = f"model not found: {args.model}"
+        raise _RefusedError(msg)
     args.n_ctx = args.n_ctx or _default_n_ctx()
     runs = expand_runs(_select_cases(args), args.seeds, args.repeat)
     documents = {doc.id: doc for doc in _documents_for(args, runs)}
@@ -1280,10 +1302,12 @@ class ReplayLlama:
         if self.mismatch is not None:
             raise self.mismatch
         if self.consumed >= len(self._calls):
-            raise self._refuse("call count")
+            msg = "call count"
+            raise self._refuse(msg)
         stored = self._calls[self.consumed]
         if _normalized([dict(message) for message in messages]) != stored["messages"]:
-            raise self._refuse("messages")
+            msg = "messages"
+            raise self._refuse(msg)
         asked = _normalized({key: _jsonable(value) for key, value in kwargs.items()})
         for key in sorted(set(asked) | set(stored["kwargs"])):
             if asked.get(key) != stored["kwargs"].get(key):
@@ -1393,9 +1417,11 @@ def _rescore_documents(eval_dir: Path, header: Mapping[str, Any]) -> dict[str, M
     for doc_id, recorded in header["documents"].items():
         doc = manifest.get(doc_id)
         if doc is None:
-            raise _RefusedError(f"{doc_id}: not in the manifest (ad-hoc runs are not rescored)")
+            msg = f"{doc_id}: not in the manifest (ad-hoc runs are not rescored)"
+            raise _RefusedError(msg)
         if doc.sha256 != recorded["sha256"]:
-            raise _RefusedError(f"{doc_id}: the manifest's sha256 differs from the run's")
+            msg = f"{doc_id}: the manifest's sha256 differs from the run's"
+            raise _RefusedError(msg)
         documents[doc_id] = doc
     verify_documents(documents.values())
     return documents
@@ -1454,7 +1480,8 @@ def _rescore_one(
     try:
         target = metrics.target_for(case.language, doc.label, doc.script)
     except ValueError as exc:
-        raise _RefusedError(f"{case.id}: {exc}") from exc
+        msg = f"{case.id}: {exc}"
+        raise _RefusedError(msg) from exc
     records = [_call_record(call) for call in stored]
     result, error = _replay(case, text, line["n_ctx"], line, stored)
     coverage_m7: dict[str, Any] | None = None
@@ -1519,9 +1546,11 @@ def rescore(eval_dir: Path, source: Path) -> int:
     try:
         results = read_results(source)
     except (OSError, ValueError) as exc:
-        raise _RefusedError(f"--rescore {source}: {exc}") from exc
+        msg = f"--rescore {source}: {exc}"
+        raise _RefusedError(msg) from exc
     if not results.case_runs:
-        raise _RefusedError(f"--rescore {source}: zero case runs")
+        msg = f"--rescore {source}: zero case runs"
+        raise _RefusedError(msg)
     documents = _rescore_documents(eval_dir, results.header)
     texts = {doc_id: doc.path.read_text(encoding="utf-8") for doc_id, doc in documents.items()}
     calls_of: dict[int, list[dict[str, Any]]] = {}
@@ -1618,7 +1647,8 @@ def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
         try:
             arms.append(read_results(path))
         except (OSError, ValueError) as exc:
-            raise _RefusedError(f"--compare {path}: {exc}") from exc
+            msg = f"--compare {path}: {exc}"
+            raise _RefusedError(msg) from exc
     base, candidate = arms
     lacking = [
         f"{arm} {name}"
@@ -1627,13 +1657,16 @@ def compare(eval_dir: Path | None, b: Path, c: Path) -> int:
         if name not in results.header
     ]
     if lacking:
-        raise _RefusedError(f"header lacks: {', '.join(lacking)}")
+        msg = f"header lacks: {', '.join(lacking)}"
+        raise _RefusedError(msg)
     differ = [name for name in COMPARE_FIELDS if base.header[name] != candidate.header[name]]
     if differ:
-        raise _RefusedError(f"the arms differ in {', '.join(differ)}")
+        msg = f"the arms differ in {', '.join(differ)}"
+        raise _RefusedError(msg)
     b_scores, c_scores = _case_scores(base.case_runs), _case_scores(candidate.case_runs)
     if not b_scores or not c_scores:
-        raise _RefusedError("zero case runs")
+        msg = "zero case runs"
+        raise _RefusedError(msg)
 
     outcome = metrics.verdict(b_scores, c_scores)
     print(f"verdict: B {len(b_scores)} case runs, C {len(c_scores)} case runs (repetition 0)")

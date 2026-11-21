@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QIODevice, QObject, QUrl
 from PySide6.QtGui import QGuiApplication
@@ -19,6 +20,9 @@ from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
 
 from docsummarizer.logger import log_error, log_startup
 from docsummarizer.ui.bridge import ConsoleBridge
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 _QML_DIR = Path(__file__).parent / "qml"
 _MAIN_QML = _QML_DIR / "App" / "Main.qml"
@@ -105,7 +109,8 @@ def create_engine(app: QGuiApplication) -> tuple[QQmlApplicationEngine, ConsoleB
     app.aboutToQuit.connect(bridge.shutdown)
     engine.load(QUrl.fromLocalFile(str(_MAIN_QML)))
     if not engine.rootObjects():
-        raise RuntimeError(f"Failed to load QML from {_MAIN_QML}")
+        msg = f"Failed to load QML from {_MAIN_QML}"
+        raise RuntimeError(msg)
     return engine, bridge
 
 
@@ -118,7 +123,6 @@ def _install_excepthook(bridge: ConsoleBridge) -> None:
     """
     import contextlib
     import traceback
-    from types import TracebackType
 
     def hook(
         exc_type: type[BaseException],

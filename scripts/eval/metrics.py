@@ -12,9 +12,11 @@ from __future__ import annotations
 import functools
 import math
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 METRIC_VERSION: int = 1
 
@@ -141,11 +143,13 @@ def target_for(language: str, label: str, script: str | None) -> Target:
     """The target for a run: the document's label for ``auto``, else the named language."""
     if language == _AUTO:
         if label not in LANGUAGE_CODES.values():
-            raise ValueError(f"no classifier code for the label {label!r}")
+            msg = f"no classifier code for the label {label!r}"
+            raise ValueError(msg)
         return Target(label, script if label == "zh" else None)
     code = LANGUAGE_CODES.get(language)
     if code is None:
-        raise ValueError(f"no classifier code for the language {language!r}")
+        msg = f"no classifier code for the language {language!r}"
+        raise ValueError(msg)
     return Target(code, TARGET_SCRIPT.get(language))
 
 
