@@ -12,15 +12,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Literal, NoReturn
 
-from .document_parser import extract_text, find_documents, get_document_info
-from .io_helpers import (
+from docsummarizer.document_parser import extract_text, find_documents, get_document_info
+from docsummarizer.io_helpers import (
     SKIPPED_APPEARED,
     SKIPPED_EXISTS,
     same_file,
     summary_filename,
     write_summary_txt,
 )
-from .model_manager import (
+from docsummarizer.model_manager import (
     DEFAULT_MODEL,
     LANGUAGE_AUTO,
     OUTPUT_LANGUAGES,
@@ -32,7 +32,7 @@ from .model_manager import (
     is_model_downloaded,
     normalize_language,
 )
-from .settings import Settings, load_settings
+from docsummarizer.settings import Settings, load_settings
 
 
 def print_progress(percent: float, message: str) -> None:

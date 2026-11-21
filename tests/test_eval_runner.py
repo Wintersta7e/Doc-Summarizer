@@ -20,7 +20,6 @@ from typing import Any
 
 import psutil
 import pytest
-from eval import cases, metrics, run
 
 import docsummarizer
 from docsummarizer import model_manager, paths, provenance
@@ -30,6 +29,7 @@ from docsummarizer.model_manager import (
     SUMMARY_TYPES,
     Summarizer,
 )
+from eval import cases, metrics, run
 
 _REPO = Path(__file__).resolve().parents[1]
 

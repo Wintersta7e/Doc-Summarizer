@@ -15,10 +15,10 @@ import re
 from pathlib import Path
 
 import pytest
-from eval import cases, metrics
 
 from docsummarizer import model_manager, provenance
 from docsummarizer.model_manager import LANGUAGE_AUTO, OUTPUT_LANGUAGES
+from eval import cases, metrics
 
 _REPO = Path(__file__).resolve().parents[1]
 

@@ -16,9 +16,9 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 
-from .logger import get_memory_usage_mb, log_debug, log_error, log_info, log_warning
-from .paths import app_data_dir
-from .provenance import SourceSpan, locate_quote, split_sentences
+from docsummarizer.logger import get_memory_usage_mb, log_debug, log_error, log_info, log_warning
+from docsummarizer.paths import app_data_dir
+from docsummarizer.provenance import SourceSpan, locate_quote, split_sentences
 
 # Supported summary types. Kept as module-level string constants (rather than
 # enum.StrEnum, which requires Python 3.11+) so callers can keep passing plain

@@ -14,7 +14,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Literal, cast
 
-from .paths import app_data_dir
+from docsummarizer.paths import app_data_dir
 
 
 def get_log_directory() -> Path:

@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import check
 import pytest
+
+import check
 
 EXPECTED_ORDER = ("format", "lint", "types", "arch", "qml", "test")
 FAILED_STATUS = 3
