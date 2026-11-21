@@ -9,7 +9,7 @@ summarizer stands in for the llama-cpp-backed one.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from PySide6.QtGui import QGuiApplication
@@ -74,6 +74,11 @@ class _FakeSummarizer:
         self.closed = True
 
 
+def _qt(bridge: ConsoleBridge, name: str) -> object:
+    """Read a bridge property through Qt's meta-object, as QML reads it."""
+    return cast("object", bridge.property(name))
+
+
 def _bridge(synchronous: bool = True) -> ConsoleBridge:
     return ConsoleBridge(summarizer_factory=lambda *_: _FakeSummarizer(), synchronous=synchronous)
 
@@ -113,7 +118,7 @@ def test_check_model_loads_when_present(qapp, monkeypatch) -> None:
     monkeypatch.setattr(bridge_mod, "is_model_downloaded", lambda: True)
     bridge = _bridge()
     bridge.checkModel()
-    assert bridge._get_model_ready() is True
+    assert _qt(bridge, "modelReady") is True
 
 
 def test_summarize_emits_marshalled_summary(qapp, monkeypatch, tmp_path) -> None:
@@ -124,7 +129,7 @@ def test_summarize_emits_marshalled_summary(qapp, monkeypatch, tmp_path) -> None
     doc = tmp_path / "d.txt"
     doc.write_text("Hello world. More text follows here.", encoding="utf-8")
     bridge.loadDocument(str(doc))
-    assert bridge._get_can_summarize() is True
+    assert _qt(bridge, "canSummarize") is True
 
     spy = QSignalSpy(bridge.summaryReady)
     bridge.summarize()
@@ -134,7 +139,7 @@ def test_summarize_emits_marshalled_summary(qapp, monkeypatch, tmp_path) -> None
     assert variant["lead"] == "the lead"
     assert variant["points"][0]["text"] == "a point"
     assert variant["points"][0]["hasCitation"] is True
-    assert bridge._get_busy() is False
+    assert _qt(bridge, "busy") is False
 
 
 def test_load_document_error_blocks_summarize(qapp, monkeypatch) -> None:
@@ -142,9 +147,9 @@ def test_load_document_error_blocks_summarize(qapp, monkeypatch) -> None:
     bridge = _bridge()
     bridge.checkModel()
     bridge.loadDocument("/nonexistent/file.txt")
-    assert bridge._get_has_doc() is False
-    assert bridge._get_can_summarize() is False
-    assert bridge._status_color == "error"
+    assert _qt(bridge, "hasDoc") is False
+    assert _qt(bridge, "canSummarize") is False
+    assert _qt(bridge, "statusColor") == "error"
 
 
 class _CountingFake(_FakeSummarizer):
@@ -205,10 +210,10 @@ def test_can_summarize_notifies_when_model_becomes_ready(qapp, monkeypatch, tmp_
     doc = tmp_path / "d.txt"
     doc.write_text("Hello world.", encoding="utf-8")
     bridge.loadDocument(str(doc))
-    assert bridge._get_can_summarize() is False
+    assert _qt(bridge, "canSummarize") is False
     spy = QSignalSpy(bridge.docChanged)  # canSummarize's NOTIFY
     bridge.loadModel()
-    assert bridge._get_can_summarize() is True
+    assert _qt(bridge, "canSummarize") is True
     assert spy.count() >= 1
 
 
@@ -224,7 +229,7 @@ def test_batch_bad_folder_toasts_instead_of_crashing(qapp, monkeypatch, tmp_path
     spy = QSignalSpy(bridge.toast)
     bridge.batchProcess(str(tmp_path / "does-not-exist"), str(tmp_path / "out"))
     assert spy.count() == 1
-    assert bridge._get_busy() is False
+    assert _qt(bridge, "busy") is False
 
 
 def test_batch_creates_missing_output_dir(qapp, monkeypatch, tmp_path) -> None:
@@ -256,7 +261,7 @@ def test_async_load_document_completes_off_thread(qapp, monkeypatch, tmp_path) -
     doc.write_text("Hello world. Real off-thread extraction here.", encoding="utf-8")
 
     loop = QEventLoop()
-    _ = bridge.docChanged.connect(lambda: bridge._extracted_text and loop.quit())
+    _ = bridge.docChanged.connect(lambda: _qt(bridge, "extractedText") and loop.quit())
     timed_out = {"v": False}
 
     def on_timeout() -> None:
@@ -268,8 +273,8 @@ def test_async_load_document_completes_off_thread(qapp, monkeypatch, tmp_path) -
     _ = loop.exec()
 
     assert not timed_out["v"], "async loadDocument hung (worker GC'd before completion)"
-    assert bridge._get_has_doc() is True
-    assert bridge._get_busy() is False
+    assert _qt(bridge, "hasDoc") is True
+    assert _qt(bridge, "busy") is False
 
 
 class _CancelledFake(_FakeSummarizer):
@@ -288,8 +293,8 @@ def test_summarize_handles_cancellation(qapp, monkeypatch, tmp_path) -> None:
     spy = QSignalSpy(bridge.summaryReady)
     bridge.summarize()
     assert spy.count() == 0  # no summary emitted on a clean stop
-    assert bridge._status_text == "Stopped"
-    assert bridge._get_busy() is False
+    assert _qt(bridge, "statusText") == "Stopped"
+    assert _qt(bridge, "busy") is False
 
 
 def test_cancel_summarize_sets_flag_when_busy(qapp) -> None:
@@ -301,11 +306,15 @@ def test_cancel_summarize_sets_flag_when_busy(qapp) -> None:
 
 def test_compute_label_honest_about_gpu(qapp, monkeypatch) -> None:
     bridge = _bridge()
-    bridge._settings.use_gpu = True
+    bridge.toggleGpu()  # off by default
     monkeypatch.setattr(bridge_mod, "gpu_offload_supported", lambda: False)
-    assert bridge._get_compute_label().startswith("CPU")  # CPU-only build
+    label = _qt(bridge, "computeLabel")
+    assert isinstance(label, str)
+    assert label.startswith("CPU")  # CPU-only build
     monkeypatch.setattr(bridge_mod, "gpu_offload_supported", lambda: True)
-    assert bridge._get_compute_label().startswith("GPU")
+    label = _qt(bridge, "computeLabel")
+    assert isinstance(label, str)
+    assert label.startswith("GPU")
 
 
 def test_excepthook_logs_and_toasts(qapp, monkeypatch) -> None:
@@ -344,13 +353,14 @@ def test_batch_same_stem_inputs_do_not_overwrite(qapp, monkeypatch, tmp_path) ->
     assert produced == ["report.md.detailed.txt", "report.txt.detailed.txt"], produced
 
 
-def test_url_to_path_handles_windows_and_posix_urls() -> None:
+def test_url_to_path_handles_windows_and_posix_urls(qapp) -> None:
     # A QML FileDialog hands back a file:// URL; a Windows URL must not keep the
     # spurious leading slash before the drive letter (the cause of the silent
     # file-open failure on Windows). This must hold on every platform.
-    assert bridge_mod._url_to_path("file:///C:/Users/me/report.pdf") == "C:/Users/me/report.pdf"
-    assert bridge_mod._url_to_path("file:///home/me/report.pdf") == "/home/me/report.pdf"
-    assert bridge_mod._url_to_path("/home/me/report.pdf") == "/home/me/report.pdf"
+    bridge = _bridge()
+    assert bridge.urlToPath("file:///C:/Users/me/report.pdf") == "C:/Users/me/report.pdf"
+    assert bridge.urlToPath("file:///home/me/report.pdf") == "/home/me/report.pdf"
+    assert bridge.urlToPath("/home/me/report.pdf") == "/home/me/report.pdf"
 
 
 def test_load_document_from_file_url(qapp, monkeypatch, tmp_path) -> None:
@@ -360,8 +370,8 @@ def test_load_document_from_file_url(qapp, monkeypatch, tmp_path) -> None:
     doc = tmp_path / "sample.txt"
     doc.write_text("Hello world. This is a real document.", encoding="utf-8")
     bridge.loadDocument(doc.as_uri())  # file:///...
-    assert bridge._get_has_doc() is True
-    assert bridge._extracted_text != ""
+    assert _qt(bridge, "hasDoc") is True
+    assert _qt(bridge, "extractedText") != ""
 
 
 # --------------------------------------------------------------------------- #
@@ -370,7 +380,7 @@ def test_load_document_from_file_url(qapp, monkeypatch, tmp_path) -> None:
 def test_toggle_gpu_persists_immediately(qapp) -> None:
     bridge = _bridge()
     bridge.toggleGpu()  # off by default
-    assert bridge._settings.use_gpu is True
+    assert _qt(bridge, "gpuEnabled") is True
     assert load_settings().use_gpu is True
 
 
@@ -380,13 +390,13 @@ def test_threads_arm_reload_but_persist_only_on_reload(qapp, monkeypatch) -> Non
     bridge.checkModel()  # model loaded so reload can arm
 
     bridge.setThreads(3)
-    assert bridge._settings.n_threads == 3
-    assert bridge._get_reload_armed() is True
+    assert _qt(bridge, "threads") == 3
+    assert _qt(bridge, "reloadArmed") is True
     assert load_settings().n_threads is None  # not persisted yet
 
     bridge.reloadModel()
     assert load_settings().n_threads == 3  # persisted on reload
-    assert bridge._get_reload_armed() is False
+    assert _qt(bridge, "reloadArmed") is False
 
 
 def test_set_appearance_persists(qapp) -> None:
@@ -400,8 +410,8 @@ def test_set_output_language_persists_without_arming_reload(qapp) -> None:
     bridge = _bridge()
     bridge.setOutputLanguage("Chinese")
     assert load_settings().output_language == "Chinese"
-    assert bridge._get_output_language() == "Chinese"
-    assert bridge._get_reload_armed() is False
+    assert _qt(bridge, "outputLanguage") == "Chinese"
+    assert _qt(bridge, "reloadArmed") is False
 
 
 def test_output_language_reaches_summarize(qapp, monkeypatch, tmp_path) -> None:
@@ -437,7 +447,7 @@ def test_output_language_defaults_to_auto_at_summarize(qapp, monkeypatch, tmp_pa
 def test_reload_not_armed_without_loaded_model(qapp) -> None:
     bridge = _bridge()  # no checkModel → no summarizer
     bridge.setThreads(5)
-    assert bridge._get_reload_armed() is False
+    assert _qt(bridge, "reloadArmed") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -517,8 +527,9 @@ def _batch_inputs(folder, *names: str):
     return folder
 
 
-def _rows_by_name(bridge: ConsoleBridge) -> dict[str, dict]:
-    return {row["name"]: row for row in bridge._get_batch_rows()}
+def _rows_by_name(bridge: ConsoleBridge) -> dict[str, dict[str, object]]:
+    rows = cast("list[dict[str, object]]", _qt(bridge, "batchRows"))
+    return {str(row["name"]): row for row in rows}
 
 
 def test_batch_never_replaces_unchecked_files(qapp, monkeypatch, tmp_path) -> None:
@@ -582,8 +593,8 @@ def test_batch_output_equal_to_input_is_refused(qapp, monkeypatch, tmp_path) -> 
         bridge.batchProcess(str(src), str(out))
         assert spy.count() == 1
         assert spy.at(0)[0].startswith("Choose a different output folder")
-        assert bridge._get_busy() is False
-        assert bridge._get_batch_rows() == []
+        assert _qt(bridge, "busy") is False
+        assert _qt(bridge, "batchRows") == []
 
     assert sorted(src.rglob("*")) == before
     assert fake.calls == 0

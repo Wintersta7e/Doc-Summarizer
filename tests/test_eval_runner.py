@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from argparse import Namespace
@@ -473,7 +474,7 @@ def test_git_state_distinguishes_missing_git(
     assert no_repo.error
     assert "not a git repository" in no_repo.error
 
-    monkeypatch.setattr(run.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     no_git = run.git_state(tmp_path)
     _LOG.info("no git: %s", no_git)
     assert no_git.commit is None
@@ -1052,7 +1053,7 @@ def test_rescore_reproduces_every_metric(
     header = after.header
     for name in run.HEADER_FIELDS:
         assert header[name] == before.header[name], name
-    git = run.git_state(run._REPO)
+    git = run.git_state(_REPO)
     assert set(header["scored_by"]) == {"commit", "dirty", "gated_hash"}
     assert header["scored_by"]["commit"] == git.commit
     assert header["rescored_from"] == str(source)
