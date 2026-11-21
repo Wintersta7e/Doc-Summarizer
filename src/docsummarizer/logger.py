@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Logging and Diagnostics Module
 Provides logging functionality and system diagnostics for DocSummarizer.

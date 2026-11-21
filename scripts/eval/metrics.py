@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Scoring for evaluation runs: pure functions over stored text, no model and no I/O.
 
 M1 output presence, M2 language compliance (per call and on the result), M4

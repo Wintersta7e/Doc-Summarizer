@@ -192,7 +192,9 @@ strict = true
 warn_unreachable = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-mypy_path = "src"
+mypy_path = ["src", "scripts"]
+# scripts/ is a package for the linter; its eval package imports as `eval`.
+explicit_package_bases = true
 files = ["src/docsummarizer", "run.py", "scripts/eval"]
 
 [[tool.mypy.overrides]]

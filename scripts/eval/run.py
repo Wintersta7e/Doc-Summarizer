@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The evaluation runner: runs cases against a local corpus and records what it measured.
 
 Module-level imports are the standard library only. ``bootstrap()`` decides

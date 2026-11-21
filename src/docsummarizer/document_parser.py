@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Document Parser Module
 Extracts text from various document formats: PDF, DOCX, TXT, RTF.

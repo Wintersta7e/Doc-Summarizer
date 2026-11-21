@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The evaluation corpus by shape, and the cases each tier runs.
 
 Documents are named here only by an anonymous id and their shape. The texts,

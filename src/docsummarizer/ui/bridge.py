@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The Python <-> QML bridge: a ``ConsoleBridge`` QObject exposed to QML.
 
 This is the controller for the redesigned UI — the Qt successor to the old

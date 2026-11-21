@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """
 DocSummarizer - Offline Document Summarization Tool
 Main entry point.

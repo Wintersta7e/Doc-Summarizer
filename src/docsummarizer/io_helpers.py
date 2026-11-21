@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 I/O helpers shared between the GUI and CLI.
 

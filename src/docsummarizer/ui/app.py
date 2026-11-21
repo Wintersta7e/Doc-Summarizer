@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Qt/QML application entry point.
 
 Boots a ``QQmlApplicationEngine``, wires the ``ConsoleBridge`` in as the ``bridge``

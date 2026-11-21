@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Model Manager Module
 Handles downloading, loading, and running the local LLM.

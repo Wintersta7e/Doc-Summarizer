@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Render a DocSummarizer QML screen to a PNG, offscreen — visual QA without a display.
 
 Lets us *see* the Qt/QML UI (and compare it to the design screenshots) without a

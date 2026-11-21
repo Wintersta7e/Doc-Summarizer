@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Provenance: locate the source sentence a summary point came from.
 
 Pure, dependency-free (stdlib only) so it is fully unit-testable without the

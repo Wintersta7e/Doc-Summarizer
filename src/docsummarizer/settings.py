@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Persisted user settings (CPU threads, GPU offload, appearance, language).
 
 A tiny JSON file under the app-data ``config`` dir. Everything is

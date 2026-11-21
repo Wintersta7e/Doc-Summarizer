@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Qt/QML user interface for DocSummarizer (the "Abstract Console" redesign).
 
 `app.py` boots a `QQmlApplicationEngine`, `bridge.py` exposes the backend to

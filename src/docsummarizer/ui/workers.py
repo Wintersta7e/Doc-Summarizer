@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Background workers for the Qt UI.
 
 Long operations (model load, download, summarize, batch) run on a

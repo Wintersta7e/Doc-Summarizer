@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Platform-specific application data paths.
 
 Resolves the per-user app-data directory for DocSummarizer on each
