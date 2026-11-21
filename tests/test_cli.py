@@ -8,8 +8,17 @@ model and touches the filesystem); the testable logic is factored into
 
 from __future__ import annotations
 
-from docsummarizer.cli import _build_parser, _resolve_language, _resolve_runtime
+import argparse
+
+from docsummarizer.cli import CliArgs, _build_parser, _resolve_language, _resolve_runtime
 from docsummarizer.settings import Settings
+
+
+def test_cli_args_defaults_match_the_parser() -> None:
+    """The typed namespace's class defaults are the parser's own, flag for flag."""
+    parsed = vars(_build_parser().parse_args([], namespace=argparse.Namespace()))
+    declared = {name: getattr(CliArgs, name) for name in CliArgs.__annotations__}
+    assert declared == parsed
 
 
 def test_parser_defaults() -> None:
