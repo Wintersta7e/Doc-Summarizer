@@ -36,6 +36,12 @@ MEASURED_BYTES = {
 }
 _DEFAULT_TIMEOUT_S = 120
 _TAIL_LINES = 20
+# Offscreen Qt reads fonts from a folder; a frozen Windows build ships none
+# (PySide6/lib/fonts), so Qt warns and the smoke test fails on the warning.
+# The native platform uses the system's fonts and needs nothing.
+_FONTS_DIR = (
+    Path(__file__).resolve().parents[1] / "src" / "docsummarizer" / "ui" / "qml" / "App" / "fonts"
+)
 
 
 def size_problems(size: int, platform: str) -> list[str]:
@@ -70,7 +76,12 @@ def smoke_problems(command: list[str], timeout_s: float) -> list[str]:
     Returns:
         One entry per problem; empty when the smoke run passed.
     """
-    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software"}
+    env = {
+        **os.environ,
+        "QT_QPA_PLATFORM": "offscreen",
+        "QT_QUICK_BACKEND": "software",
+        "QT_QPA_FONTDIR": str(_FONTS_DIR),
+    }
     with tempfile.TemporaryDirectory(prefix="check-binary-") as tmp:
         result = Path(tmp) / "smoke-result.txt"
         args = [*command, "--smoke-test", "--smoke-result", str(result)]
