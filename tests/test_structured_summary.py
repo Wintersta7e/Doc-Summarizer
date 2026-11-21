@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for structured, source-grounded summaries.
 
 `Summarizer.summarize_structured` returns discrete points, each grounded in a

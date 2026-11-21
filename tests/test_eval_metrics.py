@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for ``scripts/eval/metrics.py``: units, the language classifier and scoring.
 
 Fixtures are short project-written texts about a village bakery and a river

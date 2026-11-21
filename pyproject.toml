@@ -171,8 +171,19 @@ extend-ignore-names = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# pytest's assert is the test mechanism.
-"tests/**" = ["S101"]
+"tests/**" = [
+    # pytest's assert is the test mechanism.
+    "S101",
+    # 189 hits: a test's name states the behaviour it checks; a docstring that
+    # repeats it adds nothing.
+    "D103",
+    # 99 hits: an assert compares against the literal the behaviour must
+    # produce; a named constant would only restate the expected value.
+    "PLR2004",
+    # 101 hits: tests print the evidence they measured (files scanned, counts
+    # seen); pytest captures it and shows it beside a failure.
+    "T201",
+]
 # Standard output is the interface of the CLI and of the dev scripts.
 "src/docsummarizer/cli.py" = ["T201"]
 "scripts/**" = ["T201"]

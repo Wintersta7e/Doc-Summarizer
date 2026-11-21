@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Published claims the repo must keep true.
 
 Each test reads tracked files as they stand in the working tree, prints what it
@@ -10,8 +11,11 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SELF = Path(__file__).resolve().relative_to(_ROOT).as_posix()

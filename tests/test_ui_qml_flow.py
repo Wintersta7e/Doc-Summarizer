@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Behavioural QML tests through the production engine (``create_engine`` + ``Main.qml``).
 
 Runs offscreen (conftest). Each test drives the real bridge and the real screens;
@@ -8,8 +9,8 @@ from __future__ import annotations
 
 import http.server
 import threading
-from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import shiboken6
@@ -30,6 +31,9 @@ from PySide6.QtQuick import QQuickItem, QQuickWindow
 from docsummarizer.model_manager import StructuredSummary, SummaryPoint
 from docsummarizer.ui.app import create_engine
 from docsummarizer.ui.bridge import ConsoleBridge, summary_to_variant
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 _APP_QML = Path(__file__).resolve().parents[1] / "src" / "docsummarizer" / "ui" / "qml" / "App"
 

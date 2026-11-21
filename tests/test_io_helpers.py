@@ -1,12 +1,16 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.io_helpers`."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from docsummarizer.io_helpers import summary_txt, write_summary_txt, write_text
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_write_summary_txt_minimal(tmp_path: Path) -> None:

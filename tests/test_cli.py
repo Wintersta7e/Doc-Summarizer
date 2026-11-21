@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for the CLI argument parser and runtime resolution.
 
 These cover the new ``--gpu`` / ``--threads`` flags and the rule that explicit

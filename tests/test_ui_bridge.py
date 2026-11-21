@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for the Qt <-> QML bridge controller (headless / offscreen).
 
 The bridge runs long ops on a thread pool in production; tests use its
@@ -7,7 +8,7 @@ summarizer stands in for the llama-cpp-backed one.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pytest
 from PySide6.QtGui import QGuiApplication
@@ -24,6 +25,9 @@ from docsummarizer.provenance import SourceSpan
 from docsummarizer.settings import load_settings
 from docsummarizer.ui import bridge as bridge_mod
 from docsummarizer.ui.bridge import ConsoleBridge, _quant_label, summary_to_variant
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture(scope="session")

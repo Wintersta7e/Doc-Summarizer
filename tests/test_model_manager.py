@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.model_manager`.
 
 Path resolution, model existence checks, and the tqdm progress wrapper are

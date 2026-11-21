@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for the persisted `appearance` (theme) setting.
 
 Appearance was previously not persisted (reset to "System" every launch). The

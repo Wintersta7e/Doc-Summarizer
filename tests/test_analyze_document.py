@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `document_parser.analyze_document` — the metadata strip data.
 
 The Summary/Extract screens show "N PAGES · N WORDS · N CHARS · ENC · parser".
@@ -7,10 +8,13 @@ encoding is plain-text-only, words/chars come from the extracted text.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from docsummarizer import document_parser
 from docsummarizer.document_parser import analyze_document
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_txt_stats_from_real_file(tmp_path: Path) -> None:

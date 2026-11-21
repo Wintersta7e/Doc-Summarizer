@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.paths.app_data_dir`.
 
 Platform-branch coverage lives here (rather than scattered across the
@@ -7,11 +8,14 @@ logger/model_manager tests) since both modules now delegate to
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
+from typing import TYPE_CHECKING
 
 from docsummarizer import paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 
 def test_app_data_dir_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

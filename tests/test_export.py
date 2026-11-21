@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for publishing summary files: temp file, create-if-absent, path identity.
 
 Every summary write renders into a temp file beside its target and hands it to
@@ -16,14 +17,16 @@ import socket
 import stat
 import sys
 import threading
-from collections.abc import Callable, Iterator
-from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
 from docsummarizer import cli, io_helpers
 from docsummarizer.io_helpers import publish, same_file, write_summary_txt
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
 
 SENTINEL = b"a file the user wrote\n"
 

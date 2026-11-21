@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for the evaluation runner under ``scripts/eval``.
 
 Everything here runs without a model: the case matrix, its budgets and the

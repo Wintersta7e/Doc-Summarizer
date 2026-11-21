@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.provenance` — sentence splitting + quote location.
 
 Pure functions, no model: given a source string and a (model-emitted) quote,

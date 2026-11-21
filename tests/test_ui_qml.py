@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Headless QML smoke test: every component must compile AND instantiate.
 
 Runs under the offscreen platform (set in conftest). ``status == Ready`` means

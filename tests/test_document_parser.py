@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.document_parser`."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -12,6 +13,9 @@ from docsummarizer.document_parser import (
     find_documents,
     get_document_info,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_extract_unsupported_extension(tmp_path: Path) -> None:

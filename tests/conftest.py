@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Shared pytest fixtures.
 
 The big concern is that the production code derives its log/model
@@ -11,9 +12,12 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Skip the Qt UI tests where PySide6 isn't installed (keeps a minimal env green).
 try:

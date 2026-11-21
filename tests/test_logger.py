@@ -1,13 +1,17 @@
+# SPDX-License-Identifier: MIT
 """Tests for `docsummarizer.logger`."""
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from docsummarizer import logger as logger_module
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_get_log_directory_lands_under_isolated_tmp(tmp_path: Path) -> None:
