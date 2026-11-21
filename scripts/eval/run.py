@@ -28,7 +28,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, TYPE_CHECKING, Any, Literal
 
@@ -1211,7 +1211,7 @@ def _run_tier(args: argparse.Namespace) -> int:
     git = git_state(_REPO)
     package = _REPO / "src" / _PACKAGE
     gated = derive_gated(package)
-    start = datetime.now(timezone.utc)
+    start = datetime.now(UTC)
     final = results_path(args.eval_dir, args.tier, (git.commit or "unknown")[:12], start)
     final.parent.mkdir(parents=True, exist_ok=True)
     partial = final.with_name(final.name + ".partial")
@@ -1261,7 +1261,7 @@ def _run_tier(args: argparse.Namespace) -> int:
         "not_split": not_split,
         "machine_id": machine_id(),
         "utc_start": start.isoformat(),
-        "utc_end": datetime.now(timezone.utc).isoformat(),
+        "utc_end": datetime.now(UTC).isoformat(),
         "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
         "contention": [
             {"run": line["run"], "case": line["case"], **line["contention"]} for line in lines
@@ -1614,7 +1614,7 @@ def rescore(eval_dir: Path, source: Path) -> int:
 
     header = _rescore_header(source, results.header)
     commit = header["scored_by"]["commit"] or "unknown"
-    plain = results_path(eval_dir, str(header["tier"]), commit[:12], datetime.now(timezone.utc))
+    plain = results_path(eval_dir, str(header["tier"]), commit[:12], datetime.now(UTC))
     final = plain.with_name(f"{plain.stem}-rescore.jsonl")
     final.parent.mkdir(parents=True, exist_ok=True)
     with final.open("x", encoding="utf-8") as out:
