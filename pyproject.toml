@@ -243,6 +243,82 @@ root = "tests"
 reportPrivateUsage = false
 
 # --------------------------------------------------------------------------- #
+# import-linter: the package's layers, from its real import graph
+# (ui | cli -> settings -> model_manager -> parsing/provenance/io -> logger
+# -> paths). PySide6 is an external package, so it must be in the graph.
+# --------------------------------------------------------------------------- #
+[tool.importlinter]
+root_packages = ["docsummarizer"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Front ends above settings, above the summarizer, above parsing, above logging"
+type = "layers"
+containers = ["docsummarizer"]
+exhaustive = true
+# settings validates the saved output language through the summarizer's
+# normalize_language, so it sits above model_manager.
+layers = [
+    "ui | cli",
+    "settings",
+    "model_manager",
+    "document_parser | provenance | io_helpers",
+    "logger",
+    "paths",
+]
+
+[[tool.importlinter.contracts]]
+name = "The core never imports a front end or Qt"
+type = "forbidden"
+source_modules = [
+    "docsummarizer.document_parser",
+    "docsummarizer.io_helpers",
+    "docsummarizer.logger",
+    "docsummarizer.model_manager",
+    "docsummarizer.paths",
+    "docsummarizer.provenance",
+    "docsummarizer.settings",
+]
+forbidden_modules = ["docsummarizer.ui", "docsummarizer.cli", "PySide6"]
+
+[[tool.importlinter.contracts]]
+name = "The GUI and the CLI are independent"
+type = "independence"
+modules = ["docsummarizer.ui", "docsummarizer.cli"]
+
+[[tool.importlinter.contracts]]
+name = "No import cycle between sibling modules"
+type = "acyclic_siblings"
+ancestors = ["docsummarizer"]
+
+# --------------------------------------------------------------------------- #
+# deptry: every import declared, every declared dependency used
+# --------------------------------------------------------------------------- #
+[tool.deptry]
+# scripts/ is on the path of the scripts and the tests, so check.py and the
+# eval package import as top-level `check` and `eval`.
+known_first_party = ["docsummarizer", "check", "eval"]
+# The gate tools in the dev extra are run, never imported.
+optional_dependencies_dev_groups = ["dev"]
+
+[tool.deptry.package_module_name_map]
+llama-cpp-python = "llama_cpp"
+
+[tool.deptry.per_rule_ignores]
+# 1 hit: model_manager loads llama_cpp through importlib.import_module, so the
+# type checker reads its protocol instead of the uninstalled package; deptry
+# cannot see a by-name import.
+DEP002 = ["llama-cpp-python"]
+
+# --------------------------------------------------------------------------- #
+# vulture: dead code. At 80 it reports unused imports, variables and
+# unreachable code; the Qt slots and properties QML calls score 60, below it.
+# --------------------------------------------------------------------------- #
+[tool.vulture]
+paths = ["src", "run.py", "scripts", "tests"]
+min_confidence = 80
+
+# --------------------------------------------------------------------------- #
 # pytest + coverage
 # --------------------------------------------------------------------------- #
 [tool.pytest]

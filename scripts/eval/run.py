@@ -26,11 +26,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, TYPE_CHECKING, Literal, Protocol, TypedDict, cast, overload
+
+from typing_extensions import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
@@ -746,7 +749,45 @@ def _jsonable(value: object) -> object:
     return value
 
 
-class CapturingLlama:
+class _ChatModel(ABC):
+    """A stand-in for the model's overloaded ``create_chat_completion``.
+
+    The overloads the pipeline's protocol needs are declared once here; each
+    stand-in answers the call in ``_complete``.
+    """
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[False] = False,
+        **kwargs: object,
+    ) -> CreateChatCompletionResponse: ...
+
+    @overload
+    def create_chat_completion(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        stream: Literal[True],
+        **kwargs: object,
+    ) -> Iterator[CreateChatCompletionStreamResponse]: ...
+
+    def create_chat_completion(
+        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Answer the completion through ``_complete``."""
+        return self._complete(messages, stream=stream, kwargs=kwargs)
+
+    @abstractmethod
+    def _complete(
+        self, messages: Sequence[Mapping[str, str]], *, stream: bool, kwargs: dict[str, object]
+    ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
+        """Answer one completion: ``create_chat_completion``'s arguments, keywords as a dict."""
+
+
+class CapturingLlama(_ChatModel):
     """Wraps the model and records every completion and every tokenize length.
 
     Every other attribute is the wrapped model's, so the pipeline sees the
@@ -770,26 +811,9 @@ class CapturingLlama:
             return None
         return {name: getattr(after, name) - getattr(before, name) for name in _PERF_FIELDS}
 
-    @overload
-    def create_chat_completion(
-        self,
-        *,
-        messages: Sequence[Mapping[str, str]],
-        stream: Literal[False] = False,
-        **kwargs: object,
-    ) -> CreateChatCompletionResponse: ...
-
-    @overload
-    def create_chat_completion(
-        self,
-        *,
-        messages: Sequence[Mapping[str, str]],
-        stream: Literal[True],
-        **kwargs: object,
-    ) -> Iterator[CreateChatCompletionStreamResponse]: ...
-
-    def create_chat_completion(
-        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    @override
+    def _complete(
+        self, messages: Sequence[Mapping[str, str]], *, stream: bool, kwargs: dict[str, object]
     ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         """Forward the completion to the model and record the request and its answer."""
         before = self._snapshot()
@@ -1712,7 +1736,7 @@ def _normalized(value: object) -> object:
     return cast("object", json.loads(json.dumps(value)))
 
 
-class ReplayLlama:
+class ReplayLlama(_ChatModel):
     """Answers each completion with the stored one, once the request matches it.
 
     It has no ``ctx``, so the pipeline reads no counters and installs no abort
@@ -1732,26 +1756,9 @@ class ReplayLlama:
             self.mismatch = ReplayMismatchError(self.consumed, field)
         return self.mismatch
 
-    @overload
-    def create_chat_completion(
-        self,
-        *,
-        messages: Sequence[Mapping[str, str]],
-        stream: Literal[False] = False,
-        **kwargs: object,
-    ) -> CreateChatCompletionResponse: ...
-
-    @overload
-    def create_chat_completion(
-        self,
-        *,
-        messages: Sequence[Mapping[str, str]],
-        stream: Literal[True],
-        **kwargs: object,
-    ) -> Iterator[CreateChatCompletionStreamResponse]: ...
-
-    def create_chat_completion(
-        self, *, messages: Sequence[Mapping[str, str]], stream: bool = False, **kwargs: object
+    @override
+    def _complete(
+        self, messages: Sequence[Mapping[str, str]], *, stream: bool, kwargs: dict[str, object]
     ) -> CreateChatCompletionResponse | Iterator[CreateChatCompletionStreamResponse]:
         """Return the stored answer when the request matches the stored one, else refuse.
 
