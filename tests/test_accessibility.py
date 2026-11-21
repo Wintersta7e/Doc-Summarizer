@@ -6,7 +6,9 @@ with accessibility switched on so the controls publish what a screen reader
 reads. A control is a button, text field, combo box, slider or spin box, or a
 ``MouseArea`` with a click handler. Each one visible has a name and a role;
 each one also enabled is reached by pressing Tab from the first item that
-takes focus. The colour check reads the ``Theme`` singleton and holds each
+takes focus, and a disabled one is not. Each Tab stop shows a focus indicator:
+pixels around it that change by 3:1 or more as it takes focus, at least as
+many as a one-pixel line all round it. The colour check reads the ``Theme`` singleton and holds each
 text colour to WCAG AA (4.5:1) on every surface the screens draw, and each
 control part (the focus ring) to 3:1, and each text drawn on an accent fill
 to the ink made for it.
@@ -82,6 +84,8 @@ _ON_ACCENT = (("inkOnAccent", "accent"), ("inkOnAccent", "accentDeep"))
 _CONTROL_PART_TOKENS = ("accent",)
 # Fills the inkOnAccent text colour is made for.
 _ACCENT_FILLS = ("accent", "accentDeep")
+# How far outside a control its focus indicator may be drawn, in pixels.
+_FOCUS_MARGIN = 4
 # Tab presses each way that would leave a one-control overlay if it let go.
 _TRAP_PRESSES = 3
 
@@ -224,10 +228,15 @@ def test_every_control_has_a_name_and_a_role(screen_view: QQuickView) -> None:
     assert unnamed == []
 
 
+def _enabled(item: QQuickItem) -> bool:
+    # A MouseArea's own `enabled` shadows the item's and does not reach isEnabled().
+    return item.isEnabled() and cast("bool", item.property("enabled"))
+
+
 def test_tab_reaches_every_enabled_control(screen_view: QQuickView) -> None:
     order = tab_order(screen_view)
     unreachable = [
-        _describe(item) for item in _controls(screen_view) if item.isEnabled() and item not in order
+        _describe(item) for item in _controls(screen_view) if _enabled(item) and item not in order
     ]
 
     _LOG.info("Tab order: %s", [_name(item) for item in order])
@@ -246,6 +255,68 @@ def test_a_focused_click_target_runs_its_action_from_the_keyboard(key: Qt.Key) -
 
         assert theme.property("dark") is False
         assert _name(toggle) == "Switch to the dark theme"
+
+
+@pytest.mark.usefixtures("qapp")
+def test_a_disabled_click_target_takes_no_tab_stop_and_ignores_keys() -> None:
+    with _loaded("config", "dark") as view:
+        bridge = cast("QObject", view.rootObject().property("bridge"))
+        # The test machine runs a CPU-only build, so the GPU switch is disabled.
+        gpu = _named(view, "GPU offload")
+        was_on = cast("bool", bridge.property("gpuEnabled"))
+        order = tab_order(view)
+        gpu.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+
+        press(view, Qt.Key.Key_Space)
+
+        assert gpu.property("enabled") is False
+        assert gpu not in order
+        assert bridge.property("gpuEnabled") is was_on
+
+
+def focus_indicator(view: QQuickWindow, control: QQuickItem) -> int:
+    """How many pixels around ``control`` change by 3:1 or more as Tab focuses it.
+
+    Returns:
+        The pixels, within a few of the control's bounds, whose colour with
+        ``control`` focused by Tab contrasts 3:1 or more with its colour while
+        nothing visible holds focus.
+    """
+    # Focus passes up to each enclosing focus scope as it is cleared.
+    root = view.contentItem()
+    for _ in range(_MAX_TABS):
+        # The stubs promise an item; a window with nothing focused has none.
+        focused = cast("QQuickItem | None", view.activeFocusItem())
+        if focused is None or focused == root:
+            break
+        focused.setFocus(False)
+    before = view.grabWindow()
+    control.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+    after = view.grabWindow()
+    bounds = control.mapRectToScene(control.boundingRect()).toAlignedRect()
+    margin = _FOCUS_MARGIN
+    area = bounds.adjusted(-margin, -margin, margin, margin).intersected(before.rect())
+    return sum(
+        1
+        for x, y in itertools.product(
+            range(area.left(), area.right() + 1), range(area.top(), area.bottom() + 1)
+        )
+        if contrast(before.pixelColor(x, y), after.pixelColor(x, y)) >= _AA_CONTROL_PART
+    )
+
+
+def test_every_tab_stop_shows_a_focus_indicator(screen_view: QQuickView) -> None:
+    order = tab_order(screen_view)
+    faint: list[str] = []
+    for item in order:
+        # A one-pixel line all round the control.
+        needed = round(2 * (item.width() + item.height()))
+        if (changed := focus_indicator(screen_view, item)) < needed:
+            faint.append(f"{_describe(item)}: {changed} of {needed} px")
+
+    _LOG.info("Tab stops: %s", [_name(item) for item in order])
+    assert order
+    assert faint == []
 
 
 def _theme(view: QQuickView) -> QObject:

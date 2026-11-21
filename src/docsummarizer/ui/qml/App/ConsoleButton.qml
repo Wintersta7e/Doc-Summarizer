@@ -44,6 +44,11 @@ Button {
                 }
             }
         }
+
+        FocusRing {
+            visible: ctrl.visualFocus
+            onAccent: ctrl.primary
+        }
     }
     contentItem: Text {
         text: ctrl.text

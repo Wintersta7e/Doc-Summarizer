@@ -214,6 +214,11 @@ Item {
                     color: action.enabled ? Theme.accent : Theme.block
                     border.width: 1
                     border.color: action.enabled ? Theme.accentDeep : Theme.line2
+
+                    FocusRing {
+                        visible: action.visualFocus
+                        onAccent: action.enabled
+                    }
                 }
             }
         }

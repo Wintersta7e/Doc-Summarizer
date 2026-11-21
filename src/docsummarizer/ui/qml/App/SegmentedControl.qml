@@ -34,6 +34,7 @@ Row {
             ClickArea {
                 anchors.fill: parent
                 name: caption.text
+                onAccent: segment.modelData === seg.current
                 Accessible.role: Accessible.RadioButton
                 Accessible.checkable: true
                 Accessible.checked: segment.modelData === seg.current

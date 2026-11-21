@@ -218,6 +218,7 @@ Item {
                                     anchors.fill: parent
                                     enabled: screen.bridge.gpuSupported
                                     name: "GPU offload"
+                                    onAccent: screen.bridge.gpuEnabled
                                     Accessible.role: Accessible.CheckBox
                                     Accessible.checkable: true
                                     Accessible.checked: screen.bridge.gpuEnabled
@@ -252,6 +253,10 @@ Item {
                                 stepSize: 1
                                 value: screen.bridge.threads
                                 onMoved: screen.bridge.setThreads(Math.round(value))
+
+                                FocusRing {
+                                    visible: threadSlider.visualFocus
+                                }
                             }
                             Text {
                                 text: Math.round(threadSlider.value) + " / " + screen.bridge.cpuCount
