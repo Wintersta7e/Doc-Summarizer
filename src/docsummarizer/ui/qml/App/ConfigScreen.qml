@@ -207,18 +207,21 @@ Item {
                                     radius: 10
                                     y: 3
                                     x: screen.bridge.gpuEnabled ? gpuPill.width - width - 3 : 3
-                                    color: screen.bridge.gpuEnabled ? Theme.onAccent : Theme.navOff
+                                    color: screen.bridge.gpuEnabled ? Theme.inkOnAccent : Theme.navOff
                                     Behavior on x {
                                         NumberAnimation {
                                             duration: 140
                                         }
                                     }
                                 }
-                                MouseArea {
+                                ClickArea {
                                     anchors.fill: parent
                                     enabled: screen.bridge.gpuSupported
-                                    cursorShape: screen.bridge.gpuSupported ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: screen.bridge.toggleGpu()
+                                    name: "GPU offload"
+                                    Accessible.role: Accessible.CheckBox
+                                    Accessible.checkable: true
+                                    Accessible.checked: screen.bridge.gpuEnabled
+                                    onActivated: screen.bridge.toggleGpu()
                                 }
                             }
                         }
@@ -243,6 +246,7 @@ Item {
                             Slider {
                                 id: threadSlider
                                 Layout.fillWidth: true
+                                Accessible.name: "CPU threads"
                                 from: 2
                                 to: screen.bridge.cpuCount
                                 stepSize: 1
@@ -355,6 +359,7 @@ Item {
                         ComboBox {
                             id: languageBox
                             Layout.preferredWidth: 280
+                            Accessible.name: "Summary language"
                             // "auto" is the stored value; only its label is dressed up.
                             readonly property var labels: screen.bridge.outputLanguages.map(function (name) {
                                 return name === "auto" ? "Auto — match the document" : name;

@@ -35,6 +35,7 @@ if importlib.util.find_spec("PySide6") is None:
         "test_qml_screens.py",
         "test_e2e_flow.py",
         "test_smoke.py",
+        "test_accessibility.py",
     ]
 
 # Qt UI tests run headless: offscreen platform + software Qt Quick backend so no

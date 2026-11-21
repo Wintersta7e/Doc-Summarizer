@@ -36,33 +36,34 @@ QtObject {
     readonly property color line2: dark ? Qt.rgba(0.435, 0.765, 0.847, 0.13) : Qt.rgba(0.157, 0.314, 0.392, 0.18)
     readonly property color ring: dark ? Qt.rgba(0.435, 0.765, 0.847, 0.14) : Qt.rgba(0.157, 0.314, 0.392, 0.18)
 
-    // Text
+    // Text. Every text colour, and the accent, reads at 4.5:1 or more (WCAG AA)
+    // on every surface above; tests/test_accessibility.py holds them to it.
     readonly property color ink: dark ? "#eef5f6" : "#16242c"
     readonly property color inkSoft: dark ? "#dfecef" : "#26343d"
     readonly property color text: dark ? "#92a4ae" : "#52626c"
-    readonly property color label: dark ? "#7b94a0" : "#586a74"
-    readonly property color label2: dark ? "#9ad6e6" : "#1f8aa6"
-    readonly property color faint: dark ? "#566c76" : "#728791"
-    readonly property color dim: dark ? "#46606c" : "#9aadb7"
+    readonly property color label: dark ? "#7b94a0" : "#51626b"
+    readonly property color label2: dark ? "#9ad6e6" : "#17687d"
+    readonly property color faint: dark ? "#7d95a0" : "#526269"
+    readonly property color dim: dark ? "#7596a6" : "#4e626d"
 
     // Accents
-    readonly property color accent: dark ? "#6fc3d8" : "#1f8aa6"
-    readonly property color accent2: dark ? "#9ad6e6" : "#2aa6c4"
-    readonly property color accentDeep: dark ? "#56a9be" : "#18748c"
-    readonly property color onAccent: dark ? "#06222a" : "#ffffff"
-    readonly property color brass: dark ? "#d8bd86" : "#8c6f33"
+    readonly property color accent: dark ? "#6fc3d8" : "#17687d"
+    readonly property color accent2: dark ? "#9ad6e6" : "#1a687a"
+    readonly property color accentDeep: dark ? "#56a9be" : "#105566"
+    readonly property color inkOnAccent: dark ? "#06222a" : "#ffffff"
+    readonly property color brass: dark ? "#d8bd86" : "#745c2a"
     readonly property color brassDot: dark ? "#c7a96b" : "#b08d45"
     readonly property color brassRing: dark ? Qt.rgba(0.78, 0.66, 0.42, 0.32) : Qt.rgba(0.59, 0.47, 0.22, 0.36)
 
     // Status colors (keyed by ConsoleBridge.statusColor: ok|warn|error)
     readonly property color statusOk: accent
     readonly property color statusWarn: brass
-    readonly property color statusError: dark ? "#e0726a" : "#c0392b"
+    readonly property color statusError: dark ? "#e0726a" : "#af3427"
 
     // Nav rail
     readonly property color navOnBg: dark ? Qt.rgba(0.435, 0.765, 0.847, 0.10) : Qt.rgba(0.122, 0.541, 0.651, 0.10)
     readonly property color navOnRing: dark ? Qt.rgba(0.435, 0.765, 0.847, 0.34) : Qt.rgba(0.122, 0.541, 0.651, 0.34)
-    readonly property color navOff: dark ? "#6c828c" : "#5e7682"
+    readonly property color navOff: dark ? "#81959e" : "#4f636d"
 
     // Type families. Vendored woff/ttf are bundled in Phase 4; until then these
     // resolve to the nearest installed face (Qt falls back gracefully).

@@ -23,17 +23,21 @@ Row {
             border.width: 1
             border.color: Theme.line2
             Text {
+                id: caption
                 anchors.centerIn: parent
                 text: String(segment.modelData).charAt(0).toUpperCase() + String(segment.modelData).slice(1)
-                color: segment.modelData === seg.current ? Theme.onAccent : Theme.navOff
+                color: segment.modelData === seg.current ? Theme.inkOnAccent : Theme.navOff
                 font.family: Theme.ui
                 font.pixelSize: 11
                 font.letterSpacing: 0.6
             }
-            MouseArea {
+            ClickArea {
                 anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: seg.selected(segment.modelData)
+                name: caption.text
+                Accessible.role: Accessible.RadioButton
+                Accessible.checkable: true
+                Accessible.checked: segment.modelData === seg.current
+                onActivated: seg.selected(segment.modelData)
             }
         }
     }

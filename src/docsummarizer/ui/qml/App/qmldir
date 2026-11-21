@@ -6,6 +6,7 @@ Rail 1.0 Rail.qml
 SegmentedControl 1.0 SegmentedControl.qml
 Hex 1.0 Hex.qml
 ConsoleButton 1.0 ConsoleButton.qml
+ClickArea 1.0 ClickArea.qml
 SectionLabel 1.0 SectionLabel.qml
 Toast 1.0 Toast.qml
 StatusChip 1.0 StatusChip.qml

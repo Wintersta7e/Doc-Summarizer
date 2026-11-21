@@ -60,7 +60,7 @@ Rectangle {
                 anchors.rightMargin: 9
                 anchors.bottomMargin: 6
                 text: "01"
-                color: Theme.onAccent
+                color: Theme.inkOnAccent
                 font.family: Theme.mono
                 font.pixelSize: 9
                 font.letterSpacing: 1
@@ -89,10 +89,12 @@ Rectangle {
                     font.weight: Font.Medium
                     font.letterSpacing: 0.4
                 }
-                MouseArea {
+                ClickArea {
                     anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: rail.navigate(navItem.modelData.name)
+                    name: navItem.modelData.label
+                    Accessible.role: Accessible.PageTab
+                    Accessible.selected: navItem.modelData.name === rail.currentScreen
+                    onActivated: rail.navigate(navItem.modelData.name)
                 }
             }
         }

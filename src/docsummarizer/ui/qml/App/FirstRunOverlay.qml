@@ -177,7 +177,7 @@ Item {
 
                 contentItem: Text {
                     text: action.text
-                    color: action.enabled ? Theme.onAccent : Theme.dim
+                    color: action.enabled ? Theme.inkOnAccent : Theme.dim
                     font.family: Theme.ui
                     font.pixelSize: 13
                     font.letterSpacing: 0.8
