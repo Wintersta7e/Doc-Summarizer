@@ -87,13 +87,15 @@ def summarize_file(
     filepath: str,
     summarizer: Summarizer,
     target: Path | None = None,
-    options: RunOptions = RunOptions(),
+    options: RunOptions | None = None,
 ) -> Outcome:
     """Summarize a single file into `target`, or to the console without one.
 
     With `options.replace` false an output that appeared since the run checked it is
     kept and the input counts as skipped.
     """
+    if options is None:
+        options = RunOptions()
     info = get_document_info(filepath)
     print(f"Processing: {info['name']} ({info['size_mb']} MB)")
 
@@ -138,6 +140,19 @@ def summarize_file(
     return "written"
 
 
+class CliArgs(argparse.Namespace):
+    """The parsed command line, one typed attribute per flag; defaults match the parser's."""
+
+    input: str | None = None
+    type: str = SUMMARY_TYPE_DETAILED
+    output: str | None = None
+    language: str | None = None
+    gpu: bool | None = None
+    threads: int | None = None
+    overwrite: bool = False
+    download_only: bool = False
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser (split out so it can be unit-tested)."""
     parser = argparse.ArgumentParser(
@@ -154,24 +169,24 @@ Examples:
         """,
     )
 
-    parser.add_argument(
+    _ = parser.add_argument(
         "input",
         nargs="?",
         help="Input file or directory to process",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "-t",
         "--type",
         choices=list(SUMMARY_TYPES),
         default=SUMMARY_TYPE_DETAILED,
         help=f"Summary type (default: {SUMMARY_TYPE_DETAILED})",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "-o", "--output", help="Output file or directory (default: print to console)"
     )
     # Free-form rather than `choices=`: the model handles far more languages
     # than the list the GUI offers, so any name is passed straight through.
-    parser.add_argument(
+    _ = parser.add_argument(
         "-l",
         "--language",
         default=None,
@@ -179,40 +194,40 @@ Examples:
         help=f"Language to write the summary in, e.g. {', '.join(OUTPUT_LANGUAGES[1:5])}. "
         f"'{LANGUAGE_AUTO}' matches the document. Overrides the saved setting.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--gpu",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Offload the model to the GPU (--no-gpu forces CPU). "
         "Overrides the saved setting for this run.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--threads",
         type=int,
         default=None,
         metavar="N",
         help="CPU threads for inference (overrides the saved setting).",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace summaries that already exist in the output folder "
         "(folder runs; by default they are skipped)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--download-only", action="store_true", help="Only download the model, do not process files"
     )
     return parser
 
 
-def _resolve_runtime(args: argparse.Namespace, settings: Settings) -> tuple[int | None, int]:
+def _resolve_runtime(args: CliArgs, settings: Settings) -> tuple[int | None, int]:
     """Resolve ``(n_threads, n_gpu_layers)`` — CLI flags override saved settings."""
     use_gpu = settings.use_gpu if args.gpu is None else args.gpu
     n_threads = settings.n_threads if args.threads is None else args.threads
     return n_threads, (-1 if use_gpu else 0)
 
 
-def _resolve_language(args: argparse.Namespace, settings: Settings) -> str:
+def _resolve_language(args: CliArgs, settings: Settings) -> str:
     """Resolve the output language — the ``--language`` flag beats the setting."""
     return normalize_language(settings.output_language if args.language is None else args.language)
 
@@ -264,7 +279,7 @@ def _resolve_targets(
 
 
 def _plan_run(
-    args: argparse.Namespace, input_path: Path, files: list[Path]
+    args: CliArgs, input_path: Path, files: list[Path]
 ) -> tuple[list[PlannedInput], bool]:
     """Resolve every output before the model loads; returns the plan and `replace`.
 
@@ -298,7 +313,7 @@ def _run_plan(
 def main() -> None:
     """Run the command line interface; exits non-zero on a usage or setup error."""
     parser = _build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=CliArgs())
 
     if not ensure_model():
         sys.exit(1)
