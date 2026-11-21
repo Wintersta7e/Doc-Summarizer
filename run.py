@@ -37,4 +37,4 @@ except ImportError:
 
 
 if __name__ == "__main__":
-    _ = main()
+    sys.exit(main())

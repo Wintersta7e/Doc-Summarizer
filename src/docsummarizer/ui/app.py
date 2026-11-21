@@ -4,33 +4,53 @@
 Boots a ``QQmlApplicationEngine``, wires the ``ConsoleBridge`` in as the ``bridge``
 context object, and loads ``App/Main.qml``. Run with ``python -m docsummarizer.ui.app``
 (a console entry point replaces ``run.py`` when the CustomTkinter GUI is retired).
+``--smoke-test`` starts everything but the model, prints
+``DocSummarizer <version> smoke ok`` and exits 0, or names what failed and exits 1.
 """
 
 from __future__ import annotations
 
 import contextlib
+import importlib
 import sys
 import threading
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, final
 
-from PySide6.QtCore import QIODevice, QObject, QUrl
+from PySide6.QtCore import (
+    QEventLoop,
+    QIODevice,
+    QMessageLogContext,
+    QObject,
+    QTimer,
+    QtMsgType,
+    QUrl,
+    qInstallMessageHandler,
+)
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtQml import QQmlApplicationEngine, QQmlNetworkAccessManagerFactory
 from typing_extensions import override
 
-from docsummarizer.logger import log_error, log_startup
+from docsummarizer import __version__
+from docsummarizer.logger import get_logger, log_error, log_info, log_startup
+from docsummarizer.settings import load_settings, save_settings, settings_path
 from docsummarizer.ui.bridge import ConsoleBridge
 from docsummarizer.ui.fonts import register_fonts
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from types import TracebackType
 
 _QML_DIR = Path(__file__).parent / "qml"
 _MAIN_QML = _QML_DIR / "App" / "Main.qml"
 _LOCAL_SCHEMES = frozenset({"file", "qrc"})
+SMOKE_TEST_FLAG = "--smoke-test"
+# How long the smoke run lets the window run before teardown: long enough for
+# its first bindings, timers and animations to fire.
+_SMOKE_SETTLE_MS = 250
+_QT_PROBLEMS = (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg)
 
 
 @final
@@ -151,12 +171,117 @@ def _install_excepthook(bridge: ConsoleBridge) -> None:
     sys.excepthook = hook
 
 
-def main() -> int:
-    """Launch the DocSummarizer console UI."""
-    log_startup()
-    app = QGuiApplication(sys.argv)
+class SmokeTestError(RuntimeError):
+    """A part of the application the smoke run checks did not start."""
+
+
+def _spin(ms: int) -> None:
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    _ = loop.exec()
+
+
+def _import_model_runtime() -> bool:
+    """Import ``llama_cpp`` when the runtime extra is installed, without loading a model.
+
+    Returns:
+        Whether the runtime is installed. A runtime that is installed but fails
+        to import (a missing shared library) raises.
+    """
+    try:
+        _ = importlib.import_module("llama_cpp")
+    except ModuleNotFoundError as exc:
+        if exc.name != "llama_cpp":
+            raise
+        return False
+    return True
+
+
+def _smoke_steps(app: QGuiApplication) -> None:
+    """Start every part of the application but the model; raise on the first that fails.
+
+    The settings file is read and written back with the values read.
+    """
+    if not register_fonts():
+        msg = "no bundled fonts registered"
+        raise SmokeTestError(msg)
+    # Main.qml instantiates every screen, so a screen that fails to load fails here.
+    engine, bridge = create_engine(app)
+    try:
+        settings = load_settings()
+        save_settings(settings)
+        if not settings_path().is_file() or load_settings() != settings:
+            msg = f"settings did not round-trip through {settings_path()}"
+            raise SmokeTestError(msg)
+        runtime = _import_model_runtime()
+        log_info(f"Smoke test: model runtime {'imported' if runtime else 'not installed'}")
+        _spin(_SMOKE_SETTLE_MS)
+    finally:
+        # The window's bindings read the bridge: delete the engine first, also
+        # when a step failed and its traceback still holds this frame.
+        del engine
+        _spin(0)
+        bridge.shutdown()
+
+
+def smoke_test(app: QGuiApplication) -> int:
+    """Run the smoke steps; a failed step or any Qt warning on the way is a failure.
+
+    Returns:
+        0 after printing ``DocSummarizer <version> smoke ok``; 1 after writing
+        what failed to stderr.
+    """
+    problems: list[str] = []
+
+    def collect(mode: QtMsgType, context: QMessageLogContext, message: str) -> None:
+        if mode in _QT_PROBLEMS:
+            problems.append(f"{context.category}: {message}")
+
+    previous = qInstallMessageHandler(collect)
+    try:
+        _smoke_steps(app)
+    except Exception:  # every failure is the result: report it, exit 1
+        logger = get_logger()
+        logger.exception("Smoke test failed")
+        traceback.print_exc()
+        return 1
+    finally:
+        _ = qInstallMessageHandler(previous)
+    if problems:
+        log_error(f"Smoke test: {len(problems)} Qt warnings")
+        _ = sys.stderr.write("".join(f"{problem}\n" for problem in problems))
+        return 1
+    log_info("Smoke test passed")
+    _ = sys.stdout.write(f"DocSummarizer {__version__} smoke ok\n")
+    return 0
+
+
+def _application(args: list[str]) -> QGuiApplication:
+    """The process's Qt application: the one already running, or a new one."""
+    existing = QGuiApplication.instance()
+    if isinstance(existing, QGuiApplication):
+        return existing
+    app = QGuiApplication(args)
     app.setApplicationName("DocSummarizer")
     app.setOrganizationName("DocSummarizer")
+    return app
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Launch the DocSummarizer console UI, or with ``--smoke-test`` check that it starts.
+
+    Args:
+        argv: The command line, program name first; ``sys.argv`` when omitted.
+
+    Returns:
+        The process exit status.
+    """
+    args = list(sys.argv if argv is None else argv)
+    smoke = SMOKE_TEST_FLAG in args
+    log_startup()
+    app = _application([arg for arg in args if arg != SMOKE_TEST_FLAG])
+    if smoke:
+        return smoke_test(app)
     # Keep the engine referenced for the app's lifetime (GC would tear down the
     # window). bridge is owned by the engine's context but used here too.
     _engine, bridge = create_engine(app)

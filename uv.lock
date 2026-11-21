@@ -291,7 +291,6 @@ wheels = [
 
 [[package]]
 name = "docsummarizer"
-version = "2.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "chardet" },
@@ -351,7 +350,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12,<5" },
     { name = "vulture", marker = "extra == 'dev'", specifier = "==2.16" },
 ]
-provides-extras = ["runtime", "dev", "gui"]
+provides-extras = ["dev", "gui", "runtime"]
 
 [[package]]
 name = "filelock"

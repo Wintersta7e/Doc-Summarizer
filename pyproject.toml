@@ -4,7 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docsummarizer"
-version = "2.0.1"
+# From src/docsummarizer/__init__.py, [tool.hatch.version] below.
+dynamic = ["version"]
 description = "Offline document summarization powered by a local LLM"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -99,6 +100,9 @@ explicit = true
 [tool.uv.sources]
 llama-cpp-python = { index = "llama-cpp-cpu" }
 
+[tool.hatch.version]
+path = "src/docsummarizer/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/docsummarizer"]
 
@@ -192,6 +196,7 @@ extend-ignore-names = [
 "scripts/check.py" = ["S603"]  # 1 hit
 "tests/test_eval_runner.py" = ["S603"]  # 1 hit
 "tests/test_release_claims.py" = ["S603"]  # 1 hit
+"tests/test_smoke.py" = ["S603"]  # 1 hit
 "scripts/eval/run.py" = [
     "S603",  # 3 hits: fixed tool argv lists, never a shell
     # 24 hits: bootstrap() must pin sys.path and app data before any first-party
@@ -358,10 +363,6 @@ markers = ["windows: also run by the windows-latest CI job (Windows filesystem s
 [tool.coverage.run]
 source = ["docsummarizer"]
 branch = true
-# ui/app.py launches the Qt event loop and needs a display; its engine wiring
-# is covered by the QML load tests, its event loop only by the exe boot check.
-# It joins the gate once the application smoke run covers main().
-omit = ["*/ui/app.py"]
 
 [tool.coverage.report]
 show_missing = true
