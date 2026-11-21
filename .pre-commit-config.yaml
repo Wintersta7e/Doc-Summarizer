@@ -1,21 +1,66 @@
-# Local pre-commit hooks mirroring CI. Optional but recommended:
-#   pip install pre-commit && pre-commit install
-# CI remains the source of truth; these just catch issues before a commit.
+# Hooks that run the project's gate locally; CI runs the same scripts/check.py
+# steps. Install both hook types once, from the activated dev environment
+# (`uv sync --locked --extra dev --extra gui`, which pins pre-commit too):
+#   pre-commit install
+# The local hooks run `python` from PATH, so commit and push with that
+# environment activated.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.9
+    # The ruff version pinned in pyproject.toml's dev extra.
+    rev: v0.17.6
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.52.2
+    hooks:
+      - id: typos
+        # Report only: a rewrite of an accepted word would change test data.
+        args: [--force-exclude]
+        stages: [pre-commit]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
   - repo: local
     hooks:
-      - id: basedpyright
-        name: basedpyright
-        # The dev environment's basedpyright, so it resolves the same installed
-        # packages as CI; it reads its file list from pyproject.toml.
-        entry: basedpyright
+      - id: check-qml
+        name: qmllint (check_qml.py)
+        entry: python scripts/check_qml.py
         language: system
-        types_or: [python, pyi]
+        files: \.qml$
         pass_filenames: false
+      - id: check-qml-format
+        name: qmlformat, no diff (check_qml.py --format)
+        entry: python scripts/check_qml.py --format
+        language: system
+        files: \.qml$
+        pass_filenames: false
+      # The dev environment's basedpyright, so it resolves the same installed
+      # packages as CI; it reads its file list from pyproject.toml.
+      - id: basedpyright
+        name: basedpyright (check.py types)
+        entry: python scripts/check.py types
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: check-test
+        name: pytest and coverage (check.py test)
+        entry: python scripts/check.py test
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
