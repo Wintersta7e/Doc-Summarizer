@@ -20,6 +20,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,12 +29,14 @@ from PySide6.QtGui import QGuiApplication
 from typing_extensions import override
 
 from docsummarizer import cli
-from docsummarizer.settings import settings_path
+from docsummarizer.settings import save_settings, settings_path
 from docsummarizer.ui import app as app_mod
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from types import ModuleType
+
+    from docsummarizer.settings import Settings
 
 _LOG = logging.getLogger(__name__)
 _REPO = Path(__file__).resolve().parents[1]
@@ -41,6 +44,12 @@ _VERSION = importlib.metadata.version("docsummarizer")
 _SMOKE_OK = f"DocSummarizer {_VERSION} smoke ok\n"
 # A fresh interpreter importing PySide6 and loading every screen; seconds, not minutes.
 _SUBPROCESS_TIMEOUT_S = 60
+# A settings file as a user's earlier session left it, in a layout save_settings
+# never writes (one line), so any write-back shows in its bytes.
+_SAVED_SETTINGS = (
+    b'{"n_threads": 6, "use_gpu": true, "appearance": "Dark", "output_language": "German"}'
+)
+_SAVED_MTIME_NS = 1_600_000_000_000_000_000
 
 
 @pytest.fixture
@@ -112,7 +121,54 @@ def test_smoke_test_prints_the_version_and_exits_zero(capsys: pytest.CaptureFixt
     out, err = capsys.readouterr()
     assert out == _SMOKE_OK
     assert err == ""
-    assert settings_path().is_file()
+
+
+def _saved_settings() -> Path:
+    """Write the settings file an earlier session left: compact, non-default and old.
+
+    Returns:
+        The settings file.
+    """
+    path = settings_path()
+    _ = path.write_bytes(_SAVED_SETTINGS)
+    os.utime(path, ns=(_SAVED_MTIME_NS, _SAVED_MTIME_NS))
+    return path
+
+
+def _files_under(root: Path) -> list[str]:
+    return sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+
+
+def _assert_untouched(saved: Path) -> None:
+    """The saved settings file is byte-for-byte and time-for-time what it was, and alone."""
+    assert saved.read_bytes() == _SAVED_SETTINGS
+    assert saved.stat().st_mtime_ns == _SAVED_MTIME_NS
+    assert _files_under(saved.parents[1]) == ["config", "config/settings.json"]
+
+
+@pytest.mark.usefixtures("qapp")
+def test_smoke_test_works_in_a_temp_dir_and_leaves_the_app_data_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    saved = _saved_settings()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    written: list[Path] = []
+
+    def spy(settings: Settings) -> None:
+        written.append(settings_path())
+        save_settings(settings)
+
+    monkeypatch.setattr(app_mod, "save_settings", spy)
+
+    assert app_mod.main(["DocSummarizer", "--smoke-test"]) == 0
+
+    assert capsys.readouterr().out == _SMOKE_OK
+    _assert_untouched(saved)
+    assert len(written) == 1
+    assert written[0].is_relative_to(scratch)
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.usefixtures("qapp")
@@ -196,12 +252,18 @@ def test_smoke_test_fails_without_the_bundled_fonts(
 
 
 def test_run_py_runs_the_smoke_test_in_a_fresh_process(tmp_path: Path) -> None:
+    saved = _saved_settings()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
     env = {
         **os.environ,
         "XDG_DATA_HOME": str(tmp_path),
         "LOCALAPPDATA": str(tmp_path),
         "HOME": str(tmp_path),
         "USERPROFILE": str(tmp_path),
+        "TMPDIR": str(scratch),
+        "TEMP": str(scratch),
+        "TMP": str(scratch),
         "QT_QPA_PLATFORM": "offscreen",
         "QT_QUICK_BACKEND": "software",
     }
@@ -216,6 +278,8 @@ def test_run_py_runs_the_smoke_test_in_a_fresh_process(tmp_path: Path) -> None:
 
     _LOG.info("run.py --smoke-test stderr: %s", done.stderr)
     assert (done.returncode, done.stdout) == (0, _SMOKE_OK)
+    _assert_untouched(saved)
+    assert list(scratch.iterdir()) == []
 
 
 def test_run_py_exits_with_the_status_main_returns(monkeypatch: pytest.MonkeyPatch) -> None:

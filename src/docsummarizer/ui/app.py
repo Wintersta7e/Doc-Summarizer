@@ -6,13 +6,16 @@ context object, and loads ``App/Main.qml``. Run with ``python -m docsummarizer.u
 (a console entry point replaces ``run.py`` when the CustomTkinter GUI is retired).
 ``--smoke-test`` starts everything but the model, prints
 ``DocSummarizer <version> smoke ok`` and exits 0, or names what failed and exits 1.
+It keeps its app data in a temp dir it deletes, never the user's.
 """
 
 from __future__ import annotations
 
 import contextlib
 import importlib
+import logging
 import sys
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -35,6 +38,7 @@ from typing_extensions import override
 
 from docsummarizer import __version__
 from docsummarizer.logger import get_logger, log_error, log_info, log_startup
+from docsummarizer.paths import redirected_app_data
 from docsummarizer.settings import load_settings, save_settings, settings_path
 from docsummarizer.ui.bridge import ConsoleBridge
 from docsummarizer.ui.fonts import register_fonts
@@ -200,7 +204,8 @@ def _import_model_runtime() -> bool:
 def _smoke_steps(app: QGuiApplication) -> None:
     """Start every part of the application but the model; raise on the first that fails.
 
-    The settings file is read and written back with the values read.
+    The settings file is read and written back with the values read; the
+    caller has pointed the app data at a temp dir, so this is never the user's.
     """
     if not register_fonts():
         msg = "no bundled fonts registered"
@@ -267,6 +272,33 @@ def _application(args: list[str]) -> QGuiApplication:
     return app
 
 
+def _smoke_main(args: list[str]) -> int:
+    """Run the smoke test with its app data in a fresh temp dir, deleted afterwards.
+
+    The user's settings, logs and models are never read or written: a settings
+    read that fell back to defaults would otherwise be saved over their file.
+
+    Returns:
+        The smoke test's exit status.
+    """
+    with (
+        tempfile.TemporaryDirectory(prefix="DocSummarizer-smoke-") as tmp,
+        redirected_app_data(Path(tmp)),
+    ):
+        try:
+            log_startup()
+            return smoke_test(_application(args))
+        finally:
+            # Close the run's log file so the directory can be deleted (Windows
+            # refuses to delete an open file). The handler left in its place
+            # keeps a later log call from opening a file in the user's app data.
+            logger = get_logger()
+            for handler in list(logger.handlers):
+                logger.removeHandler(handler)
+                handler.close()
+            logger.addHandler(logging.NullHandler())
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Launch the DocSummarizer console UI, or with ``--smoke-test`` check that it starts.
 
@@ -277,11 +309,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         The process exit status.
     """
     args = list(sys.argv if argv is None else argv)
-    smoke = SMOKE_TEST_FLAG in args
+    if SMOKE_TEST_FLAG in args:
+        return _smoke_main([arg for arg in args if arg != SMOKE_TEST_FLAG])
     log_startup()
-    app = _application([arg for arg in args if arg != SMOKE_TEST_FLAG])
-    if smoke:
-        return smoke_test(app)
+    app = _application(args)
     # Keep the engine referenced for the app's lifetime (GC would tear down the
     # window). bridge is owned by the engine's context but used here too.
     _engine, bridge = create_engine(app)
